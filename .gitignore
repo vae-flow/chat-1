@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# App specific
+config.json
+memory.json
+
+# Flutter / Android / iOS
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+.pub-cache/
+.pub/
+
+# Android
+**/android/.gradle
+**/android/local.properties
+**/android/key.properties
+**/android/app/build/
+**/android/.idea/
+**/android/.navigation/
+**/android/captures/
+
+# VS Code
+.vscode/
