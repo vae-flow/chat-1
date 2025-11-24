@@ -26,6 +26,23 @@ if "%REPO_URL%"=="" (
 )
 
 echo.
+echo [网络设置]
+echo GitHub 在国内访问可能不稳定。如果你开启了 VPN/加速器，建议设置代理。
+echo 常见的代理地址: http://127.0.0.1:7897 (Clash) 或 http://127.0.0.1:10809 (v2ray)
+echo.
+set /p PROXY_URL="请输入代理地址 (直接回车代表不使用代理): "
+
+if not "%PROXY_URL%"=="" (
+    echo 正在设置代理为 %PROXY_URL% ...
+    git config --global http.proxy %PROXY_URL%
+    git config --global https.proxy %PROXY_URL%
+) else (
+    echo 不使用代理，尝试直连...
+    git config --global --unset http.proxy
+    git config --global --unset https.proxy
+)
+
+echo.
 echo [0/5] 配置 Git 用户信息...
 git config user.email "auto@example.com"
 git config user.name "Auto User"
