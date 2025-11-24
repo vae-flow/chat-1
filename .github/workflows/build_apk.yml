@@ -36,6 +36,10 @@ jobs:
     - name: Initialize Android platform
       run: flutter create . --platforms android
 
+    - name: Configure Android Manifest (Permission & HTTP)
+      run: |
+        sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application android:usesCleartextTraffic="true"/g' android/app/src/main/AndroidManifest.xml
+
     - name: Build APK
       run: flutter build apk --release --no-tree-shake-icons
 
