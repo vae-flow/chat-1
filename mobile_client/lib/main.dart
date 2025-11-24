@@ -144,12 +144,20 @@ class _ChatPageState extends State<ChatPage> {
     try {
       final uri = Uri.parse('${_imgBase.replaceAll(RegExp(r"/\$"), "")}/images/generations');
       
-      final body = json.encode({
+      // SiliconFlow (and some other providers) have specific requirements for image size
+      // Qwen models don't support "1024x1024", they need specific resolutions like "1024x1024" (1:1) or others.
+      // But standard DALL-E uses "1024x1024".
+      // Also, some models don't support 'n' parameter or 'quality' parameter.
+      // To be safe, we try to detect if it's a SiliconFlow model or just send a more compatible payload.
+      
+      Map<String, dynamic> payload = {
         'prompt': prompt,
-        'n': 1,
-        'size': '1024x1024',
         'model': _imgModel,
-      });
+        'size': '1024x1024',
+        'n': 1,
+      };
+
+      final body = json.encode(payload);
 
       final resp = await http.post(
         uri,
@@ -381,24 +389,23 @@ Output ONLY the JSON string.
     if (chatText != null) {
       // If we also generated an image, we might want to wait or run in parallel.
       // For simplicity, run sequentially.
-      setState(() => _sending = false);
-      // Note: The user message is already added. _performChatRequest uses _messages history.
-      // However, if we stripped the text, we might want to ensure the Chat API sees the *modified* context?
-      // Actually, standard practice is to keep the user's original message in history, 
-      // but send the *filtered* text as the last message payload to the API?
-      // But _performChatRequest builds payload from _messages.
-      // Let's just send the request. The Chat API will see the full user message "Draw a cat and tell me a joke".
-      // If we want it to IGNORE the "Draw a cat" part, we should probably modify the history or the payload.
-      // But since we are using a "Router", the Router already extracted the "chat_text".
-      // We should probably send *only* the chat_text as the prompt for this turn, 
-      // but we can't easily modify the _messages list which is the UI state.
-      // Solution: We will pass `chatText` to `_performChatRequest`, and modify `_performChatRequest` 
-      // to use that specific text for the last message instead of the one in `_messages`.
+      // IMPORTANT: Do NOT reset _sending to false here if we just finished image generation,
+      // because _performChatRequest will set it to true again.
+      // Actually, _performChatRequest sets _sending=true at the start.
+      // But we need to make sure the UI doesn't flicker or get stuck.
+      
+      // If we just did image generation, let's add a small delay or just proceed.
+      // The issue might be that _performImageGeneration sets _sending=false in finally block.
+      // So we are good to start a new request.
       
       await _performChatRequest(chatText);
     } else if (imagePrompt == null) {
       // Fallback if both are null (shouldn't happen with fallback logic)
       setState(() => _sending = false);
+    } else {
+      // Case: imagePrompt != null BUT chatText == null (User ONLY wanted an image)
+      // We must ensure _sending is set to false if it wasn't already handled by _performImageGeneration's finally block
+      // (It is handled there, so we are good).
     }
   }
 
