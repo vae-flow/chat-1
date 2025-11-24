@@ -41,6 +41,22 @@ class ChatMessage {
   final String? localImagePath; // For sending images
 
   ChatMessage(this.role, this.content, {this.imageUrl, this.localImagePath});
+
+  Map<String, dynamic> toJson() => {
+        'role': role,
+        'content': content,
+        'imageUrl': imageUrl,
+        'localImagePath': localImagePath,
+      };
+
+  factory ChatMessage.fromJson(Map<String, dynamic> json) {
+    return ChatMessage(
+      json['role'],
+      json['content'],
+      imageUrl: json['imageUrl'],
+      localImagePath: json['localImagePath'],
+    );
+  }
 }
 
 class ChatPage extends StatefulWidget {
@@ -81,6 +97,30 @@ class _ChatPageState extends State<ChatPage> {
   void initState() {
     super.initState();
     _loadSettings();
+    _loadChatHistory();
+  }
+
+  Future<void> _loadChatHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String>? history = prefs.getStringList('chat_history');
+    if (history != null) {
+      setState(() {
+        _messages.clear();
+        _messages.addAll(history.map((e) => ChatMessage.fromJson(json.decode(e))));
+      });
+      // Scroll to bottom after loading
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollCtrl.hasClients) {
+          _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+        }
+      });
+    }
+  }
+
+  Future<void> _saveChatHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> history = _messages.map((m) => json.encode(m.toJson())).toList();
+    await prefs.setStringList('chat_history', history);
   }
 
   Future<void> _loadSettings() async {
@@ -138,6 +178,7 @@ class _ChatPageState extends State<ChatPage> {
     setState(() {
       _sending = true;
       _messages.add(ChatMessage('user', '🎨 生图指令: $prompt'));
+      _saveChatHistory();
     });
     _scrollToBottom();
 
@@ -173,6 +214,7 @@ class _ChatPageState extends State<ChatPage> {
         final url = data['data'][0]['url'];
         setState(() {
           _messages.add(ChatMessage('assistant', '图片生成成功', imageUrl: url));
+          _saveChatHistory();
         });
         _scrollToBottom();
       } else {
@@ -256,6 +298,7 @@ class _ChatPageState extends State<ChatPage> {
         final reply = data['choices'][0]['message']['content'] ?? '';
         setState(() {
           _messages.add(ChatMessage('assistant', reply.toString()));
+          _saveChatHistory();
         });
         _scrollToBottom();
       } else {
@@ -290,11 +333,39 @@ class _ChatPageState extends State<ChatPage> {
     final effectiveKey = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerKey : _chatKey;
     final effectiveModel = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerModel : _chatModel;
 
+    // Build Context Memory
+    // We exclude the last message because that is the current 'text' which was just added in _send()
+    final historyCount = _messages.length;
+    final contextMsgs = historyCount > 1 
+        ? _messages.sublist(0, historyCount - 1) 
+        : <ChatMessage>[];
+    
+    // Take last 6 messages for context
+    final recentContext = contextMsgs.length > 6 
+        ? contextMsgs.sublist(contextMsgs.length - 6) 
+        : contextMsgs;
+
+    final contextBuffer = StringBuffer();
+    for (var m in recentContext) {
+      if (m.content.isNotEmpty) {
+         contextBuffer.writeln('${m.role}: ${m.content}');
+      }
+    }
+    final contextString = contextBuffer.toString().trim();
+
+    final routerUserContent = '''
+上下文记忆：
+${contextString.isEmpty ? "无" : contextString}
+
+用户刚刚的表达是：
+$text
+''';
+
     try {
       final uri = Uri.parse('${effectiveBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
       
       final systemPrompt = '''
-You are an intelligent intent classifier. Analyze the user's input.
+You are an intelligent intent classifier. Analyze the user's input considering the context.
 Determine if the user wants to generate/draw/create an image.
 Return a JSON object with exactly two keys:
 1. "image_prompt": If the user wants an image, provide the optimized English prompt here. If not, set to null.
@@ -302,7 +373,7 @@ Return a JSON object with exactly two keys:
 
 Example 1: "Draw a cat" -> {"image_prompt": "A cute cat", "chat_text": null}
 Example 2: "Hello, how are you?" -> {"image_prompt": null, "chat_text": "Hello, how are you?"}
-Example 3: "Draw a dog and tell me a joke about it" -> {"image_prompt": "A dog", "chat_text": "Tell me a joke about a dog"}
+Example 3: "Draw it" (Context: User talking about a dragon) -> {"image_prompt": "A dragon", "chat_text": null}
 
 Output ONLY the JSON string.
 ''';
@@ -311,7 +382,7 @@ Output ONLY the JSON string.
         'model': effectiveModel,
         'messages': [
           {'role': 'system', 'content': systemPrompt},
-          {'role': 'user', 'content': text}
+          {'role': 'user', 'content': routerUserContent}
         ],
         'stream': false,
         'temperature': 0.2, // Low temp for consistent JSON
@@ -359,6 +430,7 @@ Output ONLY the JSON string.
       final localImage = _selectedImage?.path;
       setState(() {
         _messages.add(ChatMessage('user', content, localImagePath: localImage));
+        _saveChatHistory();
         _inputCtrl.clear();
         _selectedImage = null;
       });
@@ -369,6 +441,7 @@ Output ONLY the JSON string.
     // 2. Text Request - Route via Chat API
     setState(() {
       _messages.add(ChatMessage('user', content));
+      _saveChatHistory();
       _inputCtrl.clear();
       _sending = true; // Show loading while analyzing
     });
@@ -454,7 +527,10 @@ Output ONLY the JSON string.
             icon: const Icon(Icons.delete_outline),
             tooltip: '清空对话',
             onPressed: () {
-              setState(() => _messages.clear());
+              setState(() {
+                _messages.clear();
+                _saveChatHistory();
+              });
             },
           ),
           IconButton(
