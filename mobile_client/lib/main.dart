@@ -39,14 +39,16 @@ class ChatMessage {
   final String content;
   final String? imageUrl; // For generated images or received images
   final String? localImagePath; // For sending images
+  final bool isMemory; // New flag to identify memory summary
 
-  ChatMessage(this.role, this.content, {this.imageUrl, this.localImagePath});
+  ChatMessage(this.role, this.content, {this.imageUrl, this.localImagePath, this.isMemory = false});
 
   Map<String, dynamic> toJson() => {
         'role': role,
         'content': content,
         'imageUrl': imageUrl,
         'localImagePath': localImagePath,
+        'isMemory': isMemory,
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
@@ -55,6 +57,7 @@ class ChatMessage {
       json['content'],
       imageUrl: json['imageUrl'],
       localImagePath: json['localImagePath'],
+      isMemory: json['isMemory'] ?? false,
     );
   }
 }
@@ -80,6 +83,7 @@ class _ChatPageState extends State<ChatPage> {
   String _chatBase = 'https://your-oneapi-host/v1';
   String _chatKey = '';
   String _chatModel = 'gpt-3.5-turbo';
+  String _summaryModel = 'gpt-3.5-turbo'; // New: Summary Model Name
   // Image
   String _imgBase = 'https://your-oneapi-host/v1';
   String _imgKey = '';
@@ -161,6 +165,7 @@ class _ChatPageState extends State<ChatPage> {
       _chatBase = prefs.getString('chat_base') ?? 'https://your-oneapi-host/v1';
       _chatKey = prefs.getString('chat_key') ?? '';
       _chatModel = prefs.getString('chat_model') ?? 'gpt-3.5-turbo';
+      _summaryModel = prefs.getString('summary_model') ?? 'gpt-3.5-turbo';
 
       _imgBase = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
       _imgKey = prefs.getString('img_key') ?? '';
@@ -200,18 +205,25 @@ class _ChatPageState extends State<ChatPage> {
     await _performImageGeneration(prompt);
   }
 
-  Future<void> _performImageGeneration(String prompt) async {
+  Future<void> _performImageGeneration(String prompt, {bool addUserMessage = true, bool manageSendingState = true}) async {
     if (_imgBase.contains('your-oneapi-host') || _imgKey.isEmpty) {
       _showError('请先配置生图 API');
       _openSettings();
       return;
     }
 
-    setState(() {
-      _sending = true;
-      _messages.add(ChatMessage('user', '🎨 生图指令: $prompt'));
-      _saveChatHistory();
-    });
+    if (manageSendingState) {
+      setState(() {
+        _sending = true;
+      });
+    }
+    
+    if (addUserMessage) {
+      setState(() {
+        _messages.add(ChatMessage('user', '🎨 生图指令: $prompt'));
+        _saveChatHistory();
+      });
+    }
     _scrollToBottom();
 
     try {
@@ -255,11 +267,13 @@ class _ChatPageState extends State<ChatPage> {
     } catch (e) {
       _showError('生图异常：$e');
     } finally {
-      setState(() => _sending = false);
+      if (manageSendingState) {
+        setState(() => _sending = false);
+      }
     }
   }
 
-  Future<void> _performChatRequest(String content, {String? localImage}) async {
+  Future<void> _performChatRequest(String content, {String? localImage, List<ChatMessage>? historyOverride, bool manageSendingState = true}) async {
     final isVision = localImage != null;
     final apiBase = isVision ? _visionBase : _chatBase;
     final apiKey = isVision ? _visionKey : _chatKey;
@@ -271,13 +285,16 @@ class _ChatPageState extends State<ChatPage> {
       return;
     }
 
-    setState(() {
-      _sending = true;
-      // Only add user message if it wasn't added by the router logic already
-      // But here we assume the caller handles UI message addition if needed.
-      // Actually, let's make this function purely about the API call and response handling.
-      // We will assume the User message is already added to _messages list by the caller.
-    });
+    // Inject Time into System Prompt
+    final now = DateTime.now();
+    final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute}";
+    final timeAwareSystemPrompt = '$_systemPrompt\n\n【当前时间】\n$timeString';
+
+    if (manageSendingState) {
+      setState(() {
+        _sending = true;
+      });
+    }
     _scrollToBottom();
 
     try {
@@ -290,8 +307,14 @@ class _ChatPageState extends State<ChatPage> {
         final base64Image = base64Encode(bytes);
         
         messagesPayload = [
-          {'role': 'system', 'content': _systemPrompt},
-          ..._messages.where((m) => m.localImagePath == null && m.imageUrl == null).map((m) => {'role': m.role, 'content': m.content}),
+          {'role': 'system', 'content': timeAwareSystemPrompt},
+          ..._messages.map((m) {
+            String content = m.content;
+            if (content.isEmpty && (m.imageUrl != null || m.localImagePath != null)) {
+              content = "[图片]";
+            }
+            return {'role': m.role, 'content': content};
+          }).where((m) => m['content'].toString().isNotEmpty),
           {
             'role': 'user',
             'content': [
@@ -307,9 +330,17 @@ class _ChatPageState extends State<ChatPage> {
         ];
       } else {
         // For normal chat, we send the history
+        // Use historyOverride if provided, otherwise use current _messages
+        final historyToUse = historyOverride ?? _messages;
         messagesPayload = [
-          {'role': 'system', 'content': _systemPrompt},
-          ..._messages.map((m) => {'role': m.role, 'content': m.content})
+          {'role': 'system', 'content': timeAwareSystemPrompt},
+          ...historyToUse.map((m) {
+            String content = m.content;
+            if (content.isEmpty && (m.imageUrl != null || m.localImagePath != null)) {
+              content = "[图片]";
+            }
+            return {'role': m.role, 'content': content};
+          }).where((m) => m['content'].toString().isNotEmpty)
         ];
       }
 
@@ -317,6 +348,7 @@ class _ChatPageState extends State<ChatPage> {
         'model': model,
         'messages': messagesPayload,
         'stream': false,
+        'max_tokens': 6000,
       });
 
       final resp = await http.post(
@@ -337,13 +369,149 @@ class _ChatPageState extends State<ChatPage> {
           _saveChatHistory();
         });
         _scrollToBottom();
+        
+        // Trigger Memory Compression Check (Auto check, but respects threshold)
+        _checkAndCompressMemory();
+
       } else {
         _showError('发送失败：${resp.statusCode} ${resp.reasonPhrase}');
       }
     } catch (e) {
       _showError('发送异常：$e');
     } finally {
-      setState(() => _sending = false);
+      if (manageSendingState) {
+        setState(() => _sending = false);
+      }
+    }
+  }
+
+  Future<void> _checkAndCompressMemory({bool manual = false}) async {
+    // Configuration: Trigger compression when messages exceed this count
+    // We use a rough estimate: 1 char ~= 1 token (very rough, but safe for Chinese)
+    // Or just count messages. Let's use message count for simplicity first, 
+    // but user asked for 13K threshold. 
+    // Let's estimate token count.
+    
+    int totalChars = 0;
+    for (var m in _messages) {
+      totalChars += m.content.length;
+    }
+    
+    // Threshold: 20000 chars (approx 20K tokens for English, or 10K for Chinese)
+    // User said "20K threshold", let's assume chars for simplicity or tokens.
+    // Let's use 20000 chars as the trigger point.
+    const int charThreshold = 20000;
+    
+    if (!manual && totalChars < charThreshold) return;
+
+    debugPrint('Triggering memory compression...');
+    
+    // Find existing memory
+    int memoryIndex = _messages.indexWhere((m) => m.isMemory);
+    String currentMemory = memoryIndex != -1 ? _messages[memoryIndex].content : "无";
+
+    // Extract the oldest batch of messages to compress
+    // We want to compress everything EXCEPT the last 10 messages (to keep context fresh)
+    // and the memory message itself.
+    
+    int startIndex = memoryIndex != -1 ? memoryIndex + 1 : 0;
+    int endIndex = _messages.length - 10; // Keep last 10 messages
+    
+    if (endIndex <= startIndex) {
+      if (manual) _showError('消息太少，无需压缩');
+      return;
+    }
+
+    final msgsToCompress = _messages.sublist(startIndex, endIndex);
+    
+    // Convert messages to text format for the summarizer
+    final buffer = StringBuffer();
+    for (var m in msgsToCompress) {
+      String content = m.content;
+      if (m.imageUrl != null || m.localImagePath != null) {
+        content += " [用户发送了一张图片]";
+      }
+      buffer.writeln('${m.role}: $content');
+    }
+    final conversationText = buffer.toString();
+
+    // Call Chat API to summarize
+    try {
+      final uri = Uri.parse('${_chatBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+      
+      final prompt = '''
+你是一个专业的“记忆整理员”。你的任务是维护一份关于用户的【长期记忆档案】。
+
+【当前档案】：
+$currentMemory
+
+【新增对话】：
+$conversationText
+
+【任务要求】：
+请将“新增对话”中的关键信息合并到“当前档案”中。
+请保留以下维度的信息：
+1. **事实 (Fact)**：用户提到的客观事件、任务、知识。
+2. **情绪 (Emotion)**：用户的心情变化、对AI的态度。
+3. **偏好 (Preference)**：用户的习惯、雷点、称呼喜好。
+4. **时间 (Timestamp)**：如果对话中包含明确时间，请记录。
+
+请输出合并后的新档案内容。保持简洁，不要丢失重要细节。不要输出任何解释性文字，只输出档案内容。
+''';
+
+      final body = json.encode({
+        'model': _summaryModel, // Use the configured summary model
+        'messages': [
+          {'role': 'system', 'content': 'You are a helpful memory assistant.'},
+          {'role': 'user', 'content': prompt}
+        ],
+        'stream': false,
+      });
+
+      final resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $_chatKey',
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      );
+
+      if (resp.statusCode == 200) {
+        final decodedBody = utf8.decode(resp.bodyBytes);
+        final data = json.decode(decodedBody);
+        final newMemoryContent = data['choices'][0]['message']['content'] ?? '';
+
+        if (newMemoryContent.isNotEmpty) {
+          setState(() {
+            // 1. Remove the compressed messages
+            _messages.removeRange(startIndex, endIndex);
+            
+            // 2. Update or Insert Memory Message
+            final newMemoryMsg = ChatMessage(
+              'system', 
+              '【长期记忆档案】\n$newMemoryContent', 
+              isMemory: true
+            );
+            
+            if (memoryIndex != -1) {
+              _messages[memoryIndex] = newMemoryMsg;
+            } else {
+              _messages.insert(0, newMemoryMsg);
+            }
+            
+            _saveChatHistory();
+          });
+          if (manual) _showError('记忆压缩成功！');
+          debugPrint('Memory compression successful.');
+        }
+      } else {
+        debugPrint('Memory compression failed: ${resp.statusCode}');
+        if (manual) _showError('压缩失败：${resp.statusCode}，请检查配置');
+      }
+    } catch (e) {
+      debugPrint('Memory compression error: $e');
+      if (manual) _showError('压缩异常：$e');
     }
   }
 
@@ -489,32 +657,35 @@ Output ONLY the JSON string.
     final chatText = intent['chat_text'];
 
     // Dispatch
+    final tasks = <Future>[];
+    
+    // Snapshot current history for chat context to avoid race conditions or pollution by image generation
+    final chatHistorySnapshot = List<ChatMessage>.from(_messages);
+
     if (imagePrompt != null) {
-      // We need to reset _sending because _performImageGeneration sets it too
-      setState(() => _sending = false); 
-      await _performImageGeneration(imagePrompt);
+      // Don't add user message again, as it's already added above
+      // Pass manageSendingState: false to prevent premature UI unlock
+      tasks.add(_performImageGeneration(imagePrompt, addUserMessage: false, manageSendingState: false));
     }
 
     if (chatText != null) {
-      // If we also generated an image, we might want to wait or run in parallel.
-      // For simplicity, run sequentially.
-      // IMPORTANT: Do NOT reset _sending to false here if we just finished image generation,
-      // because _performChatRequest will set it to true again.
-      // Actually, _performChatRequest sets _sending=true at the start.
-      // But we need to make sure the UI doesn't flicker or get stuck.
-      
-      // If we just did image generation, let's add a small delay or just proceed.
-      // The issue might be that _performImageGeneration sets _sending=false in finally block.
-      // So we are good to start a new request.
-      
-      await _performChatRequest(chatText);
+      // Pass manageSendingState: false to prevent premature UI unlock
+      tasks.add(_performChatRequest(chatText, historyOverride: chatHistorySnapshot, manageSendingState: false));
     } else if (imagePrompt == null) {
-      // Fallback if both are null (shouldn't happen with fallback logic)
+      // Fallback if both are null
       setState(() => _sending = false);
+    }
+    
+    if (tasks.isNotEmpty) {
+      await Future.wait(tasks);
+      // Ensure sending is false after all tasks complete
+      if (mounted) {
+        setState(() => _sending = false);
+      }
     } else {
-      // Case: imagePrompt != null BUT chatText == null (User ONLY wanted an image)
-      // We must ensure _sending is set to false if it wasn't already handled by _performImageGeneration's finally block
-      // (It is handled there, so we are good).
+       // Case: imagePrompt != null BUT chatText == null (User ONLY wanted an image)
+       // Handled by tasks.add above.
+       // If we are here, it means both are null (handled by else if) or tasks added.
     }
   }
 
@@ -545,8 +716,19 @@ Output ONLY the JSON string.
     _loadSettings();
   }
 
+  int _calculateTotalChars() {
+    int total = 0;
+    for (var m in _messages) {
+      total += m.content.length;
+    }
+    return total;
+  }
+
   @override
   Widget build(BuildContext context) {
+    final totalChars = _calculateTotalChars();
+    final isMemoryFull = totalChars > 20000;
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -578,6 +760,48 @@ Output ONLY the JSON string.
       ),
       body: Column(
         children: [
+          // Memory Status Bar
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            color: isMemoryFull ? Colors.red[50] : Colors.grey[50],
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.memory, 
+                  size: 14, 
+                  color: isMemoryFull ? Colors.red : Colors.grey
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '记忆容量: $totalChars / 20000',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isMemoryFull ? Colors.red : Colors.grey[600],
+                    fontWeight: isMemoryFull ? FontWeight.bold : FontWeight.normal,
+                  ),
+                ),
+                if (isMemoryFull) ...[
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: _sending ? null : () => _checkAndCompressMemory(manual: true),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Text(
+                        '立即压缩',
+                        style: TextStyle(color: Colors.white, fontSize: 10),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
           Expanded(
             child: _messages.isEmpty
                 ? Center(
@@ -702,7 +926,7 @@ Output ONLY the JSON string.
                     IconButton(
                       icon: const Icon(Icons.palette, color: Colors.purple),
                       onPressed: _sending ? null : _manualGenerateImage,
-                      tooltip: '强制生图 (DALL-E)',
+                      tooltip: '强制生图',
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -754,6 +978,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _chatBaseCtrl = TextEditingController();
   final _chatKeyCtrl = TextEditingController();
   final _chatModelCtrl = TextEditingController();
+  final _summaryModelCtrl = TextEditingController(); // New Controller
   
   // Image
   final _imgBaseCtrl = TextEditingController();
@@ -785,6 +1010,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     _chatBaseCtrl.dispose();
     _chatKeyCtrl.dispose();
     _chatModelCtrl.dispose();
+    _summaryModelCtrl.dispose();
     _imgBaseCtrl.dispose();
     _imgKeyCtrl.dispose();
     _imgModelCtrl.dispose();
@@ -803,6 +1029,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _chatBaseCtrl.text = prefs.getString('chat_base') ?? 'https://your-oneapi-host/v1';
       _chatKeyCtrl.text = prefs.getString('chat_key') ?? '';
       _chatModelCtrl.text = prefs.getString('chat_model') ?? 'gpt-3.5-turbo';
+      _summaryModelCtrl.text = prefs.getString('summary_model') ?? 'gpt-3.5-turbo';
 
       _imgBaseCtrl.text = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
       _imgKeyCtrl.text = prefs.getString('img_key') ?? '';
@@ -824,6 +1051,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('chat_base', _chatBaseCtrl.text.trim());
     await prefs.setString('chat_key', _chatKeyCtrl.text.trim());
     await prefs.setString('chat_model', _chatModelCtrl.text.trim());
+    await prefs.setString('summary_model', _summaryModelCtrl.text.trim());
 
     await prefs.setString('img_base', _imgBaseCtrl.text.trim());
     await prefs.setString('img_key', _imgKeyCtrl.text.trim());
@@ -894,7 +1122,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     }
   }
 
-  Widget _buildConfigTab(String label, TextEditingController base, TextEditingController key, TextEditingController model) {
+  Widget _buildConfigTab(String label, TextEditingController base, TextEditingController key, TextEditingController model, {TextEditingController? summaryModel}) {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -942,6 +1170,31 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             ),
           ],
         ),
+        if (summaryModel != null) ...[
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: summaryModel,
+                  decoration: const InputDecoration(
+                    labelText: '记忆总结模型 (可选)',
+                    border: OutlineInputBorder(),
+                    helperText: '用于压缩长期记忆，建议使用便宜且上下文长的模型',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                onPressed: _loading ? null : () => _fetchModels(base, key, summaryModel),
+                icon: _loading 
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.cloud_download),
+                tooltip: '从服务器获取模型列表',
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -965,7 +1218,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       body: TabBarView(
         controller: _tabController,
         children: [
-          _buildConfigTab('聊天', _chatBaseCtrl, _chatKeyCtrl, _chatModelCtrl),
+          _buildConfigTab('聊天', _chatBaseCtrl, _chatKeyCtrl, _chatModelCtrl, summaryModel: _summaryModelCtrl),
           _buildConfigTab('生图', _imgBaseCtrl, _imgKeyCtrl, _imgModelCtrl),
           _buildConfigTab('识图', _visionBaseCtrl, _visionKeyCtrl, _visionModelCtrl),
           _buildConfigTab('分流 (Router)', _routerBaseCtrl, _routerKeyCtrl, _routerModelCtrl),
