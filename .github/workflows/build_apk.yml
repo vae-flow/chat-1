@@ -36,9 +36,13 @@ jobs:
     - name: Initialize Android platform
       run: flutter create . --platforms android
 
-    - name: Configure Android Manifest (Permission & HTTP)
+    - name: Configure Android Manifest & Gradle
       run: |
-        sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <application android:usesCleartextTraffic="true"/g' android/app/src/main/AndroidManifest.xml
+        # 1. Inject Permissions into AndroidManifest.xml
+        sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"\/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"\/>\n    <application android:usesCleartextTraffic="true"/g' android/app/src/main/AndroidManifest.xml
+        
+        # 2. Force minSdkVersion to 21 (Required by notification plugin)
+        sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
 
     - name: Build APK
       run: flutter build apk --release --no-tree-shake-icons
