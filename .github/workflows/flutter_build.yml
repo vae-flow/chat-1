@@ -31,14 +31,22 @@ jobs:
         run: flutter pub get
 
       - name: Ensure Platform Files Exist
-        # Since the repo might only contain lib/ and pubspec.yaml, we generate the android scaffolding
-        run: flutter create . --platforms android
+        # Generate android scaffolding with a unique ID (com.vae.mobile_client) to allow coexistence
+        run: flutter create . --org com.vae --platforms android
+
+      - name: Update App Name
+        # Change the app label in AndroidManifest.xml to "One-API 助手"
+        run: |
+          sed -i 's/android:label="mobile_client"/android:label="One-API 助手"/g' android/app/src/main/AndroidManifest.xml
 
       - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
 
+      - name: Rename APK
+        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Assistant.apk
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
-          path: mobile_client/build/app/outputs/flutter-apk/app-release.apk
+          name: OneAPI_Assistant_APK
+          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Assistant.apk
