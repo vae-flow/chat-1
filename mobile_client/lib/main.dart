@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Explicitly import services for Clipboard
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
@@ -53,6 +54,268 @@ class Persona {
   }
 }
 
+/// Manages search references and formatting
+class ReferenceManager {
+  
+  Future<List<ReferenceItem>> search(String query) async {
+    final prefs = await SharedPreferences.getInstance();
+    var provider = prefs.getString('search_provider') ?? 'auto';
+    final exaKey = prefs.getString('exa_key') ?? '';
+    final youKey = prefs.getString('you_key') ?? '';
+    final braveKey = prefs.getString('brave_key') ?? '';
+
+    // Auto-select provider based on available keys
+    if (provider == 'auto') {
+      if (exaKey.isNotEmpty) {
+        provider = 'exa';
+      } else if (youKey.isNotEmpty) {
+        provider = 'you';
+      } else if (braveKey.isNotEmpty) {
+        provider = 'brave';
+      } else {
+        // No keys available
+        throw Exception('未配置搜索 API Key。请在设置中配置 Exa, You.com 或 Brave Search 的密钥。');
+      }
+    }
+
+    try {
+      switch (provider) {
+        case 'exa':
+          return _searchExa(query, exaKey);
+        case 'you':
+          return _searchYou(query, youKey);
+        case 'brave':
+          return _searchBrave(query, braveKey);
+        default:
+           throw Exception('未知的搜索提供商: $provider');
+      }
+    } catch (e) {
+      debugPrint('Search error ($provider): $e');
+      // Re-throw to let the UI handle it or show error
+      throw e; 
+    }
+  }
+
+  Future<List<ReferenceItem>> _searchExa(String query, String key) async {
+    if (key.isEmpty) throw Exception('Exa Key not configured');
+    final uri = Uri.parse('https://api.exa.ai/search');
+    final resp = await http.post(
+      uri,
+      headers: {
+        'x-api-key': key,
+        'Content-Type': 'application/json',
+      },
+      body: json.encode({
+        'query': query,
+        'numResults': 3,
+        'useAutoprompt': true,
+        'contents': {'text': true} 
+      }),
+    );
+    
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final results = data['results'] as List;
+      return results.map((r) => ReferenceItem(
+        title: r['title'] ?? 'No Title',
+        url: r['url'] ?? '',
+        snippet: r['text'] != null ? (r['text'] as String).substring(0, (r['text'] as String).length.clamp(0, 300)).replaceAll('\n', ' ') : '',
+        sourceName: 'Exa.ai',
+      )).toList();
+    }
+    throw Exception('Exa API Error: ${resp.statusCode}');
+  }
+
+  Future<List<ReferenceItem>> _searchYou(String query, String key) async {
+    if (key.isEmpty) throw Exception('You.com Key not configured');
+    final uri = Uri.parse('https://api.ydc-index.io/search?query=${Uri.encodeComponent(query)}&num_web_results=3');
+    final resp = await http.get(
+      uri,
+      headers: {'X-API-Key': key},
+    );
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final hits = data['hits'] as List;
+      return hits.map((h) => ReferenceItem(
+        title: h['title'] ?? 'No Title',
+        url: h['url'] ?? '',
+        snippet: (h['snippets'] as List?)?.join(' ') ?? h['description'] ?? '',
+        sourceName: 'You.com',
+      )).toList();
+    }
+    throw Exception('You.com API Error: ${resp.statusCode}');
+  }
+
+  Future<List<ReferenceItem>> _searchBrave(String query, String key) async {
+    if (key.isEmpty) throw Exception('Brave Key not configured');
+    final uri = Uri.parse('https://api.search.brave.com/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=3');
+    final resp = await http.get(
+      uri,
+      headers: {
+        'X-Subscription-Token': key,
+        'Accept': 'application/json',
+      },
+    );
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final results = data['web']['results'] as List;
+      return results.map((r) => ReferenceItem(
+        title: r['title'] ?? 'No Title',
+        url: r['url'] ?? '',
+        snippet: r['description'] ?? '',
+        sourceName: 'Brave',
+      )).toList();
+    }
+    throw Exception('Brave API Error: ${resp.statusCode}');
+  }
+
+  // Format references for LLM context (if needed)
+  String formatForLLM(List<ReferenceItem> refs) {
+    if (refs.isEmpty) return '';
+    final buffer = StringBuffer();
+    buffer.writeln('\n【参考资料 (References)】');
+    for (var i = 0; i < refs.length; i++) {
+      buffer.writeln('${i + 1}. ${refs[i].title} (${refs[i].sourceName})');
+      buffer.writeln('   摘要: ${refs[i].snippet}');
+      buffer.writeln('   链接: ${refs[i].url}');
+    }
+    return buffer.toString();
+  }
+}
+
+enum AgentActionType { answer, search, draw }
+
+class AgentDecision {
+  final AgentActionType type;
+  final String? content; // For answer text or draw prompt
+  final String? query;   // For search query
+  final String? reason;  // The "Thought" - why this decision was made
+  final List<Map<String, dynamic>>? reminders; // Preserved feature
+
+  AgentDecision({
+    required this.type,
+    this.content,
+    this.query,
+    this.reason,
+    this.reminders,
+  });
+
+  factory AgentDecision.fromJson(Map<String, dynamic> json) {
+    final typeStr = json['type'] as String? ?? 'answer';
+    AgentActionType type;
+    switch (typeStr) {
+      case 'search': type = AgentActionType.search; break;
+      case 'draw': type = AgentActionType.draw; break;
+      default: type = AgentActionType.answer;
+    }
+
+    return AgentDecision(
+      type: type,
+      content: json['content'],
+      query: json['query'],
+      reason: json['reason'],
+      reminders: json['reminders'] != null 
+        ? List<Map<String, dynamic>>.from(json['reminders'])
+        : null,
+    );
+  }
+}
+
+/// Helper function to handle Image Generation API calls (Standard & Chat)
+Future<String> fetchImageGenerationUrl({
+  required String prompt,
+  required String baseUrl,
+  required String apiKey,
+  required String model,
+  required bool useChatApi,
+}) async {
+  final cleanBaseUrl = baseUrl.replaceAll(RegExp(r"/\$"), "");
+  
+  if (useChatApi) {
+    // Chat API Logic
+    final uri = Uri.parse('$cleanBaseUrl/chat/completions');
+    final body = json.encode({
+      'model': model,
+      'messages': [
+        {'role': 'user', 'content': prompt}
+      ],
+      'stream': false,
+    });
+
+    final resp = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $apiKey',
+        'Content-Type': 'application/json',
+      },
+      body: body,
+    );
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final content = data['choices'][0]['message']['content'] ?? '';
+      
+      // Extract URL
+      final urlRegExp = RegExp(r'https?://[^\s<>"]+');
+      final match = urlRegExp.firstMatch(content);
+      if (match != null) {
+        String imageUrl = match.group(0)!;
+        // Clean punctuation
+        final punctuation = [')', ']', '}', '.', ',', ';', '?', '!'];
+        while (punctuation.any((p) => imageUrl.endsWith(p))) {
+          imageUrl = imageUrl.substring(0, imageUrl.length - 1);
+        }
+        return imageUrl;
+      } else {
+        throw Exception('未在返回内容中找到图片链接');
+      }
+    } else {
+      throw Exception('Chat API Error: ${resp.statusCode} ${resp.body}');
+    }
+  } else {
+    // Standard Image API Logic
+    final uri = Uri.parse('$cleanBaseUrl/images/generations');
+    final body = json.encode({
+      'prompt': prompt,
+      'model': model,
+      'size': '1024x1024',
+      'n': 1,
+    });
+
+    final resp = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $apiKey',
+        'Content-Type': 'application/json',
+      },
+      body: body,
+    );
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      return data['data'][0]['url'];
+    } else {
+      throw Exception('Image API Error: ${resp.statusCode} ${resp.body}');
+    }
+  }
+}
+
+/// Helper function to download image to local storage
+Future<String> downloadAndSaveImage(String url, {String? prefix}) async {
+  final resp = await http.get(Uri.parse(url));
+  if (resp.statusCode == 200) {
+    final dir = await getApplicationDocumentsDirectory();
+    final fileName = '${prefix ?? "img"}_${DateTime.now().millisecondsSinceEpoch}.png';
+    final file = File('${dir.path}/$fileName');
+    await file.writeAsBytes(resp.bodyBytes);
+    return file.path;
+  } else {
+    throw Exception('Download failed: ${resp.statusCode}');
+  }
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   tz.initializeTimeZones();
@@ -83,14 +346,50 @@ class MyApp extends StatelessWidget {
   }
 }
 
+class ReferenceItem {
+  final String title;
+  final String url;
+  final String snippet;
+  final String sourceName;
+
+  ReferenceItem({
+    required this.title,
+    required this.url,
+    required this.snippet,
+    required this.sourceName,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'title': title,
+        'url': url,
+        'snippet': snippet,
+        'sourceName': sourceName,
+      };
+
+  factory ReferenceItem.fromJson(Map<String, dynamic> json) {
+    return ReferenceItem(
+      title: json['title'] ?? '',
+      url: json['url'] ?? '',
+      snippet: json['snippet'] ?? '',
+      sourceName: json['sourceName'] ?? '',
+    );
+  }
+}
+
 class ChatMessage {
   final String role;
   final String content;
   final String? imageUrl; // For generated images or received images
   final String? localImagePath; // For sending images
   final bool isMemory; // New flag to identify memory summary
+  final List<ReferenceItem>? references; // New field for search references
 
-  ChatMessage(this.role, this.content, {this.imageUrl, this.localImagePath, this.isMemory = false});
+  ChatMessage(this.role, this.content, {
+    this.imageUrl, 
+    this.localImagePath, 
+    this.isMemory = false,
+    this.references,
+  });
 
   Map<String, dynamic> toJson() => {
         'role': role,
@@ -98,6 +397,7 @@ class ChatMessage {
         'imageUrl': imageUrl,
         'localImagePath': localImagePath,
         'isMemory': isMemory,
+        'references': references?.map((e) => e.toJson()).toList(),
       };
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
@@ -107,6 +407,9 @@ class ChatMessage {
       imageUrl: json['imageUrl'],
       localImagePath: json['localImagePath'],
       isMemory: json['isMemory'] ?? false,
+      references: json['references'] != null
+          ? (json['references'] as List).map((e) => ReferenceItem.fromJson(e)).toList()
+          : null,
     );
   }
 }
@@ -123,8 +426,10 @@ class _ChatPageState extends State<ChatPage> {
   final ScrollController _scrollCtrl = ScrollController();
   final ImagePicker _picker = ImagePicker();
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
+  final ReferenceManager _refManager = ReferenceManager();
   
   bool _sending = false;
+  String _loadingStatus = ''; // To show detailed agent status
   final List<ChatMessage> _messages = [];
   XFile? _selectedImage;
 
@@ -138,6 +443,7 @@ class _ChatPageState extends State<ChatPage> {
   String _imgBase = 'https://your-oneapi-host/v1';
   String _imgKey = '';
   String _imgModel = 'dall-e-3';
+  bool _useChatApiForImage = false; // New
   // Vision
   String _visionBase = 'https://your-oneapi-host/v1';
   String _visionKey = '';
@@ -363,6 +669,7 @@ class _ChatPageState extends State<ChatPage> {
       _imgBase = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
       _imgKey = prefs.getString('img_key') ?? '';
       _imgModel = prefs.getString('img_model') ?? 'dall-e-3';
+      _useChatApiForImage = prefs.getBool('use_chat_api_for_image') ?? false;
 
       _visionBase = prefs.getString('vision_base') ?? 'https://your-oneapi-host/v1';
       _visionKey = prefs.getString('vision_key') ?? '';
@@ -420,43 +727,23 @@ class _ChatPageState extends State<ChatPage> {
     _scrollToBottom();
 
     try {
-      final uri = Uri.parse('${_imgBase.replaceAll(RegExp(r"/\$"), "")}/images/generations');
-      
-      // SiliconFlow (and some other providers) have specific requirements for image size
-      // Qwen models don't support "1024x1024", they need specific resolutions like "1024x1024" (1:1) or others.
-      // But standard DALL-E uses "1024x1024".
-      // Also, some models don't support 'n' parameter or 'quality' parameter.
-      // To be safe, we try to detect if it's a SiliconFlow model or just send a more compatible payload.
-      
-      Map<String, dynamic> payload = {
-        'prompt': prompt,
-        'model': _imgModel,
-        'size': '1024x1024',
-        'n': 1,
-      };
-
-      final body = json.encode(payload);
-
-      final resp = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $_imgKey',
-          'Content-Type': 'application/json',
-        },
-        body: body,
+      final imageUrl = await fetchImageGenerationUrl(
+        prompt: prompt,
+        baseUrl: _imgBase,
+        apiKey: _imgKey,
+        model: _imgModel,
+        useChatApi: _useChatApiForImage,
       );
 
-      if (resp.statusCode == 200) {
-        final data = json.decode(utf8.decode(resp.bodyBytes));
-        final url = data['data'][0]['url'];
-        setState(() {
-          _messages.add(ChatMessage('assistant', '图片生成成功', imageUrl: url));
-          _saveChatHistory();
-        });
-        _scrollToBottom();
-      } else {
-        _showError('生图失败：${resp.statusCode} ${resp.body}');
-      }
+      // Download and save locally to prevent URL expiry
+      final localPath = await downloadAndSaveImage(imageUrl, prefix: 'chat_img');
+
+      setState(() {
+        _messages.add(ChatMessage('assistant', '图片生成成功', localImagePath: localPath));
+        _saveChatHistory();
+      });
+      _scrollToBottom();
+
     } catch (e) {
       _showError('生图异常：$e');
     } finally {
@@ -466,7 +753,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  Future<void> _performChatRequest(String content, {String? localImage, List<ChatMessage>? historyOverride, bool manageSendingState = true}) async {
+  Future<void> _performChatRequest(String content, {String? localImage, List<ChatMessage>? historyOverride, bool manageSendingState = true, List<ReferenceItem>? references}) async {
     final isVision = localImage != null;
     final apiBase = isVision ? _visionBase : _chatBase;
     final apiKey = isVision ? _visionKey : _chatKey;
@@ -482,18 +769,25 @@ class _ChatPageState extends State<ChatPage> {
     final now = DateTime.now();
     final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute}";
     
-    // Combine Global Rules + Active Persona Prompt + Time + Global Memory
+    // Format References
+    final refString = references != null ? _refManager.formatForLLM(references) : '';
+
+    // Combine Global Rules + Active Persona Prompt + Time + Global Memory + References
     final timeAwareSystemPrompt = '''
 $kGlobalHumanRules
 
 【长期记忆档案】
 ${_globalMemoryCache.isEmpty ? "暂无" : _globalMemoryCache}
 
-【当前人格设定】
+【当前人格设定 (最高优先级)】
+请完全沉浸在以下角色中。你的所有回答、语气、思考方式必须严格遵循此设定。
+如果全局指令与此设定冲突，以【当前人格设定】为准。
 ${_activePersona.prompt}
 
 【当前时间】
 $timeString
+
+$refString
 ''';
 
     if (manageSendingState) {
@@ -571,7 +865,11 @@ $timeString
         final data = json.decode(decodedBody);
         final reply = data['choices'][0]['message']['content'] ?? '';
         setState(() {
-          _messages.add(ChatMessage('assistant', reply.toString()));
+          _messages.add(ChatMessage(
+            'assistant', 
+            reply.toString(),
+            references: references, // Pass references to UI
+          ));
           _saveChatHistory();
         });
         _scrollToBottom();
@@ -631,7 +929,8 @@ $timeString
       if (m.imageUrl != null || m.localImagePath != null) {
         content += " [用户发送了一张图片]";
       }
-      buffer.writeln('${m.role}: $content');
+      final roleName = m.role == 'user' ? '用户' : _activePersona.name;
+      buffer.writeln('$roleName: $content');
     }
     final conversationText = buffer.toString();
 
@@ -751,108 +1050,120 @@ $_globalMemoryCache
     }
   }
 
-  Future<Map<String, String?>> _analyzeIntent(String text) async {
-    // Use Router config, fallback to Chat config if Router not set (optional, but better to be explicit)
-    // Here we assume if router key is empty, we might want to skip or use chat key? 
-    // Let's enforce Router config for "Intelligent Routing".
-    if (_routerBase.contains('your-oneapi-host') || _routerKey.isEmpty) {
-      // If Router is not configured, maybe fallback to Chat config?
-      // Or just return default chat intent.
-      // Let's try to use Chat config as fallback if Router is missing, 
-      // but the user specifically asked for a separate device.
-      // If both are missing, we can't do anything.
-      if (_chatKey.isNotEmpty && !_chatBase.contains('your-oneapi-host')) {
-         // Fallback to chat config for routing if router is not set
-         // This is a "soft" fallback.
-      } else {
-         return {'chat_text': text, 'image_prompt': null};
-      }
-    }
-
+  Future<AgentDecision> _planAgentStep(String userText, List<ReferenceItem> sessionRefs) async {
+    // Use Router config for planning
     final effectiveBase = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerBase : _chatBase;
     final effectiveKey = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerKey : _chatKey;
     final effectiveModel = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerModel : _chatModel;
 
-    // Build Context Memory
-    // We exclude the last message because that is the current 'text' which was just added in _send()
-    final historyCount = _messages.length;
-    final contextMsgs = historyCount > 1 
-        ? _messages.sublist(0, historyCount - 1) 
-        : <ChatMessage>[];
+    // 1. Prepare Context
+    final memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
     
-    // Extract Global Memory explicitly
-    // Use the cache directly
-    final memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "无";
-
-    // Take last 6 messages for recent context (excluding the memory message itself if it was in the list)
-    final recentMsgs = contextMsgs.where((m) => !m.isMemory).toList();
-    final recentContext = recentMsgs.length > 6 
-        ? recentMsgs.sublist(recentMsgs.length - 6) 
-        : recentMsgs;
-
-    final contextBuffer = StringBuffer();
-    for (var m in recentContext) {
-      if (m.content.isNotEmpty) {
-         contextBuffer.writeln('${m.role}: ${m.content}');
+    // Format existing references (The "Observations" so far)
+    final refsBuffer = StringBuffer();
+    if (sessionRefs.isNotEmpty) {
+      refsBuffer.writeln('【Current Gathered Information (Observations)】');
+      for (var i = 0; i < sessionRefs.length; i++) {
+        // Strategy: Truncate snippets to prevent Context Window Overflow during reasoning.
+        // The "Brain" only needs the gist to decide the next step.
+        String snippet = sessionRefs[i].snippet;
+        if (snippet.length > 150) {
+          snippet = '${snippet.substring(0, 150)}...';
+        }
+        refsBuffer.writeln('${i + 1}. ${sessionRefs[i].title}: $snippet');
       }
+    } else {
+      refsBuffer.writeln('【Current Gathered Information】\nNone yet.');
     }
-    final contextString = contextBuffer.toString().trim();
 
-    final routerUserContent = '''
-【当前人格设定 (Current Persona)】
+    // Get recent history (last 6 messages)
+    final historyCount = _messages.length;
+    final contextMsgs = historyCount > 0 
+        ? _messages.sublist((historyCount - 6).clamp(0, historyCount)) 
+        : <ChatMessage>[];
+        
+    final contextBuffer = StringBuffer();
+    for (var m in contextMsgs) {
+      final roleName = m.role == 'user' ? '用户' : _activePersona.name;
+      contextBuffer.writeln('$roleName: ${m.content}');
+    }
+
+    // 2. Construct System Prompt
+    final systemPrompt = '''
+You are the "Brain" of an autonomous agent. 
+Your goal is to iteratively use tools to satisfy the User's Request.
+
+【CRITICAL: Persona Alignment】
+You are NOT a generic AI. You ARE the character defined below. 
+Your planning strategy, curiosity level, and willingness to search must ALL stem from this personality.
+If the persona is lazy, do not search unless necessary. If the persona is rigorous, search multiple times.
+If the persona is creative, prefer drawing or creative answers.
+
+【Current Persona】
 ${_activePersona.prompt}
 
-【长期记忆 (Global Memory)】
+【Resources】
+1. [Global Memory]: Long-term user facts.
+2. [Conversation History]: Recent chat context.
+3. [Current Gathered Information]: Information you have ALREADY found in previous steps of this session.
+
+【Decision Logic (The Loop)】
+Analyze the [User Input] and [Current Gathered Information].
+Ask yourself: "Do I have enough information to fully answer the user's request?"
+
+1. **SEARCH (search)**: 
+   - Choose this if information is MISSING or INCOMPLETE.
+   - If the user asks for "Recursive Parsing" or "Deep Analysis", and you only have a summary, SEARCH AGAIN for specific details/concepts mentioned in the summary.
+   - You can search multiple times in a row to dig deeper.
+
+2. **DRAW (draw)**:
+   - Choose this ONLY if the user explicitly asks to generate/draw/create an image.
+
+3. **ANSWER (answer)**:
+   - Choose this ONLY when [Current Gathered Information] is sufficient to construct a comprehensive answer.
+   - OR if the user's request is casual/logical and needs no external info.
+   - OR if you have searched enough times (e.g. 3 times) and should stop.
+
+4. **REMINDERS (Side Task)**:
+   - If the user mentions future tasks/events, ALWAYS extract them into the "reminders" list in the JSON.
+   - This is independent of the main action (search/draw/answer).
+
+【Output Format】
+Return a JSON object (no markdown):
+{
+  "type": "search" | "draw" | "answer",
+  "reason": "Critical: Explain WHY you think current info is insufficient (for search) or sufficient (for answer).",
+  "query": "Search query (ONLY for 'search')",
+  "content": "Image prompt (for 'draw') OR Direct response text (for 'answer')",
+  "reminders": [
+     {"time": "YYYY-MM-DDTHH:mm:ss", "message": "Reminder message in Persona's voice"}
+  ]
+}
+''';
+
+    final userPrompt = '''
+【Global Memory】
 $memoryContent
 
-【近期对话上下文 (Recent Context)】
-${contextString.isEmpty ? "无 (None)" : contextString}
-【上下文结束】
+【History】
+$contextBuffer
 
-【当前时间】
-${DateTime.now().toString()}
+$refsBuffer
 
-【用户当前指令 (Current Input)】
-$text
-【指令结束】
+【User Input】
+$userText
 ''';
 
     try {
       final uri = Uri.parse('${effectiveBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
-      
-      final systemPrompt = '''
-You are an intelligent intent classifier and scheduler. 
-Analyze the [Current Input] based on the provided [Context], [Current Persona] and [Current Time].
-
-Your task is to determine the user's intent and split it into three components:
-1. "image_prompt": If the user wants to generate an image, provide a descriptive English prompt. If no image is requested, set to null.
-2. "chat_text": If the user wants to chat or asks a question, provide that text. If the user ONLY wants an image, set to null.
-3. "reminders": If the user mentions any future tasks, events, or deadlines, extract them into a list. 
-   Each reminder object must have:
-   - "time": The absolute ISO 8601 timestamp (YYYY-MM-DDTHH:mm:ss) for when the reminder should trigger. Infer the year/date from [Current Time] if relative (e.g. "next Friday").
-   - "message": A short reminder message written STRICTLY in the [Current Persona]'s voice and tone. Use the persona's catchphrases, attitude, and style defined in [Current Persona].
-
-Return a JSON object with exactly these keys. Do NOT use Markdown code blocks (like ```json). Just return the raw JSON string.
-
-Example 1: "Draw a cat" -> {"image_prompt": "A cute cat", "chat_text": null, "reminders": []}
-Example 2: "Remind me to buy milk tomorrow at 9am" (Assume now is 2023-10-27) -> 
-{
-  "image_prompt": null, 
-  "chat_text": "Okay, I'll remind you to buy milk tomorrow.", 
-  "reminders": [{"time": "2023-10-28T09:00:00", "message": "Master, time to buy milk!"}]
-}
-
-Output ONLY the JSON string.
-''';
-
       final body = json.encode({
         'model': effectiveModel,
         'messages': [
           {'role': 'system', 'content': systemPrompt},
-          {'role': 'user', 'content': routerUserContent}
+          {'role': 'user', 'content': userPrompt}
         ],
         'stream': false,
-        'temperature': 0.2, // Low temp for consistent JSON
+        'temperature': 0.1, // Low temp for precise decision
       });
 
       final resp = await http.post(
@@ -869,42 +1180,23 @@ Output ONLY the JSON string.
         final data = json.decode(decodedBody);
         String content = data['choices'][0]['message']['content'] ?? '';
         
-        // Try to find JSON in the content (in case model adds extra text)
+        // Extract JSON
         final jsonStart = content.indexOf('{');
         final jsonEnd = content.lastIndexOf('}');
-        if (jsonStart != -1 && jsonEnd != -1) {
-          content = content.substring(jsonStart, jsonEnd + 1);
-          final jsonContent = json.decode(content);
-
-          // Handle Reminders
-          if (jsonContent.containsKey('reminders') && jsonContent['reminders'] is List) {
-            final reminders = jsonContent['reminders'] as List;
-            for (var r in reminders) {
-              if (r['time'] != null && r['message'] != null) {
-                try {
-                  final time = DateTime.parse(r['time']);
-                  if (time.isAfter(DateTime.now())) {
-                    _scheduleReminder(_activePersona.name, r['message'], time);
-                  }
-                } catch (e) {
-                  debugPrint('Error parsing reminder time: $e');
-                }
-              }
-            }
-          }
-
-          return {
-            'image_prompt': jsonContent['image_prompt'],
-            'chat_text': jsonContent['chat_text'],
-          };
+        if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
+          final jsonStr = content.substring(jsonStart, jsonEnd + 1);
+          return AgentDecision.fromJson(json.decode(jsonStr));
         }
       }
     } catch (e) {
-      debugPrint('Intent analysis failed: $e');
+      debugPrint('Agent planning failed: $e');
     }
+    
     // Fallback
-    return {'chat_text': text, 'image_prompt': null};
+    return AgentDecision(type: AgentActionType.answer, reason: "Fallback due to error");
   }
+
+  // _analyzeIntent removed as it is superseded by _planAgentStep and the Agent Loop.
 
   Future<void> _send() async {
     final content = _inputCtrl.text.trim();
@@ -923,59 +1215,92 @@ Output ONLY the JSON string.
       return;
     }
 
-    // 2. Text Request - Route via Chat API
+    // 2. Text Request - Enter Agent Loop
     setState(() {
       _messages.add(ChatMessage('user', content));
       _saveChatHistory();
       _inputCtrl.clear();
-      _sending = true; // Show loading while analyzing
+      _sending = true; 
+      _loadingStatus = '正在思考...';
     });
     _scrollToBottom();
 
-    // Analyze Intent
-    final intent = await _analyzeIntent(content);
-    final imagePrompt = intent['image_prompt'];
-    final chatText = intent['chat_text'];
+    // --- Agent Execution Loop ---
+    List<ReferenceItem> sessionRefs = [];
+    int steps = 0;
+    const int maxSteps = 3; // Prevent infinite loops
 
-    // Dispatch
-    final tasks = <Future>[];
-    
-    // Snapshot current history for chat context to avoid race conditions or pollution by image generation
-    final chatHistorySnapshot = List<ChatMessage>.from(_messages);
+    try {
+      while (steps < maxSteps) {
+        // A. Think (Plan Step)
+        setState(() => _loadingStatus = '正在规划下一步 (Step ${steps + 1})...');
+        final decision = await _planAgentStep(content, sessionRefs);
+        
+        // Handle Reminders (Side Effect)
+        if (decision.reminders != null) {
+          for (var r in decision.reminders!) {
+            if (r['time'] != null && r['message'] != null) {
+              try {
+                final time = DateTime.parse(r['time']);
+                if (time.isAfter(DateTime.now())) {
+                  _scheduleReminder(_activePersona.name, r['message'], time);
+                }
+              } catch (e) {
+                debugPrint('Error parsing reminder time: $e');
+              }
+            }
+          }
+        }
 
-    if (imagePrompt != null) {
-      // Don't add user message again, as it's already added above
-      // Pass manageSendingState: false to prevent premature UI unlock
-      tasks.add(_performImageGeneration(imagePrompt, addUserMessage: false, manageSendingState: false));
-    }
-
-    if (chatText != null) {
-      // Prepare history for chat: Replace the last user message (which contains the full mixed intent)
-      // with the refined chat text (which only contains the chat part).
-      // This helps the LLM focus on the chat task without being confused by the image generation request.
-      final historyForChat = List<ChatMessage>.from(chatHistorySnapshot);
-      if (historyForChat.isNotEmpty && historyForChat.last.role == 'user') {
-        historyForChat.removeLast();
-        historyForChat.add(ChatMessage('user', chatText));
+        // B. Act (Execute Decision)
+        if (decision.type == AgentActionType.search && decision.query != null) {
+          // Action: Search
+          setState(() => _loadingStatus = '正在搜索: ${decision.query}...');
+          debugPrint('Agent searching for: ${decision.query}');
+          
+          final newRefs = await _refManager.search(decision.query!);
+          if (newRefs.isNotEmpty) {
+            sessionRefs.addAll(newRefs);
+            // Continue loop to re-evaluate with new info
+          } else {
+            // Search failed or returned nothing, force answer to avoid loop
+            debugPrint('Search returned no results. Forcing answer.');
+            setState(() => _loadingStatus = '搜索无结果，正在生成回答...');
+            await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
+            break;
+          }
+        } 
+        else if (decision.type == AgentActionType.draw && decision.content != null) {
+          // Action: Draw
+          setState(() => _loadingStatus = '正在生成图片...');
+          await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
+          break; // Drawing is a terminal action
+        } 
+        else {
+          // Action: Answer (or fallback)
+          setState(() => _loadingStatus = '正在撰写回复...');
+          await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
+          break; // Answer is a terminal action
+        }
+        
+        steps++;
+      }
+      
+      if (steps >= maxSteps) {
+        // Fallback if max steps reached
+        setState(() => _loadingStatus = '思考步骤过多，正在强制回复...');
+        await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
       }
 
-      // Pass manageSendingState: false to prevent premature UI unlock
-      tasks.add(_performChatRequest(chatText, historyOverride: historyForChat, manageSendingState: false));
-    } else if (imagePrompt == null) {
-      // Fallback if both are null
-      setState(() => _sending = false);
-    }
-    
-    if (tasks.isNotEmpty) {
-      await Future.wait(tasks);
-      // Ensure sending is false after all tasks complete
+    } catch (e) {
+      _showError('Agent Error: $e');
+    } finally {
       if (mounted) {
-        setState(() => _sending = false);
+        setState(() {
+          _sending = false;
+          _loadingStatus = '';
+        });
       }
-    } else {
-       // Case: imagePrompt != null BUT chatText == null (User ONLY wanted an image)
-       // Handled by tasks.add above.
-       // If we are here, it means both are null (handled by else if) or tasks added.
     }
   }
 
@@ -1241,6 +1566,64 @@ Output ONLY the JSON string.
                                     fontSize: 16,
                                   ),
                                 ),
+                              if (m.references != null && m.references!.isNotEmpty)
+                                Theme(
+                                  data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                                  child: ExpansionTile(
+                                    tilePadding: EdgeInsets.zero,
+                                    childrenPadding: EdgeInsets.zero,
+                                    iconColor: isUser ? Colors.white70 : Colors.grey[700],
+                                    collapsedIconColor: isUser ? Colors.white70 : Colors.grey[700],
+                                    title: Text(
+                                      '📚 参考资料 (${m.references!.length})',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: isUser ? Colors.white70 : Colors.grey[700],
+                                      ),
+                                    ),
+                                    children: m.references!.map((ref) => ListTile(
+                                      dense: true,
+                                      contentPadding: const EdgeInsets.only(left: 8),
+                                      visualDensity: VisualDensity.compact,
+                                      title: Text(
+                                        ref.title,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: isUser ? Colors.white : Colors.black87,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        ref.snippet,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          color: isUser ? Colors.white70 : Colors.grey[600],
+                                        ),
+                                      ),
+                                      onTap: () {
+                                        if (ref.url.isNotEmpty) {
+                                          // Copy URL to clipboard
+                                          // Note: Requires 'import \'package:flutter/services.dart\';'
+                                          // Since we can't easily add imports at the top without reading the whole file,
+                                          // we assume it's available or we use a workaround if possible.
+                                          // Actually, Clipboard is in 'services.dart' which is exported by 'material.dart'? 
+                                          // No, it's in 'services.dart'. 'material.dart' exports 'widgets.dart' which exports 'services.dart'?
+                                          // Let's check. 'flutter/material.dart' exports 'flutter/services.dart'. Yes.
+                                          Clipboard.setData(ClipboardData(text: ref.url));
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(
+                                              content: Text('链接已复制: ${ref.url}'),
+                                              duration: const Duration(seconds: 2),
+                                            ),
+                                          );
+                                        }
+                                      },
+                                    )).toList(),
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -1249,9 +1632,21 @@ Output ONLY the JSON string.
                   ),
           ),
           if (_sending)
-            const Padding(
-              padding: EdgeInsets.all(8.0),
-              child: LinearProgressIndicator(),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Column(
+                children: [
+                  if (_loadingStatus.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4.0),
+                      child: Text(
+                        _loadingStatus,
+                        style: TextStyle(fontSize: 12, color: Colors.blue[700], fontStyle: FontStyle.italic),
+                      ),
+                    ),
+                  const LinearProgressIndicator(),
+                ],
+              ),
             ),
           Container(
             padding: const EdgeInsets.all(16),
@@ -1353,6 +1748,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _imgBaseCtrl = TextEditingController();
   final _imgKeyCtrl = TextEditingController();
   final _imgModelCtrl = TextEditingController();
+  bool _useChatApiForImage = false; // New: Toggle for Chat API Image Generation
 
   // Vision
   final _visionBaseCtrl = TextEditingController();
@@ -1364,6 +1760,12 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _routerKeyCtrl = TextEditingController();
   final _routerModelCtrl = TextEditingController();
 
+  // Search
+  final _exaKeyCtrl = TextEditingController();
+  final _youKeyCtrl = TextEditingController();
+  final _braveKeyCtrl = TextEditingController();
+  String _searchProvider = 'mock';
+
   // Global Memory Editor
   final _globalMemoryCtrl = TextEditingController();
   String _initialGlobalMemory = '';
@@ -1373,7 +1775,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 5, vsync: this); // Increased tab count
+    _tabController = TabController(length: 6, vsync: this); // Increased tab count
     _load();
   }
 
@@ -1393,6 +1795,9 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     _routerBaseCtrl.dispose();
     _routerKeyCtrl.dispose();
     _routerModelCtrl.dispose();
+    _exaKeyCtrl.dispose();
+    _youKeyCtrl.dispose();
+    _braveKeyCtrl.dispose();
     _globalMemoryCtrl.dispose();
     super.dispose();
   }
@@ -1408,6 +1813,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _imgBaseCtrl.text = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
       _imgKeyCtrl.text = prefs.getString('img_key') ?? '';
       _imgModelCtrl.text = prefs.getString('img_model') ?? 'dall-e-3';
+      _useChatApiForImage = prefs.getBool('use_chat_api_for_image') ?? false;
 
       _visionBaseCtrl.text = prefs.getString('vision_base') ?? 'https://your-oneapi-host/v1';
       _visionKeyCtrl.text = prefs.getString('vision_key') ?? '';
@@ -1417,6 +1823,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _routerKeyCtrl.text = prefs.getString('router_key') ?? '';
       _routerModelCtrl.text = prefs.getString('router_model') ?? 'gpt-3.5-turbo';
       
+      _exaKeyCtrl.text = prefs.getString('exa_key') ?? '';
+      _youKeyCtrl.text = prefs.getString('you_key') ?? '';
+      _braveKeyCtrl.text = prefs.getString('brave_key') ?? '';
+      _searchProvider = prefs.getString('search_provider') ?? 'auto';
+
       _initialGlobalMemory = prefs.getString('global_memory') ?? '';
       _globalMemoryCtrl.text = _initialGlobalMemory;
     });
@@ -1433,6 +1844,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('img_base', _imgBaseCtrl.text.trim());
     await prefs.setString('img_key', _imgKeyCtrl.text.trim());
     await prefs.setString('img_model', _imgModelCtrl.text.trim());
+    await prefs.setBool('use_chat_api_for_image', _useChatApiForImage);
 
     await prefs.setString('vision_base', _visionBaseCtrl.text.trim());
     await prefs.setString('vision_key', _visionKeyCtrl.text.trim());
@@ -1441,6 +1853,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('router_base', _routerBaseCtrl.text.trim());
     await prefs.setString('router_key', _routerKeyCtrl.text.trim());
     await prefs.setString('router_model', _routerModelCtrl.text.trim());
+
+    await prefs.setString('exa_key', _exaKeyCtrl.text.trim());
+    await prefs.setString('you_key', _youKeyCtrl.text.trim());
+    await prefs.setString('brave_key', _braveKeyCtrl.text.trim());
+    await prefs.setString('search_provider', _searchProvider);
 
     // Save Global Memory Manually Edited
     if (_globalMemoryCtrl.text != _initialGlobalMemory) {
@@ -1505,6 +1922,8 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   }
 
   Widget _buildConfigTab(String label, TextEditingController base, TextEditingController key, TextEditingController model, {TextEditingController? summaryModel}) {
+    final isImageTab = label == '生图';
+    
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -1552,6 +1971,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             ),
           ],
         ),
+        if (isImageTab) ...[
+          const SizedBox(height: 16),
+          SwitchListTile(
+            title: const Text('使用 Chat API 生图'),
+            subtitle: const Text('开启后将使用 /v1/chat/completions 接口，并从返回内容中提取图片 URL。适用于某些兼容 OpenAI 格式的生图服务。'),
+            value: _useChatApiForImage,
+            onChanged: (val) => setState(() => _useChatApiForImage = val),
+          ),
+        ],
         if (summaryModel != null) ...[
           const SizedBox(height: 16),
           Row(
@@ -1577,6 +2005,74 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             ],
           ),
         ],
+      ],
+    );
+  }
+
+  Widget _buildSearchTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('搜索 API 配置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        const Text('配置搜索服务的 API Key。如果选择“自动选择”，系统将按顺序使用已配置的密钥 (Exa > You > Brave)。', style: TextStyle(color: Colors.grey)),
+        const SizedBox(height: 16),
+        
+        DropdownButtonFormField<String>(
+          value: _searchProvider,
+          decoration: const InputDecoration(
+            labelText: '首选搜索引擎',
+            border: OutlineInputBorder(),
+          ),
+          items: const [
+            DropdownMenuItem(value: 'auto', child: Text('自动选择 (Auto)')),
+            DropdownMenuItem(value: 'exa', child: Text('Exa.ai (深度/学术)')),
+            DropdownMenuItem(value: 'you', child: Text('You.com (综合/RAG)')),
+            DropdownMenuItem(value: 'brave', child: Text('Brave Search (隐私)')),
+          ],
+          onChanged: (val) {
+            if (val != null) setState(() => _searchProvider = val);
+          },
+        ),
+        const SizedBox(height: 24),
+
+        const Text('Exa.ai Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _exaKeyCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Exa API Key',
+            border: OutlineInputBorder(),
+            helperText: 'Get from dashboard.exa.ai',
+          ),
+          obscureText: true,
+        ),
+        const SizedBox(height: 16),
+
+        const Text('You.com Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _youKeyCtrl,
+          decoration: const InputDecoration(
+            labelText: 'You.com API Key',
+            border: OutlineInputBorder(),
+            helperText: 'Get from api.you.com',
+          ),
+          obscureText: true,
+        ),
+        const SizedBox(height: 16),
+
+        const Text('Brave Search Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _braveKeyCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Brave API Key',
+            border: OutlineInputBorder(),
+            helperText: 'Get from brave.com/search/api',
+          ),
+          obscureText: true,
+        ),
       ],
     );
   }
@@ -1617,6 +2113,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             Tab(text: '生图', icon: Icon(Icons.palette)),
             Tab(text: '识图', icon: Icon(Icons.image)),
             Tab(text: '分流', icon: Icon(Icons.alt_route)),
+            Tab(text: '搜索', icon: Icon(Icons.search)),
             Tab(text: '记忆', icon: Icon(Icons.memory)),
           ],
         ),
@@ -1628,6 +2125,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
           _buildConfigTab('生图', _imgBaseCtrl, _imgKeyCtrl, _imgModelCtrl),
           _buildConfigTab('识图', _visionBaseCtrl, _visionKeyCtrl, _visionModelCtrl),
           _buildConfigTab('分流 (Router)', _routerBaseCtrl, _routerKeyCtrl, _routerModelCtrl),
+          _buildSearchTab(),
           _buildMemoryTab(),
         ],
       ),
@@ -1771,6 +2269,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
   String _imgBase = '';
   String _imgKey = '';
   String _imgModel = '';
+  bool _useChatApiForImage = false;
 
   @override
   void initState() {
@@ -1790,6 +2289,7 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
       _imgBase = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
       _imgKey = prefs.getString('img_key') ?? '';
       _imgModel = prefs.getString('img_model') ?? 'dall-e-3';
+      _useChatApiForImage = prefs.getBool('use_chat_api_for_image') ?? false;
     });
   }
 
@@ -1827,48 +2327,24 @@ class _PersonaEditorPageState extends State<PersonaEditorPage> {
 
       final prompt = "A portrait of ${_nameCtrl.text}. Description: ${_descCtrl.text}. Appearance details: $detailedPrompt. Avatar style, high quality, illustration, solo, facing camera, detailed face";
       
-      // 使用与主界面一致的 URL 处理逻辑
-      final uri = Uri.parse('${_imgBase.replaceAll(RegExp(r"/\$"), "")}/images/generations');
-      
-      final body = json.encode({
-        'prompt': prompt,
-        'model': _imgModel,
-        'size': '1024x1024',
-        'n': 1,
-      });
-
-      final resp = await http.post(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $_imgKey',
-          'Content-Type': 'application/json',
-        },
-        body: body,
+      final imageUrl = await fetchImageGenerationUrl(
+        prompt: prompt,
+        baseUrl: _imgBase,
+        apiKey: _imgKey,
+        model: _imgModel,
+        useChatApi: _useChatApiForImage,
       );
 
-      if (resp.statusCode == 200) {
-        final data = json.decode(utf8.decode(resp.bodyBytes));
-        final url = data['data'][0]['url'];
-        
-        // Download image
-        final imageResp = await http.get(Uri.parse(url));
-        if (imageResp.statusCode == 200) {
-          final dir = await getApplicationDocumentsDirectory();
-          final fileName = 'avatar_${DateTime.now().millisecondsSinceEpoch}.png';
-          final file = File('${dir.path}/$fileName');
-          await file.writeAsBytes(imageResp.bodyBytes);
-          
-          setState(() {
-            _avatarPath = file.path;
-          });
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('头像生成成功')),
-            );
-          }
-        }
-      } else {
-        throw Exception('API Error: ${resp.statusCode} ${resp.body}');
+      // Download image
+      final localPath = await downloadAndSaveImage(imageUrl, prefix: 'avatar');
+      
+      setState(() {
+        _avatarPath = localPath;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('头像生成成功')),
+        );
       }
     } catch (e) {
       if (mounted) {
