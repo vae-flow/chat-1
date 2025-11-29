@@ -1,4 +1,4 @@
-name: Build Android App
+name: Build Android APK
 
 on:
   push:
@@ -30,27 +30,71 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Ensure Platform Files Exist
+      - name: Create Android Platform Files
         run: flutter create . --org com.vae --platforms android
 
-      - name: Configure Android Manifest (Permissions & Label)
+      - name: Configure Android Project (Python Script)
         run: |
-          # 1. Add Permissions before <application> tag
-          sed -i 's|<application| <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <application|g' android/app/src/main/AndroidManifest.xml
+          cat <<EOF > update_config.py
+          import os
+
+          # 1. Update AndroidManifest.xml
+          manifest_path = 'android/app/src/main/AndroidManifest.xml'
+          if os.path.exists(manifest_path):
+              with open(manifest_path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+
+              permissions = '''
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
+              '''
+
+              if '<application' in content:
+                  # Inject permissions
+                  content = content.replace('<application', permissions + '\\n    <application')
+                  # Add cleartext traffic
+                  content = content.replace('<application', '<application android:usesCleartextTraffic="true"')
+                  # Update label if it exists directly
+                  content = content.replace('android:label="mobile_client"', 'android:label="One-API 助手"')
+              
+              with open(manifest_path, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              print("Updated AndroidManifest.xml")
+
+          # 2. Update strings.xml (if label is a reference)
+          strings_path = 'android/app/src/main/res/values/strings.xml'
+          if os.path.exists(strings_path):
+              with open(strings_path, 'r', encoding='utf-8') as f:
+                  s_content = f.read()
+              s_content = s_content.replace('mobile_client', 'One-API 助手')
+              with open(strings_path, 'w', encoding='utf-8') as f:
+                  f.write(s_content)
+              print("Updated strings.xml")
+
+          # 3. Update build.gradle
+          gradle_path = 'android/app/build.gradle'
+          if os.path.exists(gradle_path):
+              with open(gradle_path, 'r', encoding='utf-8') as f:
+                  g_content = f.read()
+              # Replace minSdkVersion
+              if 'minSdkVersion flutter.minSdkVersion' in g_content:
+                  g_content = g_content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 21')
+                  print("Updated minSdkVersion to 21")
+              else:
+                  print("Warning: Could not find minSdkVersion flutter.minSdkVersion in build.gradle")
+              
+              with open(gradle_path, 'w', encoding='utf-8') as f:
+                  f.write(g_content)
+          EOF
           
-          # 2. Enable Cleartext Traffic (for local/http APIs)
-          sed -i 's|<application|<application android:usesCleartextTraffic="true"|g' android/app/src/main/AndroidManifest.xml
-
-          # 3. Update App Name
-          sed -i 's/android:label="mobile_client"/android:label="One-API 助手"/g' android/app/src/main/AndroidManifest.xml
-
-      - name: Configure Gradle (minSdkVersion)
-        run: |
-          # Force minSdkVersion to 21 for notifications
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
+          python3 update_config.py
 
       - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
+
+      - name: List Build Outputs
+        run: ls -R build/app/outputs/flutter-apk/
 
       - name: Rename APK
         run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Assistant.apk
