@@ -31,13 +31,23 @@ jobs:
         run: flutter pub get
 
       - name: Ensure Platform Files Exist
-        # Generate android scaffolding with a unique ID (com.vae.mobile_client) to allow coexistence
         run: flutter create . --org com.vae --platforms android
 
-      - name: Update App Name
-        # Change the app label in AndroidManifest.xml to "One-API 助手"
+      - name: Configure Android Manifest (Permissions & Label)
         run: |
+          # 1. Add Permissions before <application> tag
+          sed -i 's|<application| <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>\n    <application|g' android/app/src/main/AndroidManifest.xml
+          
+          # 2. Enable Cleartext Traffic (for local/http APIs)
+          sed -i 's|<application|<application android:usesCleartextTraffic="true"|g' android/app/src/main/AndroidManifest.xml
+
+          # 3. Update App Name
           sed -i 's/android:label="mobile_client"/android:label="One-API 助手"/g' android/app/src/main/AndroidManifest.xml
+
+      - name: Configure Gradle (minSdkVersion)
+        run: |
+          # Force minSdkVersion to 21 for notifications
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle
 
       - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
