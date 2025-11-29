@@ -38,6 +38,9 @@ jobs:
       - name: Create Android Platform Files
         run: flutter create . --org com.vae --platforms android
 
+      - name: Debug Android Directory
+        run: ls -R android/
+
       - name: Configure Android Project (Robust Python Script)
         run: |
           cat <<EOF > update_config.py
@@ -61,17 +64,14 @@ jobs:
               '''
               
               if '<application' in content:
-                  # Check if permissions already exist to avoid duplication (simple check)
                   if 'android.permission.INTERNET' not in content:
                       content = content.replace('<application', permissions + '\\n    <application')
                       print("Injected permissions")
                   
-                  # 2. Add usesCleartextTraffic
                   if 'usesCleartextTraffic' not in content:
                       content = content.replace('<application', '<application android:usesCleartextTraffic="true"')
                       print("Enabled Cleartext Traffic")
 
-                  # 3. Update Label
                   content = content.replace('android:label="mobile_client"', 'android:label="One-API 助手"')
                   print("Updated App Label")
 
@@ -79,30 +79,69 @@ jobs:
                   f.write(content)
 
           def update_gradle():
-              path = 'android/app/build.gradle'
+              # Check for Groovy or Kotlin DSL
+              groovy_path = 'android/app/build.gradle'
+              kotlin_path = 'android/app/build.gradle.kts'
+              
+              path = groovy_path if os.path.exists(groovy_path) else kotlin_path
+              
               if not os.path.exists(path):
-                  print(f"Error: {path} not found")
+                  print(f"Error: Neither {groovy_path} nor {kotlin_path} found")
                   return
+
+              print(f"Updating Gradle file: {path}")
+              is_kotlin = path.endswith('.kts')
 
               with open(path, 'r', encoding='utf-8') as f:
                   content = f.read()
 
-              # 1. Update minSdkVersion using Regex
-              # Matches: minSdkVersion flutter.minSdkVersion OR minSdkVersion 16
-              pattern = r'minSdkVersion\s+(\S+)'
+              # 1. Update minSdkVersion
+              pattern = r'minSdkVersion\s+(\S+)' if not is_kotlin else r'minSdkVersion\s*=\s*(\d+)'
+              replacement = 'minSdkVersion 21' if not is_kotlin else 'minSdkVersion = 21'
+              
               if re.search(pattern, content):
-                  content = re.sub(pattern, 'minSdkVersion 21', content)
+                  content = re.sub(pattern, replacement, content)
                   print("Updated minSdkVersion to 21")
               else:
-                  print("Warning: minSdkVersion pattern not found")
+                  # Fallback for variable reference
+                  if 'flutter.minSdkVersion' in content:
+                      content = content.replace('flutter.minSdkVersion', '21')
+                      print("Updated flutter.minSdkVersion to 21")
+
+              # 2. Enable Core Library Desugaring (Required for flutter_local_notifications)
+              if not is_kotlin:
+                  # Groovy DSL
+                  if 'compileOptions {' in content and 'coreLibraryDesugaringEnabled' not in content:
+                      content = content.replace('compileOptions {', 'compileOptions {\\n        coreLibraryDesugaringEnabled true')
+                      print("Enabled coreLibraryDesugaring (Groovy)")
+                  
+                  if 'dependencies {' in content and 'desugar_jdk_libs' not in content:
+                      content = content.replace('dependencies {', 'dependencies {\\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:1.2.2"')
+                      print("Added desugar dependency (Groovy)")
+                  
+                  if 'defaultConfig {' in content and 'multiDexEnabled' not in content:
+                      content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled true')
+                      print("Enabled multiDex (Groovy)")
+              else:
+                  # Kotlin DSL (Best Effort)
+                  if 'compileOptions {' in content and 'isCoreLibraryDesugaringEnabled' not in content:
+                      content = content.replace('compileOptions {', 'compileOptions {\\n        isCoreLibraryDesugaringEnabled = true')
+                      print("Enabled coreLibraryDesugaring (Kotlin)")
+                  
+                  if 'dependencies {' in content and 'desugar_jdk_libs' not in content:
+                      content = content.replace('dependencies {', 'dependencies {\\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:1.2.2")')
+                      print("Added desugar dependency (Kotlin)")
+                  
+                  if 'defaultConfig {' in content and 'multiDexEnabled' not in content:
+                      content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled = true')
+                      print("Enabled multiDex (Kotlin)")
 
               with open(path, 'w', encoding='utf-8') as f:
                   f.write(content)
               
-              # Debug: Print content
-              print("--- Updated build.gradle Content ---")
-              print(content)
-              print("------------------------------------")
+              print("--- Updated Gradle Content Preview ---")
+              print(content[:500])
+              print("...")
 
           if __name__ == "__main__":
               print("Starting Configuration Update...")
