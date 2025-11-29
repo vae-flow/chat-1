@@ -15,6 +15,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  bool _isFabExpanded = false;
   
   // Chat
   final _chatBaseCtrl = TextEditingController();
@@ -506,28 +507,46 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       ),
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          FloatingActionButton.extended(
-            heroTag: 'export',
-            onPressed: _exportSettings,
-            icon: const Icon(Icons.copy),
-            label: const Text('导出配置'),
-            backgroundColor: Colors.orange,
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'import',
-            onPressed: _importSettings,
-            icon: const Icon(Icons.paste),
-            label: const Text('导入配置'),
-            backgroundColor: Colors.teal,
-          ),
-          const SizedBox(height: 16),
-          FloatingActionButton.extended(
-            heroTag: 'save',
-            onPressed: _save,
-            icon: const Icon(Icons.save),
-            label: const Text('保存所有设置'),
+          if (_isFabExpanded) ...[
+            FloatingActionButton.extended(
+              heroTag: 'export',
+              onPressed: () {
+                _exportSettings();
+                setState(() => _isFabExpanded = false);
+              },
+              icon: const Icon(Icons.copy),
+              label: const Text('导出配置'),
+              backgroundColor: Colors.orange,
+            ),
+            const SizedBox(height: 16),
+            FloatingActionButton.extended(
+              heroTag: 'import',
+              onPressed: () {
+                _importSettings();
+                setState(() => _isFabExpanded = false);
+              },
+              icon: const Icon(Icons.paste),
+              label: const Text('导入配置'),
+              backgroundColor: Colors.teal,
+            ),
+            const SizedBox(height: 16),
+            FloatingActionButton.extended(
+              heroTag: 'save',
+              onPressed: () {
+                _save();
+                setState(() => _isFabExpanded = false);
+              },
+              icon: const Icon(Icons.save),
+              label: const Text('保存所有设置'),
+            ),
+            const SizedBox(height: 16),
+          ],
+          FloatingActionButton(
+            heroTag: 'menu',
+            onPressed: () => setState(() => _isFabExpanded = !_isFabExpanded),
+            child: Icon(_isFabExpanded ? Icons.close : Icons.menu),
           ),
         ],
       ),
