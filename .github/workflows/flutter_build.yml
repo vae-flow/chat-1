@@ -38,9 +38,6 @@ jobs:
       - name: Create Android Platform Files
         run: flutter create . --org com.vae --platforms android
 
-      - name: Debug Android Directory
-        run: ls -R android/
-
       - name: Configure Android Project (Robust Python Script)
         run: |
           cat <<EOF > update_config.py
@@ -103,34 +100,43 @@ jobs:
                   content = re.sub(pattern, replacement, content)
                   print("Updated minSdkVersion to 21")
               else:
-                  # Fallback for variable reference
                   if 'flutter.minSdkVersion' in content:
                       content = content.replace('flutter.minSdkVersion', '21')
                       print("Updated flutter.minSdkVersion to 21")
 
-              # 2. Enable Core Library Desugaring (Required for flutter_local_notifications)
+              # 2. Enable Core Library Desugaring & MultiDex
               if not is_kotlin:
                   # Groovy DSL
                   if 'compileOptions {' in content and 'coreLibraryDesugaringEnabled' not in content:
                       content = content.replace('compileOptions {', 'compileOptions {\\n        coreLibraryDesugaringEnabled true')
                       print("Enabled coreLibraryDesugaring (Groovy)")
                   
-                  if 'dependencies {' in content and 'desugar_jdk_libs' not in content:
-                      content = content.replace('dependencies {', 'dependencies {\\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:1.2.2"')
-                      print("Added desugar dependency (Groovy)")
+                  # Use Regex for dependencies block to be safe
+                  if re.search(r'dependencies\s*\{', content):
+                      if 'desugar_jdk_libs' not in content:
+                          content = re.sub(r'dependencies\s*\{', 'dependencies {\\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.3"', content, count=1)
+                          print("Added desugar dependency (Groovy)")
+                  else:
+                      content += '\\n\\ndependencies {\\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.3"\\n}'
+                      print("Appended dependencies block (Groovy)")
                   
                   if 'defaultConfig {' in content and 'multiDexEnabled' not in content:
                       content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled true')
                       print("Enabled multiDex (Groovy)")
               else:
-                  # Kotlin DSL (Best Effort)
+                  # Kotlin DSL
                   if 'compileOptions {' in content and 'isCoreLibraryDesugaringEnabled' not in content:
                       content = content.replace('compileOptions {', 'compileOptions {\\n        isCoreLibraryDesugaringEnabled = true')
                       print("Enabled coreLibraryDesugaring (Kotlin)")
                   
-                  if 'dependencies {' in content and 'desugar_jdk_libs' not in content:
-                      content = content.replace('dependencies {', 'dependencies {\\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:1.2.2")')
-                      print("Added desugar dependency (Kotlin)")
+                  # Use Regex for dependencies block
+                  if re.search(r'dependencies\s*\{', content):
+                      if 'desugar_jdk_libs' not in content:
+                          content = re.sub(r'dependencies\s*\{', 'dependencies {\\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")', content, count=1)
+                          print("Added desugar dependency (Kotlin)")
+                  else:
+                      content += '\\n\\ndependencies {\\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")\\n}'
+                      print("Appended dependencies block (Kotlin)")
                   
                   if 'defaultConfig {' in content and 'multiDexEnabled' not in content:
                       content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled = true')
@@ -140,8 +146,8 @@ jobs:
                   f.write(content)
               
               print("--- Updated Gradle Content Preview ---")
-              print(content[:500])
-              print("...")
+              print(content)
+              print("------------------------------------")
 
           if __name__ == "__main__":
               print("Starting Configuration Update...")
