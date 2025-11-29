@@ -835,11 +835,11 @@ $refString
         messagesPayload = [
           {'role': 'system', 'content': timeAwareSystemPrompt},
           ...historyToUse.map((m) {
-            String content = m.content;
-            if (content.isEmpty && (m.imageUrl != null || m.localImagePath != null)) {
-              content = "[图片]";
+            String msgContent = m.content;
+            if (msgContent.isEmpty && (m.imageUrl != null || m.localImagePath != null)) {
+              msgContent = "[图片]";
             }
-            return {'role': m.role, 'content': content};
+            return {'role': m.role, 'content': msgContent};
           }).where((m) => m['content'].toString().isNotEmpty)
         ];
       }
@@ -914,8 +914,8 @@ $refString
     debugPrint('Triggering chat-to-memory compression...');
     
     // Extract the oldest batch of messages to compress
-    // Keep last 10 messages
-    int endIndex = _messages.length - 10; 
+    // Keep last 50 messages to maintain context
+    int endIndex = _messages.length - 50; 
     if (endIndex <= 0) {
       if (manual) _showError('消息太少，无需压缩');
       return;
@@ -1076,15 +1076,22 @@ $_globalMemoryCache
       refsBuffer.writeln('【Current Gathered Information】\nNone yet.');
     }
 
-    // Get recent history (last 6 messages)
+    // Get recent history (last 20 messages)
     final historyCount = _messages.length;
     final contextMsgs = historyCount > 0 
-        ? _messages.sublist((historyCount - 6).clamp(0, historyCount)) 
+        ? _messages.sublist((historyCount - 20).clamp(0, historyCount)) 
         : <ChatMessage>[];
         
     final contextBuffer = StringBuffer();
     for (var m in contextMsgs) {
-      final roleName = m.role == 'user' ? '用户' : _activePersona.name;
+      String roleName;
+      if (m.role == 'user') {
+        roleName = '用户';
+      } else if (m.role == 'system') {
+        roleName = '系统通知';
+      } else {
+        roleName = _activePersona.name;
+      }
       contextBuffer.writeln('$roleName: ${m.content}');
     }
 
