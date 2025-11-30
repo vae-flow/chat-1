@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -19,6 +20,27 @@ import '../services/image_service.dart';
 import '../utils/constants.dart';
 import 'settings_page.dart';
 import 'persona_manager_page.dart';
+
+// Top-level function for compute
+Future<String> _processHistoryInIsolate(String filePath) async {
+  final file = File(filePath);
+  if (!await file.exists()) return '';
+  
+  final buffer = StringBuffer();
+  final lines = await file.readAsLines();
+  for (var line in lines) {
+    try {
+      final jsonMap = json.decode(line);
+      final role = jsonMap['role'] ?? 'unknown';
+      final content = jsonMap['content'] ?? '';
+      final personaId = jsonMap['persona_id'] ?? 'unknown';
+      buffer.writeln('[$personaId] $role: $content');
+    } catch (e) {
+      // ignore
+    }
+  }
+  return buffer.toString();
+}
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -217,11 +239,16 @@ class _ChatPageState extends State<ChatPage> {
     
     final List<ChatMessage> loadedMsgs = [];
     if (historyStrings != null) {
-      loadedMsgs.addAll(
-        historyStrings
-            .map((e) => ChatMessage.fromJson(json.decode(e)))
-            .where((m) => !m.isMemory) // Safety: Ensure no memory messages are loaded from persona history
-      );
+      for (var e in historyStrings) {
+        try {
+          final m = ChatMessage.fromJson(json.decode(e));
+          if (!m.isMemory) {
+            loadedMsgs.add(m);
+          }
+        } catch (err) {
+          debugPrint('Error loading message: $err');
+        }
+      }
     }
 
     if (mounted) {
@@ -250,23 +277,27 @@ class _ChatPageState extends State<ChatPage> {
   String _globalMemoryCache = '';
 
   Future<void> _saveChatHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    
-    // 1. Save Global Memory
-    // Since it's not in _messages, we rely on _globalMemoryCache being updated
-    // whenever memory compression happens.
-    if (_globalMemoryCache.isNotEmpty) {
-      await prefs.setString('global_memory', _globalMemoryCache);
-    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // 1. Save Global Memory
+      // Since it's not in _messages, we rely on _globalMemoryCache being updated
+      // whenever memory compression happens.
+      if (_globalMemoryCache.isNotEmpty) {
+        await prefs.setString('global_memory', _globalMemoryCache);
+      }
 
-    // 2. Save Persona Specific History (Exclude Memory Message)
-    // We only save the actual conversation flow for this persona
-    final history = _messages
-        .where((m) => !m.isMemory)
-        .map((m) => json.encode(m.toJson()))
-        .toList();
-    
-    await prefs.setStringList('chat_history_$_currentPersonaId', history);
+      // 2. Save Persona Specific History (Exclude Memory Message)
+      // We only save the actual conversation flow for this persona
+      final history = _messages
+          .where((m) => !m.isMemory)
+          .map((m) => json.encode(m.toJson()))
+          .toList();
+      
+      await prefs.setStringList('chat_history_$_currentPersonaId', history);
+    } catch (e) {
+      debugPrint('Failed to save chat history: $e');
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -369,6 +400,77 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<String> _smartCompress(String text) async {
+    // If text is small enough, just return it (though this function is usually called when it's big)
+    if (text.length < 1000) return text;
+
+    // Chunking (10k chars)
+    const int chunkSize = 10000;
+    final chunks = <String>[];
+    for (int i = 0; i < text.length; i += chunkSize) {
+      int end = (i + chunkSize < text.length) ? i + chunkSize : text.length;
+      chunks.add(text.substring(i, end));
+    }
+
+    final buffer = StringBuffer();
+    for (var chunk in chunks) {
+      // Summarize each chunk
+      final summary = await _generateSummary(chunk, 0.5); // 50% compression target
+      buffer.writeln(summary);
+    }
+    
+    return buffer.toString();
+  }
+
+  Future<List<ChatMessage>> _ensureContextFits(List<ChatMessage> history, int limit) async {
+    int total = history.fold(0, (p, c) => p + c.content.length);
+    if (total <= limit) return history;
+
+    // Keep last 2 messages always (User + Assistant usually) to maintain immediate context
+    int keepCount = 2;
+    if (history.length <= keepCount) {
+       // Can't compress further without losing immediate context. 
+       return history; 
+    }
+
+    List<ChatMessage> recent = history.sublist(history.length - keepCount);
+    List<ChatMessage> older = history.sublist(0, history.length - keepCount);
+    
+    // Compress older
+    String olderText = older.map((m) {
+      // Handle previous summaries or system messages distinctly
+      if (m.role == 'system') {
+         return "【系统/历史信息】: ${m.content}";
+      }
+      return "${m.role}: ${m.content}";
+    }).join("\n");
+    
+    // Recursive Compression
+    // 1. Compress the older text
+    String compressedOlder = await _smartCompress(olderText); 
+    
+    // 2. Create a summary message with explicit temporal marker
+    ChatMessage summaryMsg = ChatMessage(
+      'system', 
+      '【历史对话摘要】\n注意：以下内容是早期对话的压缩记录，发生在后续消息之前。\n$compressedOlder', 
+      isMemory: true
+    );
+    
+    List<ChatMessage> newList = [summaryMsg, ...recent];
+    
+    // 3. Check again (Recursion)
+    // If the new list is still too big, we recurse.
+    // Note: We need to be careful about infinite loops. 
+    // If compression didn't reduce size (unlikely with LLM), we might loop.
+    // But _smartCompress uses 0.5 ratio, so it should reduce.
+    int newTotal = newList.fold(0, (p, c) => p + c.content.length);
+    if (newTotal < total) { // Only recurse if we made progress
+       return _ensureContextFits(newList, limit);
+    } else {
+       return newList; // Stop if we can't reduce further
+    }
+  }
+
   Future<void> _performChatRequest(String content, {String? localImage, List<ChatMessage>? historyOverride, bool manageSendingState = true, List<ReferenceItem>? references}) async {
     final isVision = localImage != null;
     final apiBase = isVision ? _visionBase : _chatBase;
@@ -448,7 +550,17 @@ $refString
       } else {
         // For normal chat, we send the history
         // Use historyOverride if provided, otherwise use current _messages
-        final historyToUse = historyOverride ?? _messages;
+        var historyToUse = historyOverride ?? _messages;
+
+        // Enforce Context Limit (~15k chars final target) using Recursive Compression
+        // If history is too long, we compress it recursively until it fits.
+        if (historyToUse.fold(0, (sum, m) => sum + m.content.length) > 12000) {
+           if (manageSendingState) {
+             setState(() => _loadingStatus = '上下文过长，正在递归压缩...');
+           }
+           historyToUse = await _ensureContextFits(historyToUse, 15000);
+        }
+
         messagesPayload = [
           {'role': 'system', 'content': timeAwareSystemPrompt},
           ...historyToUse.map((m) {
@@ -465,7 +577,7 @@ $refString
         'model': model,
         'messages': messagesPayload,
         'stream': _enableStream,
-        'max_tokens': 6000,
+        'max_tokens': 30000,
       });
 
       if (_enableStream) {
@@ -483,7 +595,7 @@ $refString
         });
         _scrollToBottom();
 
-        final streamedResponse = await http.Client().send(request);
+        final streamedResponse = await http.Client().send(request).timeout(const Duration(minutes: 5));
 
         if (streamedResponse.statusCode == 200) {
           String fullContent = '';
@@ -533,7 +645,7 @@ $refString
             'Content-Type': 'application/json',
           },
           body: body,
-        );
+        ).timeout(const Duration(minutes: 5));
 
         if (resp.statusCode == 200) {
           final decodedBody = utf8.decode(resp.bodyBytes);
@@ -701,7 +813,7 @@ $text
           'Content-Type': 'application/json',
         },
         body: body,
-      );
+      ).timeout(const Duration(minutes: 5));
 
       if (resp.statusCode == 200) {
         final decodedBody = utf8.decode(resp.bodyBytes);
@@ -727,26 +839,17 @@ $text
     });
 
     try {
+      debugPrint('Deep profiling started');
       // 1. Gather ALL History (Archive + Active)
       final dir = await getApplicationDocumentsDirectory();
-      final archiveFile = File('${dir.path}/chat_archive.jsonl');
+      final archivePath = '${dir.path}/chat_archive.jsonl';
       final allHistoryBuffer = StringBuffer();
 
-      // Read Archive
-      if (await archiveFile.exists()) {
-        final lines = await archiveFile.readAsLines();
-        for (var line in lines) {
-          try {
-            final jsonMap = json.decode(line);
-            final role = jsonMap['role'] ?? 'unknown';
-            final content = jsonMap['content'] ?? '';
-            final personaId = jsonMap['persona_id'] ?? 'unknown';
-            allHistoryBuffer.writeln('[$personaId] $role: $content');
-          } catch (e) {
-            // ignore
-          }
-        }
-      }
+      // Read Archive in Isolate
+      debugPrint('Reading archive from $archivePath');
+      final archiveContent = await compute(_processHistoryInIsolate, archivePath);
+      allHistoryBuffer.write(archiveContent);
+      debugPrint('Archive read complete, length: ${archiveContent.length}');
 
       // Read Active Messages (Current Persona) - BUT use original content if compressed?
       // Actually, we should rely on Archive for everything since we archive before compressing.
@@ -767,7 +870,7 @@ $text
         return;
       }
 
-      // 2. Chunking (e.g. 10k chars)
+      // 2. Chunking (Safe limit: 10000 chars to avoid token limits)
       const int chunkSize = 10000;
       final chunks = <String>[];
       for (int i = 0; i < fullText.length; i += chunkSize) {
@@ -818,7 +921,7 @@ $chunk
             'Content-Type': 'application/json',
           },
           body: body,
-        );
+        ).timeout(const Duration(minutes: 5));
 
         if (resp.statusCode == 200) {
           final decodedBody = utf8.decode(resp.bodyBytes);
@@ -857,6 +960,8 @@ $chunk
     final effectiveModel = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerModel : _chatModel;
 
     // 1. Prepare Context Data
+    final now = DateTime.now();
+    final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute} (星期${['','一','二','三','四','五','六','日'][now.weekday]})";
     final memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
     
     // Format References (Observations)
@@ -887,9 +992,19 @@ $chunk
 
     // Format Chat History
     final historyCount = _messages.length;
-    final contextMsgs = historyCount > 0 
+    var contextMsgs = historyCount > 0 
         ? _messages.sublist((historyCount - 20).clamp(0, historyCount)) 
         : <ChatMessage>[];
+    
+    // Enforce Soft Limit (~10k chars) for Agent Context
+    int agentContextChars = 0;
+    final limitedAgentMsgs = <ChatMessage>[];
+    for (final m in contextMsgs.reversed) {
+      if (agentContextChars + m.content.length > 10000) break;
+      agentContextChars += m.content.length;
+      limitedAgentMsgs.add(m);
+    }
+    contextMsgs = limitedAgentMsgs.reversed.toList();
         
     final contextBuffer = StringBuffer();
     for (var m in contextMsgs) {
@@ -911,6 +1026,7 @@ Your goal is to satisfy the User's Request through iterative reasoning and tool 
 
 ### INPUT STRUCTURE
 The user message is strictly structured. You must distinguish between:
+- <current_time>: The precise current time. Use this for relative time queries (e.g. "today", "last week").
 - <user_profile>: Deep psychological and factual profile of the user. Use this to infer intent and tailor your strategy.
 - <chat_history>: Recent conversation context.
 - <current_observations>: Information gathered from search tools in THIS session.
@@ -925,9 +1041,10 @@ ${_activePersona.prompt}
 
 ### STRATEGIC THINKING (Chain of Thought)
 Before deciding, perform a "Strategic Analysis" in the `reason` field:
-1. **Intent Classification**: Is the user asking for a Fact, an Opinion, a Creative Work, or just Chatting?
-2. **Gap Analysis**: Compare <user_input> with <current_observations>. What specific information is missing?
-3. **Iteration Check**: Look at <action_history>. 
+1. **Time Awareness**: Check <current_time>. If the user asks for "latest news", "weather", or "stock price", you MUST use the current date in your search query.
+2. **Intent Classification**: Is the user asking for a Fact, an Opinion, a Creative Work, or just Chatting?
+3. **Gap Analysis**: Compare <user_input> with <current_observations>. What specific information is missing?
+4. **Iteration Check**: Look at <action_history>. 
    - If previous searches failed, CHANGE your keywords or strategy.
    - If you have searched 2+ times and have partial info, consider if it's "good enough" to answer.
 
@@ -961,6 +1078,10 @@ Return a JSON object (no markdown):
 ''';
 
     final userPrompt = '''
+<current_time>
+$timeString
+</current_time>
+
 <user_profile>
 $memoryContent
 </user_profile>
@@ -1001,7 +1122,7 @@ $userText
           'Content-Type': 'application/json',
         },
         body: body,
-      );
+      ).timeout(const Duration(minutes: 5));
 
       if (resp.statusCode == 200) {
         final decodedBody = utf8.decode(resp.bodyBytes);
@@ -1030,42 +1151,66 @@ $userText
     final content = _inputCtrl.text.trim();
     if (content.isEmpty && _selectedImage == null) return;
 
-    // 1. Vision Request (Image + Text) - No routing needed
+    String? currentSessionImagePath;
+    List<ReferenceItem> sessionRefs = [];
+
+    // 1. Handle Image Input (Analyze & Prepare)
     if (_selectedImage != null) {
-      // Persist the picked image to prevent cache cleanup loss
-      final localImage = await savePickedImage(_selectedImage!);
+      // Persist the picked image
+      currentSessionImagePath = await savePickedImage(_selectedImage!);
       
       setState(() {
-        _messages.add(ChatMessage('user', content, localImagePath: localImage));
+        _messages.add(ChatMessage('user', content, localImagePath: currentSessionImagePath));
         _saveChatHistory();
         _inputCtrl.clear();
         _selectedImage = null;
+        _sending = true;
+        _loadingStatus = '正在分析图片...';
       });
-      await _performChatRequest(content, localImage: localImage);
-      return;
+      _scrollToBottom();
+
+      // Analyze the image to produce vision references
+      try {
+        final visionRefs = await analyzeImage(
+          imagePath: currentSessionImagePath,
+          baseUrl: _visionBase,
+          apiKey: _visionKey,
+          model: _visionModel,
+        );
+        if (visionRefs.isNotEmpty) {
+          await _refManager.addExternalReferences(visionRefs);
+          sessionRefs.addAll(visionRefs);
+        }
+      } catch (e) {
+        debugPrint('Vision analyze error: $e');
+      }
+    } else {
+      // Text Only Input
+      setState(() {
+        _messages.add(ChatMessage('user', content));
+        _saveChatHistory();
+        _inputCtrl.clear();
+        _sending = true; 
+        _loadingStatus = '正在思考...';
+      });
+      _scrollToBottom();
     }
 
-    // 2. Text Request - Enter Agent Loop
-    setState(() {
-      _messages.add(ChatMessage('user', content));
-      _saveChatHistory();
-      _inputCtrl.clear();
-      _sending = true; 
-      _loadingStatus = '正在思考...';
-    });
-    _scrollToBottom();
-
     // --- Agent Execution Loop ---
-    List<ReferenceItem> sessionRefs = [];
     List<AgentDecision> sessionDecisions = []; // Track decisions in this session
     int steps = 0;
-    const int maxSteps = 3; // Prevent infinite loops
+    const int maxSteps = 20; 
+
+    // If content is empty but we have an image, provide a default context for the Agent
+    final effectiveUserText = content.isEmpty && currentSessionImagePath != null 
+        ? "Please analyze the image I just sent." 
+        : content;
 
     try {
       while (steps < maxSteps) {
         // A. Think (Plan Step)
         setState(() => _loadingStatus = '正在规划下一步 (Step ${steps + 1})...');
-        final decision = await _planAgentStep(content, sessionRefs, sessionDecisions);
+        final decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
         sessionDecisions.add(decision); // Record decision
         
         // Handle Reminders (Side Effect)
@@ -1098,7 +1243,7 @@ $userText
             // Search failed or returned nothing, force answer to avoid loop
             debugPrint('Search returned no results. Forcing answer.');
             setState(() => _loadingStatus = '搜索无结果，正在生成回答...');
-            await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
             break;
           }
         } 
@@ -1111,7 +1256,7 @@ $userText
         else {
           // Action: Answer (or fallback)
           setState(() => _loadingStatus = '正在撰写回复...');
-          await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
+          await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           break; // Answer is a terminal action
         }
         
@@ -1121,7 +1266,7 @@ $userText
       if (steps >= maxSteps) {
         // Fallback if max steps reached
         setState(() => _loadingStatus = '思考步骤过多，正在强制回复...');
-        await _performChatRequest(content, references: sessionRefs, manageSendingState: false);
+        await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
       }
 
     } catch (e) {
@@ -1218,6 +1363,7 @@ $userText
               setState(() {
                 _messages.clear();
                 _saveChatHistory();
+                _refManager.clearExternalReferences(); // Clear external refs
               });
             },
           ),
@@ -1289,30 +1435,51 @@ $userText
             AnimatedContainer(
               duration: const Duration(milliseconds: 300),
               width: double.infinity,
-              height: isMemoryFull ? 36 : 0,
-              color: Colors.red[50],
-              child: isMemoryFull ? Row(
+              height: 40, // Always visible if there is content
+              color: isMemoryFull ? Colors.red[50] : Colors.grey[100],
+              child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.warning_amber_rounded, size: 16, color: Colors.red),
+                  Icon(
+                    isMemoryFull ? Icons.warning_amber_rounded : Icons.storage_rounded, 
+                    size: 16, 
+                    color: isMemoryFull ? Colors.red : Colors.grey[600]
+                  ),
                   const SizedBox(width: 8),
                   Text(
-                    '记忆库即将爆满 ($totalChars/20000)',
-                    style: const TextStyle(fontSize: 12, color: Colors.red),
+                    isMemoryFull 
+                        ? '记忆库即将爆满 ($totalChars/20000)' 
+                        : '当前记忆: $totalChars / 20000 字符',
+                    style: TextStyle(
+                      fontSize: 12, 
+                      color: isMemoryFull ? Colors.red : Colors.grey[800],
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
                   const SizedBox(width: 12),
-                  TextButton(
-                    onPressed: _sending ? null : _performAdaptiveCompression,
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      backgroundColor: Colors.red[100],
+                  if (totalChars > 500) // Allow compression if > 500 chars
+                    TextButton(
+                      onPressed: _sending ? null : _performAdaptiveCompression,
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        backgroundColor: isMemoryFull ? Colors.red[100] : Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(color: isMemoryFull ? Colors.red[200]! : Colors.grey[300]!)
+                        ),
+                      ),
+                      child: Text(
+                        '手动压缩', 
+                        style: TextStyle(
+                          fontSize: 11, 
+                          color: isMemoryFull ? Colors.red : Colors.blue[700]
+                        )
+                      ),
                     ),
-                    child: const Text('立即压缩', style: TextStyle(fontSize: 11, color: Colors.red)),
-                  ),
                 ],
-              ) : const SizedBox.shrink(),
+              ),
             ),
             
           Expanded(

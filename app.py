@@ -46,7 +46,7 @@ def build_system_prompt(prompt_text: str, memory: Dict, max_history: int) -> str
     return "\n\n".join(sections)
 
 
-def parse_reply(reply: str) -> (str, str):
+def parse_reply(reply: str) -> tuple:
     # 拆分可见回复与记忆行。记忆行以【记录】/[记录]标记，若出现在正文中则截断。
     markers = ["【记录】", "[记录]"]
     idxs = [reply.find(m) for m in markers if m in reply]

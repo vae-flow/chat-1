@@ -13,6 +13,11 @@ class ReferenceManager {
     final exaKey = prefs.getString('exa_key') ?? '';
     final youKey = prefs.getString('you_key') ?? '';
     final braveKey = prefs.getString('brave_key') ?? '';
+    
+    // Load custom base URLs (optional)
+    final exaBase = prefs.getString('exa_base') ?? 'https://api.exa.ai';
+    final youBase = prefs.getString('you_base') ?? 'https://api.ydc-index.io';
+    final braveBase = prefs.getString('brave_base') ?? 'https://api.search.brave.com';
 
     // Auto-select provider based on available keys
     if (provider == 'auto') {
@@ -31,11 +36,11 @@ class ReferenceManager {
     try {
       switch (provider) {
         case 'exa':
-          return _searchExa(query, exaKey);
+          return _searchExa(query, exaKey, exaBase);
         case 'you':
-          return _searchYou(query, youKey);
+          return _searchYou(query, youKey, youBase);
         case 'brave':
-          return _searchBrave(query, braveKey);
+          return _searchBrave(query, braveKey, braveBase);
         default:
            throw Exception('未知的搜索提供商: $provider');
       }
@@ -46,9 +51,9 @@ class ReferenceManager {
     }
   }
 
-  Future<List<ReferenceItem>> _searchExa(String query, String key) async {
+  Future<List<ReferenceItem>> _searchExa(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Exa Key not configured');
-    final uri = Uri.parse('https://api.exa.ai/search');
+    final uri = Uri.parse('$baseUrl/search');
     final resp = await http.post(
       uri,
       headers: {
@@ -61,7 +66,7 @@ class ReferenceManager {
         'useAutoprompt': true,
         'contents': {'text': true} 
       }),
-    );
+    ).timeout(const Duration(seconds: 15));
     
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -76,18 +81,29 @@ class ReferenceManager {
     throw Exception('Exa API Error: ${resp.statusCode}');
   }
 
-  Future<List<ReferenceItem>> _searchYou(String query, String key) async {
+  Future<List<ReferenceItem>> _searchYou(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('You.com Key not configured');
-    // Updated endpoint to ensure compatibility
-    final uri = Uri.parse('https://api.ydc-index.io/search?query=${Uri.encodeComponent(query)}&num_web_results=3');
+    
+    // Fix: Use 'count' parameter as per documentation
+    // Ensure URL handles /v1 if not present in baseUrl, or assume user configures it.
+    // We will use the baseUrl as provided, assuming it includes /v1 if needed (updated in Settings).
+    final uri = Uri.parse('$baseUrl/search?query=${Uri.encodeComponent(query)}&count=3');
     final resp = await http.get(
       uri,
       headers: {'X-API-Key': key},
-    );
+    ).timeout(const Duration(seconds: 15));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
-      final hits = data['hits'] as List;
+      
+      // Fix: Parse 'results' -> 'web' as per documentation screenshot
+      List<dynamic> hits = [];
+      if (data['results'] != null && data['results']['web'] is List) {
+        hits = data['results']['web'];
+      } else if (data['hits'] is List) {
+        hits = data['hits']; // Fallback for backward compatibility
+      }
+
       return hits.map((h) => ReferenceItem(
         title: h['title'] ?? 'No Title',
         url: h['url'] ?? '',
@@ -100,16 +116,16 @@ class ReferenceManager {
     throw Exception('You.com API Error: ${resp.statusCode} - ${resp.body}');
   }
 
-  Future<List<ReferenceItem>> _searchBrave(String query, String key) async {
+  Future<List<ReferenceItem>> _searchBrave(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Brave Key not configured');
-    final uri = Uri.parse('https://api.search.brave.com/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=3');
+    final uri = Uri.parse('$baseUrl/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=3');
     final resp = await http.get(
       uri,
       headers: {
         'X-Subscription-Token': key,
         'Accept': 'application/json',
       },
-    );
+    ).timeout(const Duration(seconds: 15));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -137,5 +153,48 @@ class ReferenceManager {
       buffer.writeln('   链接: ${refs[i].url}');
     }
     return buffer.toString();
+  }
+
+  /// Persist external references (search results, vision results, etc.) into SharedPreferences.
+  /// Each entry is stored as a JSON string under key `external_references`.
+  Future<void> addExternalReferences(List<ReferenceItem> refs) async {
+    if (refs.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final existing = prefs.getStringList('external_references') ?? [];
+    final updated = List<String>.from(existing);
+    for (var r in refs) {
+      updated.add(json.encode(r.toJson()));
+    }
+    await prefs.setStringList('external_references', updated);
+  }
+
+  /// Retrieve persisted external references. Optionally filter by sourceType ('vision', 'web', etc.).
+  Future<List<ReferenceItem>> getExternalReferences({String? sourceType}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList('external_references') ?? [];
+    final items = list.map((s) {
+      try {
+        return ReferenceItem.fromJson(json.decode(s));
+      } catch (e) {
+        return null;
+      }
+    }).whereType<ReferenceItem>().toList();
+    if (sourceType != null) {
+      return items.where((i) => i.sourceType == sourceType).toList();
+    }
+    return items;
+  }
+
+  /// Clear all external references
+  Future<void> clearExternalReferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('external_references');
+  }
+
+  /// Helper to fetch references associated with a given imageId
+  Future<List<ReferenceItem>> getReferencesByImageId(String imageId) async {
+    if (imageId.isEmpty) return [];
+    final all = await getExternalReferences();
+    return all.where((r) => r.imageId == imageId).toList();
   }
 }

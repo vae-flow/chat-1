@@ -46,8 +46,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _profileModelCtrl = TextEditingController();
 
   // Search
+  final _exaBaseCtrl = TextEditingController();
   final _exaKeyCtrl = TextEditingController();
+  final _youBaseCtrl = TextEditingController();
   final _youKeyCtrl = TextEditingController();
+  final _braveBaseCtrl = TextEditingController();
   final _braveKeyCtrl = TextEditingController();
   String _searchProvider = 'mock';
 
@@ -83,8 +86,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     _profileBaseCtrl.dispose();
     _profileKeyCtrl.dispose();
     _profileModelCtrl.dispose();
+    _exaBaseCtrl.dispose();
     _exaKeyCtrl.dispose();
+    _youBaseCtrl.dispose();
     _youKeyCtrl.dispose();
+    _braveBaseCtrl.dispose();
     _braveKeyCtrl.dispose();
     _globalMemoryCtrl.dispose();
     super.dispose();
@@ -116,8 +122,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _profileKeyCtrl.text = prefs.getString('profile_key') ?? '';
       _profileModelCtrl.text = prefs.getString('profile_model') ?? 'gpt-3.5-turbo';
       
+      _exaBaseCtrl.text = prefs.getString('exa_base') ?? 'https://api.exa.ai';
       _exaKeyCtrl.text = prefs.getString('exa_key') ?? '';
+      _youBaseCtrl.text = prefs.getString('you_base') ?? 'https://ydc-index.io/v1';
       _youKeyCtrl.text = prefs.getString('you_key') ?? '';
+      _braveBaseCtrl.text = prefs.getString('brave_base') ?? 'https://api.search.brave.com';
       _braveKeyCtrl.text = prefs.getString('brave_key') ?? '';
       _searchProvider = prefs.getString('search_provider') ?? 'auto';
 
@@ -152,8 +161,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('profile_key', _profileKeyCtrl.text.trim());
     await prefs.setString('profile_model', _profileModelCtrl.text.trim());
 
+    await prefs.setString('exa_base', _exaBaseCtrl.text.trim());
     await prefs.setString('exa_key', _exaKeyCtrl.text.trim());
+    await prefs.setString('you_base', _youBaseCtrl.text.trim());
     await prefs.setString('you_key', _youKeyCtrl.text.trim());
+    await prefs.setString('brave_base', _braveBaseCtrl.text.trim());
     await prefs.setString('brave_key', _braveKeyCtrl.text.trim());
     await prefs.setString('search_provider', _searchProvider);
 
@@ -346,6 +358,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         const Text('Exa.ai Settings', style: TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         TextField(
+          controller: _exaBaseCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Exa API Base',
+            border: OutlineInputBorder(),
+            hintText: 'https://api.exa.ai',
+          ),
+        ),
+        const SizedBox(height: 8),
+        TextField(
           controller: _exaKeyCtrl,
           decoration: const InputDecoration(
             labelText: 'Exa API Key',
@@ -359,6 +380,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         const Text('You.com Settings', style: TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         TextField(
+          controller: _youBaseCtrl,
+          decoration: const InputDecoration(
+            labelText: 'You.com API Base',
+            border: OutlineInputBorder(),
+            hintText: 'https://ydc-index.io/v1',
+          ),
+        ),
+        const SizedBox(height: 8),
+        TextField(
           controller: _youKeyCtrl,
           decoration: const InputDecoration(
             labelText: 'You.com API Key',
@@ -370,6 +400,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         const SizedBox(height: 16),
 
         const Text('Brave Search Settings', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _braveBaseCtrl,
+          decoration: const InputDecoration(
+            labelText: 'Brave API Base',
+            border: OutlineInputBorder(),
+            hintText: 'https://api.search.brave.com',
+          ),
+        ),
         const SizedBox(height: 8),
         TextField(
           controller: _braveKeyCtrl,
@@ -460,8 +499,30 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
                 // Trigger profiling
                 // We close the settings page so the user can see the progress in the main chat page
                 // (Since _performDeepProfiling updates _loadingStatus in ChatPage)
-                if (mounted) Navigator.pop(context); 
-                widget.onDeepProfile!();
+                if (mounted) {
+                  await Navigator.pop(context);
+                  // Add a small delay to ensure the pop animation completes
+                  await Future.delayed(const Duration(milliseconds: 300));
+                  if (widget.onDeepProfile != null) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      try {
+                        widget.onDeepProfile!();
+                      } catch (e) {
+                        debugPrint('onDeepProfile callback error: $e');
+                      }
+                    });
+                  }
+                } else {
+                  if (widget.onDeepProfile != null) {
+                    Future.microtask(() {
+                      try {
+                        widget.onDeepProfile!();
+                      } catch (e) {
+                        debugPrint('onDeepProfile callback error (microtask): $e');
+                      }
+                    });
+                  }
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: Theme.of(context).primaryColor,
