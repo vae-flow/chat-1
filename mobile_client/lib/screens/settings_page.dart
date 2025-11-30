@@ -500,7 +500,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
                 // We close the settings page so the user can see the progress in the main chat page
                 // (Since _performDeepProfiling updates _loadingStatus in ChatPage)
                 if (mounted) {
-                  await Navigator.pop(context);
+                  Navigator.pop(context);
                   // Add a small delay to ensure the pop animation completes
                   await Future.delayed(const Duration(milliseconds: 300));
                   if (widget.onDeepProfile != null) {
