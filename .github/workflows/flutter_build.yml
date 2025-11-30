@@ -171,11 +171,14 @@ jobs:
             exit 1
           fi
 
-      - name: Rename APK
-        run: mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Assistant.apk
+      - name: Rename APK with Version
+        run: |
+          VERSION=$(date +%Y%m%d_%H%M)
+          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Assistant_v${VERSION}.apk
+          echo "APK renamed to: OneAPI_Assistant_v${VERSION}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: OneAPI_Assistant_APK
-          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Assistant.apk
+          name: OneAPI_Assistant_${{ github.run_number }}
+          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Assistant_*.apk

@@ -96,18 +96,36 @@ class ReferenceManager {
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
       
-      // Fix: Parse 'results' -> 'web' as per documentation screenshot
+      // Robust parsing: try multiple known response formats
       List<dynamic> hits = [];
+      
+      // Format 1: results.web (RAG API)
       if (data['results'] != null && data['results']['web'] is List) {
         hits = data['results']['web'];
-      } else if (data['hits'] is List) {
-        hits = data['hits']; // Fallback for backward compatibility
       }
+      // Format 2: hits (Search API legacy)
+      else if (data['hits'] is List) {
+        hits = data['hits'];
+      }
+      // Format 3: webPages.value (alternative format)
+      else if (data['webPages'] != null && data['webPages']['value'] is List) {
+        hits = data['webPages']['value'];
+      }
+      // Format 4: organic (another variant)
+      else if (data['organic'] is List) {
+        hits = data['organic'];
+      }
+      // Format 5: direct array at root
+      else if (data is List) {
+        hits = data;
+      }
+      
+      debugPrint('You.com parsed ${hits.length} results');
 
       return hits.map((h) => ReferenceItem(
-        title: h['title'] ?? 'No Title',
-        url: h['url'] ?? '',
-        snippet: (h['snippets'] as List?)?.join(' ') ?? h['description'] ?? '',
+        title: h['title'] ?? h['name'] ?? 'No Title',
+        url: h['url'] ?? h['link'] ?? '',
+        snippet: (h['snippets'] as List?)?.join(' ') ?? h['description'] ?? h['snippet'] ?? h['text'] ?? '',
         sourceName: 'You.com',
       )).toList();
     }
@@ -129,11 +147,21 @@ class ReferenceManager {
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
-      final results = data['web']['results'] as List;
+      
+      // Robust parsing for Brave responses
+      List<dynamic> results = [];
+      if (data['web'] != null && data['web']['results'] is List) {
+        results = data['web']['results'];
+      } else if (data['results'] is List) {
+        results = data['results'];
+      }
+      
+      debugPrint('Brave parsed ${results.length} results');
+      
       return results.map((r) => ReferenceItem(
         title: r['title'] ?? 'No Title',
         url: r['url'] ?? '',
-        snippet: r['description'] ?? '',
+        snippet: r['description'] ?? r['snippet'] ?? '',
         sourceName: 'Brave',
       )).toList();
     }

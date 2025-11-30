@@ -928,8 +928,8 @@ $text
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => WillPopScope(
-        onWillPop: () async => false,
+      builder: (ctx) => PopScope(
+        canPop: false,
         child: AlertDialog(
           content: SizedBox(
             width: 300,
@@ -949,10 +949,16 @@ $text
       ),
     );
 
+    // CRITICAL: Wait for dialog to render before heavy operations
+    await Future.delayed(const Duration(milliseconds: 50));
+
     setState(() {
       _loadingStatus = '正在读取全量历史记录...';
       _sending = true;
     });
+
+    // Yield to UI thread to ensure dialog is visible
+    await Future.delayed(const Duration(milliseconds: 50));
 
     try {
       debugPrint('Deep profiling started');
@@ -1392,14 +1398,28 @@ $userText
           setState(() => _loadingStatus = '正在搜索: ${decision.query}...');
           debugPrint('Agent searching for: ${decision.query}');
           
-          final newRefs = await _refManager.search(decision.query!);
-          if (newRefs.isNotEmpty) {
-            sessionRefs.addAll(newRefs);
-            // Continue loop to re-evaluate with new info
-          } else {
-            // Search failed or returned nothing, force answer to avoid loop
-            debugPrint('Search returned no results. Forcing answer.');
-            setState(() => _loadingStatus = '搜索无结果，正在生成回答...');
+          try {
+            final newRefs = await _refManager.search(decision.query!);
+            if (newRefs.isNotEmpty) {
+              // Deduplicate by URL before adding
+              final existingUrls = sessionRefs.map((r) => r.url).toSet();
+              final uniqueNewRefs = newRefs.where((r) => !existingUrls.contains(r.url)).toList();
+              if (uniqueNewRefs.isNotEmpty) {
+                sessionRefs.addAll(uniqueNewRefs);
+                debugPrint('Added ${uniqueNewRefs.length} unique refs (${newRefs.length - uniqueNewRefs.length} duplicates skipped)');
+              }
+              // Continue loop to re-evaluate with new info
+            } else {
+              // Search returned nothing, force answer to avoid loop
+              debugPrint('Search returned no results. Forcing answer.');
+              setState(() => _loadingStatus = '搜索无结果，正在生成回答...');
+              await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+              break;
+            }
+          } catch (searchError) {
+            // Search failed - graceful degradation: continue with existing refs or answer directly
+            debugPrint('Search failed: $searchError. Falling back to answer.');
+            setState(() => _loadingStatus = '搜索服务暂时不可用，正在生成回答...');
             await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
             break;
           }

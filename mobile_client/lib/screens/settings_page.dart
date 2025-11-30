@@ -494,33 +494,34 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
           Center(
             child: ElevatedButton.icon(
               onPressed: () async {
+                // Capture the callback BEFORE any navigation
+                final deepProfileCallback = widget.onDeepProfile;
+                if (deepProfileCallback == null) return;
+                
                 // Save settings first to ensure keys are available
-                await _save(); 
-                // Trigger profiling
-                // We close the settings page so the user can see the progress in the main chat page
-                // (Since _performDeepProfiling updates _loadingStatus in ChatPage)
-                if (mounted) {
-                  Navigator.pop(context);
-                  // Add a small delay to ensure the pop animation completes
-                  await Future.delayed(const Duration(milliseconds: 300));
-                  if (widget.onDeepProfile != null) {
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      try {
-                        widget.onDeepProfile!();
-                      } catch (e) {
-                        debugPrint('onDeepProfile callback error: $e');
-                      }
-                    });
+                await _save();
+                
+                // CRITICAL FIX: Call the callback BEFORE closing the page
+                // This ensures the ChatPage context is valid when showDialog is called
+                // The dialog will appear on top of SettingsPage, then we close SettingsPage
+                try {
+                  // Start profiling immediately (it will show its own dialog)
+                  // Use unawaited call so dialog shows immediately
+                  deepProfileCallback();
+                  
+                  // Wait a bit for the dialog to be created and shown
+                  await Future.delayed(const Duration(milliseconds: 200));
+                  
+                  // Close settings page AFTER profiling dialog is visible
+                  if (mounted) {
+                    Navigator.pop(context);
                   }
-                } else {
-                  if (widget.onDeepProfile != null) {
-                    Future.microtask(() {
-                      try {
-                        widget.onDeepProfile!();
-                      } catch (e) {
-                        debugPrint('onDeepProfile callback error (microtask): $e');
-                      }
-                    });
+                } catch (e) {
+                  debugPrint('onDeepProfile callback error: $e');
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('深度刻画启动失败: $e')),
+                    );
                   }
                 }
               },
