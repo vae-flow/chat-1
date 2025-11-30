@@ -833,6 +833,36 @@ $text
       return;
     }
 
+    // Use a notifier to update a modal progress dialog so the UI doesn't appear to "hang".
+    final ValueNotifier<String> progress = ValueNotifier<String>('准备读取历史记录...');
+
+    if (!mounted) return;
+
+    // Show non-dismissible progress dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => WillPopScope(
+        onWillPop: () async => false,
+        child: AlertDialog(
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 12),
+                ValueListenableBuilder<String>(
+                  valueListenable: progress,
+                  builder: (context, value, _) => Text(value, textAlign: TextAlign.center),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
     setState(() {
       _loadingStatus = '正在读取全量历史记录...';
       _sending = true;
@@ -840,33 +870,37 @@ $text
 
     try {
       debugPrint('Deep profiling started');
+
       // 1. Gather ALL History (Archive + Active)
       final dir = await getApplicationDocumentsDirectory();
       final archivePath = '${dir.path}/chat_archive.jsonl';
       final allHistoryBuffer = StringBuffer();
 
-      // Read Archive in Isolate
+      // Read Archive in Isolate (non-blocking)
+      progress.value = '读取归档记录...';
       debugPrint('Reading archive from $archivePath');
       final archiveContent = await compute(_processHistoryInIsolate, archivePath);
       allHistoryBuffer.write(archiveContent);
       debugPrint('Archive read complete, length: ${archiveContent.length}');
 
-      // Read Active Messages (Current Persona) - BUT use original content if compressed?
-      // Actually, we should rely on Archive for everything since we archive before compressing.
-      // But if there are unarchived messages (new ones), we add them.
+      // Add unarchived active messages
+      progress.value = '合并当前会话消息...';
       for (var m in _messages) {
-         if (!m.isArchived) {
-            allHistoryBuffer.writeln('[${_activePersona.id}] ${m.role}: ${m.content}');
-         }
+        if (!m.isArchived) {
+          allHistoryBuffer.writeln('[${_activePersona.id}] ${m.role}: ${m.content}');
+        }
       }
 
       final fullText = allHistoryBuffer.toString();
       if (fullText.isEmpty) {
+        progress.value = '无足够历史记录';
         _showError('没有足够的历史记录进行刻画');
         setState(() {
           _loadingStatus = '';
           _sending = false;
         });
+        Navigator.of(context, rootNavigator: true).pop();
+        progress.dispose();
         return;
       }
 
@@ -880,11 +914,14 @@ $text
 
       String currentProfile = _globalMemoryCache;
 
-      // 3. Iterative Profiling
+      // 3. Iterative Profiling with retries and non-blocking UI updates
       for (int i = 0; i < chunks.length; i++) {
-        setState(() => _loadingStatus = '正在深度刻画... (${i + 1}/${chunks.length})');
-        
         final chunk = chunks[i];
+        final statusText = '正在深度刻画... (${i + 1}/${chunks.length})';
+        progress.value = statusText;
+        setState(() => _loadingStatus = statusText);
+
+        // Build prompt
         final prompt = '''
 你是一位拥有超强洞察力的“首席用户侧写师”。
 这是用户历史对话的第 ${i + 1}/${chunks.length} 部分。请基于【当前画像】和【本段对话】，更新用户画像。
@@ -914,25 +951,49 @@ $chunk
           'stream': false,
         });
 
-        final resp = await http.post(
-          uri,
-          headers: {
-            'Authorization': 'Bearer $_profileKey',
-            'Content-Type': 'application/json',
-          },
-          body: body,
-        ).timeout(const Duration(minutes: 5));
+        // Retry logic for each chunk
+        String? newProfile;
+        const int maxRetries = 2;
+        int attempt = 0;
+        while (attempt <= maxRetries) {
+          try {
+            final resp = await http.post(
+              uri,
+              headers: {
+                'Authorization': 'Bearer $_profileKey',
+                'Content-Type': 'application/json',
+              },
+              body: body,
+            ).timeout(const Duration(minutes: 2));
 
-        if (resp.statusCode == 200) {
-          final decodedBody = utf8.decode(resp.bodyBytes);
-          final data = json.decode(decodedBody);
-          final newProfile = data['choices'][0]['message']['content'] ?? '';
-          if (newProfile.isNotEmpty) {
-            currentProfile = newProfile;
+            if (resp.statusCode == 200) {
+              final decodedBody = utf8.decode(resp.bodyBytes);
+              final data = json.decode(decodedBody);
+              final candidate = data['choices']?[0]?['message']?['content'] ?? '';
+              if (candidate != null && candidate.toString().trim().isNotEmpty) {
+                newProfile = candidate.toString();
+              }
+              break;
+            } else {
+              debugPrint('Profiling chunk $i attempt $attempt failed: ${resp.statusCode}');
+            }
+          } catch (e) {
+            debugPrint('Profiling chunk $i attempt $attempt error: $e');
           }
-        } else {
-          debugPrint('Profiling chunk $i failed: ${resp.statusCode}');
+
+          attempt++;
+          // Backoff before retrying
+          await Future.delayed(Duration(seconds: 1 + attempt * 2));
         }
+
+        if (newProfile != null && newProfile.isNotEmpty) {
+          currentProfile = newProfile;
+        } else {
+          debugPrint('Profiling chunk $i failed after $maxRetries retries. Continuing.');
+        }
+
+        // Yield to UI to keep it responsive
+        await Future.delayed(const Duration(milliseconds: 100));
       }
 
       // 4. Final Save
@@ -942,14 +1003,24 @@ $chunk
         _loadingStatus = '';
         _sending = false;
       });
+      progress.value = '深度刻画完成';
       _showError('深度刻画完成！');
-
     } catch (e) {
+      debugPrint('Deep profiling exception: $e');
       _showError('刻画失败: $e');
       setState(() {
         _loadingStatus = '';
         _sending = false;
       });
+    } finally {
+      if (mounted) {
+        try {
+          Navigator.of(context, rootNavigator: true).pop();
+        } catch (_) {}
+      }
+      try {
+        progress.dispose();
+      } catch (_) {}
     }
   }
 
