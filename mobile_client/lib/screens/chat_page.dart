@@ -552,13 +552,14 @@ $refString
         // Use historyOverride if provided, otherwise use current _messages
         var historyToUse = historyOverride ?? _messages;
 
-        // Enforce Context Limit (~15k chars final target) using Recursive Compression
+        // Enforce Context Limit (~30k chars final target) using Recursive Compression
         // If history is too long, we compress it recursively until it fits.
-        if (historyToUse.fold(0, (sum, m) => sum + m.content.length) > 12000) {
+        // User's API supports 30K context, so we use higher limits
+        if (historyToUse.fold(0, (sum, m) => sum + m.content.length) > 25000) {
            if (manageSendingState) {
              setState(() => _loadingStatus = '上下文过长，正在递归压缩...');
            }
-           historyToUse = await _ensureContextFits(historyToUse, 15000);
+           historyToUse = await _ensureContextFits(historyToUse, 30000);
         }
 
         messagesPayload = [
@@ -712,7 +713,7 @@ $refString
     }
   }
 
-  // New: Adaptive Compression Logic
+  // New: Adaptive Compression Logic with Multi-Pass Support
   Future<void> _performAdaptiveCompression() async {
     if (_messages.isEmpty) return;
     
@@ -724,54 +725,139 @@ $refString
     // 1. Archive everything first (Safety & Profiling Source)
     await _archiveAllActiveMessages();
 
-    // 2. Adaptive Summarization
+    // 2. Calculate current total to decide compression strategy
+    int currentTotal = _messages.fold(0, (sum, m) => sum + m.content.length);
+    debugPrint('Compression started. Current total: $currentTotal chars');
+
+    // 3. Adaptive Summarization with Multi-Pass Support
     // Strategy:
-    // - Last message (Index 0 from end): Keep 70% detail
-    // - Index 1: Keep 60%
-    // - ...
-    // - Index >= 5: Keep 20%
+    // - Recent messages (last 5): Keep 60-80% detail
+    // - Older messages: Aggressively compress to 15-30%
+    // - Already compressed messages: Can be re-compressed if still too long
     
     try {
+      int compressedCount = 0;
+      int mergedCount = 0;
+
+      // Phase 1: Individual message compression
       for (int i = 0; i < _messages.length; i++) {
-        // Calculate index from end (0 is the latest message)
         final indexFromEnd = _messages.length - 1 - i;
         
-        // Determine target ratio
-        double targetRatio = 0.7 - (indexFromEnd * 0.1);
-        if (targetRatio < 0.2) targetRatio = 0.2;
-        
-        // Skip if already compressed to a lower or equal ratio
-        final currentRatio = _messages[i].compressionRatio;
-        if (currentRatio != null && currentRatio <= targetRatio) {
-          continue;
+        // Determine target ratio based on recency
+        double targetRatio;
+        if (indexFromEnd <= 2) {
+          targetRatio = 0.8; // Very recent: keep 80%
+        } else if (indexFromEnd <= 5) {
+          targetRatio = 0.5; // Recent: keep 50%
+        } else if (indexFromEnd <= 10) {
+          targetRatio = 0.3; // Older: keep 30%
+        } else {
+          targetRatio = 0.15; // Very old: keep 15%
         }
-
+        
         // Skip system messages or images
         if (_messages[i].role == 'system' || _messages[i].imageUrl != null || _messages[i].localImagePath != null) {
            continue;
         }
 
-        // Perform Summarization
-        final originalContent = _messages[i].content;
-        final originalLen = _messages[i].originalLength ?? originalContent.length;
+        final currentContent = _messages[i].content;
+        final currentRatio = _messages[i].compressionRatio;
+        final originalLen = _messages[i].originalLength ?? currentContent.length;
         
         // If text is short, don't compress
-        if (originalContent.length < 100) continue;
+        if (currentContent.length < 80) continue;
 
-        final summary = await _generateSummary(originalContent, targetRatio);
+        // Allow re-compression if:
+        // 1. Never compressed, OR
+        // 2. Current ratio is higher than target (can compress more), OR
+        // 3. Content is still long (> 500 chars) and current ratio > target * 0.7
+        bool shouldCompress = currentRatio == null ||
+            currentRatio > targetRatio ||
+            (currentContent.length > 500 && currentRatio > targetRatio * 0.7);
         
-        setState(() {
-          _messages[i] = _messages[i].copyWith(
-            content: summary,
-            isCompressed: true,
-            originalLength: originalLen,
-            compressionRatio: targetRatio,
-          );
-        });
+        if (!shouldCompress) continue;
+
+        setState(() => _loadingStatus = '压缩消息 ${i + 1}/${_messages.length}...');
+
+        final summary = await _generateSummary(currentContent, targetRatio);
+        
+        // Only accept if actually shorter (compression worked)
+        if (summary.length < currentContent.length * 0.95) {
+          final actualRatio = summary.length / originalLen;
+          setState(() {
+            _messages[i] = _messages[i].copyWith(
+              content: summary,
+              isCompressed: true,
+              originalLength: originalLen,
+              compressionRatio: actualRatio,
+            );
+          });
+          compressedCount++;
+        } else {
+          debugPrint('Compression did not reduce size for message $i, skipping');
+        }
+      }
+
+      // Phase 2: Merge very old short messages into summary blocks
+      // This handles the case where many small messages accumulate
+      currentTotal = _messages.fold(0, (sum, m) => sum + m.content.length);
+      if (currentTotal > 20000 && _messages.length > 15) {
+        setState(() => _loadingStatus = '合并历史消息块...');
+        
+        // Find consecutive older messages (not in last 10) that can be merged
+        final mergeCandidates = <int>[];
+        for (int i = 0; i < _messages.length - 10; i++) {
+          if (_messages[i].role != 'system' && 
+              _messages[i].imageUrl == null && 
+              _messages[i].localImagePath == null) {
+            mergeCandidates.add(i);
+          }
+        }
+        
+        // Merge in chunks of 5
+        if (mergeCandidates.length >= 5) {
+          for (int start = 0; start < mergeCandidates.length - 4; start += 5) {
+            final chunk = mergeCandidates.sublist(start, (start + 5).clamp(0, mergeCandidates.length));
+            if (chunk.length < 3) continue;
+            
+            // Combine content
+            final combined = chunk.map((idx) => '${_messages[idx].role}: ${_messages[idx].content}').join('\n');
+            if (combined.length < 200) continue; // Not worth merging
+            
+            // Summarize the combined block
+            final blockSummary = await _generateSummary(combined, 0.2);
+            
+            if (blockSummary.length < combined.length * 0.5) {
+              // Replace first message in chunk with summary, mark others for removal
+              final firstIdx = chunk.first;
+              setState(() {
+                _messages[firstIdx] = ChatMessage(
+                  'system',
+                  '【历史摘要】\n$blockSummary',
+                  isMemory: true,
+                  isCompressed: true,
+                  compressionRatio: 0.2,
+                );
+                // Mark other messages in chunk as empty (will be filtered later)
+                for (int j = 1; j < chunk.length; j++) {
+                  _messages[chunk[j]] = _messages[chunk[j]].copyWith(content: '');
+                }
+              });
+              mergedCount++;
+            }
+          }
+          
+          // Remove empty messages
+          setState(() {
+            _messages.removeWhere((m) => m.content.isEmpty && m.imageUrl == null && m.localImagePath == null);
+          });
+        }
       }
       
       _saveChatHistory();
-      _showError('记忆压缩完成');
+      
+      final newTotal = _messages.fold(0, (sum, m) => sum + m.content.length);
+      _showError('压缩完成! $compressedCount条消息压缩, $mergedCount块合并. 总字符: $currentTotal → $newTotal');
 
     } catch (e) {
       _showError('压缩失败: $e');
