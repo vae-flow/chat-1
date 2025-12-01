@@ -36,7 +36,7 @@ jobs:
           flutter pub get
 
       - name: Create Android Platform Files
-        run: flutter create . --org com.vae --platforms android
+        run: flutter create . --org com.oneapi.pro --platforms android
 
       - name: Configure Android Project (Robust Python Script)
         run: |
@@ -69,7 +69,7 @@ jobs:
                       content = content.replace('<application', '<application android:usesCleartextTraffic="true"')
                       print("Enabled Cleartext Traffic")
 
-                  content = content.replace('android:label="mobile_client"', 'android:label="One-API 助手"')
+                  content = content.replace('android:label="oneapi_assistant_pro"', 'android:label="One-API Pro"')
                   print("Updated App Label")
 
               with open(path, 'w', encoding='utf-8') as f:
@@ -174,11 +174,11 @@ jobs:
       - name: Rename APK with Version
         run: |
           VERSION=$(date +%Y%m%d_%H%M)
-          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Assistant_v${VERSION}.apk
-          echo "APK renamed to: OneAPI_Assistant_v${VERSION}.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Pro_v${VERSION}.apk
+          echo "APK renamed to: OneAPI_Pro_v${VERSION}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: OneAPI_Assistant_${{ github.run_number }}
-          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Assistant_*.apk
+          name: OneAPI_Pro_${{ github.run_number }}
+          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Pro_*.apk

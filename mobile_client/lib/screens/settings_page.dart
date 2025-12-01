@@ -54,6 +54,16 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _braveKeyCtrl = TextEditingController();
   String _searchProvider = 'mock';
 
+  // Worker Pro (思考型内部处理)
+  final _workerProBaseCtrl = TextEditingController();
+  final _workerProKeysCtrl = TextEditingController();  // 逗号分隔多密钥
+  final _workerProModelCtrl = TextEditingController();
+
+  // Worker (执行型内部处理)
+  final _workerBaseCtrl = TextEditingController();
+  final _workerKeysCtrl = TextEditingController();  // 逗号分隔多密钥
+  final _workerModelCtrl = TextEditingController();
+
   // Global Memory Editor
   final _globalMemoryCtrl = TextEditingController();
   String _initialGlobalMemory = '';
@@ -63,7 +73,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 6, vsync: this); // Increased tab count
+    _tabController = TabController(length: 7, vsync: this); // 增加 Worker 标签
     _load();
   }
 
@@ -92,6 +102,12 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     _youKeyCtrl.dispose();
     _braveBaseCtrl.dispose();
     _braveKeyCtrl.dispose();
+    _workerProBaseCtrl.dispose();
+    _workerProKeysCtrl.dispose();
+    _workerProModelCtrl.dispose();
+    _workerBaseCtrl.dispose();
+    _workerKeysCtrl.dispose();
+    _workerModelCtrl.dispose();
     _globalMemoryCtrl.dispose();
     super.dispose();
   }
@@ -129,6 +145,16 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _braveBaseCtrl.text = prefs.getString('brave_base') ?? 'https://api.search.brave.com';
       _braveKeyCtrl.text = prefs.getString('brave_key') ?? '';
       _searchProvider = prefs.getString('search_provider') ?? 'auto';
+
+      // Worker Pro (思考型)
+      _workerProBaseCtrl.text = prefs.getString('worker_pro_base') ?? '';
+      _workerProKeysCtrl.text = prefs.getString('worker_pro_keys') ?? '';
+      _workerProModelCtrl.text = prefs.getString('worker_pro_model') ?? 'gpt-4o-mini';
+
+      // Worker (执行型)
+      _workerBaseCtrl.text = prefs.getString('worker_base') ?? '';
+      _workerKeysCtrl.text = prefs.getString('worker_keys') ?? '';
+      _workerModelCtrl.text = prefs.getString('worker_model') ?? 'gemini-2.0-flash';
 
       _initialGlobalMemory = prefs.getString('global_memory') ?? '';
       _globalMemoryCtrl.text = _initialGlobalMemory;
@@ -168,6 +194,16 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('brave_base', _braveBaseCtrl.text.trim());
     await prefs.setString('brave_key', _braveKeyCtrl.text.trim());
     await prefs.setString('search_provider', _searchProvider);
+
+    // Worker Pro (思考型)
+    await prefs.setString('worker_pro_base', _workerProBaseCtrl.text.trim());
+    await prefs.setString('worker_pro_keys', _workerProKeysCtrl.text.trim());
+    await prefs.setString('worker_pro_model', _workerProModelCtrl.text.trim());
+
+    // Worker (执行型)
+    await prefs.setString('worker_base', _workerBaseCtrl.text.trim());
+    await prefs.setString('worker_keys', _workerKeysCtrl.text.trim());
+    await prefs.setString('worker_model', _workerModelCtrl.text.trim());
 
     // Save Global Memory Manually Edited
     if (_globalMemoryCtrl.text != _initialGlobalMemory) {
@@ -334,7 +370,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       children: [
         const Text('搜索 API 配置', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
-        const Text('配置搜索服务的 API Key。如果选择“自动选择”，系统将按顺序使用已配置的密钥 (Exa > You > Brave)。', style: TextStyle(color: Colors.grey)),
+        const Text(
+          '配置搜索服务的 API Key。支持多密钥轮换（逗号分隔）。\n'
+          '如果选择"自动选择"，系统将按顺序使用已配置的服务 (Exa > You > Brave)。', 
+          style: TextStyle(color: Colors.grey, fontSize: 12),
+        ),
         const SizedBox(height: 16),
         
         DropdownButtonFormField<String>(
@@ -369,11 +409,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         TextField(
           controller: _exaKeyCtrl,
           decoration: const InputDecoration(
-            labelText: 'Exa API Key',
+            labelText: 'Exa API Keys（逗号分隔多个）',
             border: OutlineInputBorder(),
-            helperText: 'Get from dashboard.exa.ai',
+            helperText: '多密钥自动轮换',
           ),
-          obscureText: true,
+          maxLines: 2,
         ),
         const SizedBox(height: 16),
 
@@ -391,11 +431,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         TextField(
           controller: _youKeyCtrl,
           decoration: const InputDecoration(
-            labelText: 'You.com API Key',
+            labelText: 'You.com API Keys（逗号分隔多个）',
             border: OutlineInputBorder(),
-            helperText: 'Get from api.you.com',
+            helperText: '多密钥自动轮换',
           ),
-          obscureText: true,
+          maxLines: 2,
         ),
         const SizedBox(height: 16),
 
@@ -413,11 +453,11 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
         TextField(
           controller: _braveKeyCtrl,
           decoration: const InputDecoration(
-            labelText: 'Brave API Key',
+            labelText: 'Brave API Keys（逗号分隔多个）',
             border: OutlineInputBorder(),
-            helperText: 'Get from brave.com/search/api',
+            helperText: '多密钥自动轮换',
           ),
-          obscureText: true,
+          maxLines: 2,
         ),
       ],
     );
@@ -538,6 +578,207 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     );
   }
 
+  Widget _buildWorkerTab() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text('⚙️ 内部处理 API', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        const Text(
+          'Worker API 用于内部任务处理（压缩、翻译、意图识别等），不影响聊天功能。\n'
+          '如果不配置，将自动 fallback 到聊天 API。\n'
+          '多密钥用逗号分隔，系统会自动轮换以避免 RPM 限制。',
+          style: TextStyle(color: Colors.grey, fontSize: 12),
+        ),
+        const SizedBox(height: 24),
+        
+        // Worker Pro Section
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.blue.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.blue.withOpacity(0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.psychology, color: Colors.blue),
+                  SizedBox(width: 8),
+                  Text('Worker Pro（思考型）', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '用于需要理解和判断的任务：意图识别、总结压缩、搜索词改写、摘要生成。\n'
+                '推荐：gpt-4o-mini / claude-haiku / gemini-1.5-flash',
+                style: TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _workerProBaseCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'API Base URL',
+                  hintText: 'https://api.openai.com/v1',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _workerProKeysCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'API Keys（逗号分隔多个）',
+                  hintText: 'sk-key1, sk-key2, sk-key3',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                  helperText: '多密钥自动轮换，防止 RPM 限制',
+                ),
+                maxLines: 2,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _workerProModelCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Model',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    onPressed: _loading ? null : () {
+                      final keys = _workerProKeysCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+                      if (keys.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先填写 API Key')));
+                        return;
+                      }
+                      // 用第一个 key 获取模型列表
+                      final tempKeyCtrl = TextEditingController(text: keys.first);
+                      _fetchModels(_workerProBaseCtrl, tempKeyCtrl, _workerProModelCtrl);
+                    },
+                    icon: const Icon(Icons.cloud_download, size: 20),
+                    tooltip: '获取模型列表',
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 24),
+        
+        // Worker Section
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.05),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.green.withOpacity(0.2)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.bolt, color: Colors.green),
+                  SizedBox(width: 8),
+                  Text('Worker（执行型）', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '用于简单机械任务：翻译、格式校验、关键词提取、去重判断。\n'
+                '推荐：gemini-2.0-flash / gpt-3.5-turbo（最便宜最快）',
+                style: TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _workerBaseCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'API Base URL',
+                  hintText: 'https://api.openai.com/v1',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _workerKeysCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'API Keys（逗号分隔多个）',
+                  hintText: 'sk-key1, sk-key2, sk-key3',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                  helperText: '多密钥自动轮换，可并行调用',
+                ),
+                maxLines: 2,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _workerModelCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Model',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filledTonal(
+                    onPressed: _loading ? null : () {
+                      final keys = _workerKeysCtrl.text.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+                      if (keys.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先填写 API Key')));
+                        return;
+                      }
+                      final tempKeyCtrl = TextEditingController(text: keys.first);
+                      _fetchModels(_workerBaseCtrl, tempKeyCtrl, _workerModelCtrl);
+                    },
+                    icon: const Icon(Icons.cloud_download, size: 20),
+                    tooltip: '获取模型列表',
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 24),
+        
+        // Fallback 说明
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.orange.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.info_outline, color: Colors.orange, size: 20),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Fallback 策略：Worker 未配置 → Worker Pro → 分流 API → 聊天 API',
+                  style: TextStyle(fontSize: 11, color: Colors.orange),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -552,6 +793,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             Tab(text: '识图', icon: Icon(Icons.image)),
             Tab(text: '分流', icon: Icon(Icons.alt_route)),
             Tab(text: '搜索', icon: Icon(Icons.search)),
+            Tab(text: 'Worker', icon: Icon(Icons.settings_suggest)),
             Tab(text: '记忆', icon: Icon(Icons.memory)),
           ],
         ),
@@ -564,6 +806,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
           _buildConfigTab('识图', _visionBaseCtrl, _visionKeyCtrl, _visionModelCtrl),
           _buildConfigTab('分流 (Router)', _routerBaseCtrl, _routerKeyCtrl, _routerModelCtrl),
           _buildSearchTab(),
+          _buildWorkerTab(),
           _buildMemoryTab(),
         ],
       ),
