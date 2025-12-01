@@ -20,6 +20,10 @@ import '../services/image_service.dart';
 import '../utils/constants.dart';
 import 'settings_page.dart';
 import 'persona_manager_page.dart';
+import '../main.dart';  // For AppColors
+import 'dart:math' as math;
+import 'package:flutter_math_fork/flutter_math.dart';
+import 'package:markdown/markdown.dart' as md;
 
 // Top-level function for compute
 Future<String> _processHistoryInIsolate(String filePath) async {
@@ -42,6 +46,53 @@ Future<String> _processHistoryInIsolate(String filePath) async {
   return buffer.toString();
 }
 
+// Inline/Block math support for Markdown rendering
+class BlockMathSyntax extends md.InlineSyntax {
+  BlockMathSyntax() : super(r'\$\$([^$]+?)\$\$');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.text('block_math', match[1]!));
+    return true;
+  }
+}
+
+class InlineMathSyntax extends md.InlineSyntax {
+  InlineMathSyntax() : super(r'\$([^$\n]+?)\$');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.text('inline_math', match[1]!));
+    return true;
+  }
+}
+
+class MathBuilder extends MarkdownElementBuilder {
+  MathBuilder({required this.isBlock});
+
+  final bool isBlock;
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final formula = element.textContent.trim();
+    if (formula.isEmpty) return const SizedBox.shrink();
+
+    final mathWidget = Math.tex(
+      formula,
+      mathStyle: MathStyle.text,
+      textStyle: preferredStyle,
+      textScaleFactor: isBlock ? 1.05 : 1.0,
+    );
+
+    return isBlock
+        ? Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: mathWidget,
+          )
+        : mathWidget;
+  }
+}
+
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
 
@@ -49,8 +100,14 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
-class _ChatPageState extends State<ChatPage> {
+class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final TextEditingController _inputCtrl = TextEditingController();
+  
+  // 动画控制器
+  late AnimationController _pulseController;
+  late AnimationController _floatController;
+  late Animation<double> _pulseAnimation;
+  late Animation<double> _floatAnimation;
   final ScrollController _scrollCtrl = ScrollController();
   final ImagePicker _picker = ImagePicker();
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
@@ -114,10 +171,40 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
+    _initAnimations();
     _initNotifications();
     _loadSettings();
-    _loadPersonas(); // Load personas
+    _loadPersonas();
     _loadChatHistory();
+  }
+  
+  void _initAnimations() {
+    // 脉冲动画 - 用于空状态图标
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 2000),
+      vsync: this,
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    
+    // 浮动动画 - 用于空状态
+    _floatController = AnimationController(
+      duration: const Duration(milliseconds: 3000),
+      vsync: this,
+    )..repeat(reverse: true);
+    _floatAnimation = Tween<double>(begin: -8, end: 8).animate(
+      CurvedAnimation(parent: _floatController, curve: Curves.easeInOut),
+    );
+  }
+  
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    _floatController.dispose();
+    _inputCtrl.dispose();
+    _scrollCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _initNotifications() async {
@@ -991,8 +1078,6 @@ $text
           _loadingStatus = '';
           _sending = false;
         });
-        Navigator.of(context, rootNavigator: true).pop();
-        progress.dispose();
         return;
       }
 
@@ -1107,7 +1192,7 @@ $chunk
     } finally {
       if (mounted) {
         try {
-          Navigator.of(context, rootNavigator: true).pop();
+          await Navigator.of(context, rootNavigator: true).maybePop();
         } catch (_) {}
       }
       try {
@@ -1521,289 +1606,649 @@ $userText
     final isMemoryFull = totalChars > 20000;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F2F7), // iOS style light grey
-      appBar: AppBar(
-        title: Column(
+      extendBodyBehindAppBar: true,
+      backgroundColor: Colors.transparent,
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: AppColors.backgroundGradient,
+        ),
+        child: Column(
           children: [
-            const Text('One-API 助手', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-            Text(
-              _chatModel,
-              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            // 华丽渐变 AppBar
+            _buildGlassAppBar(context, totalChars, isMemoryFull),
+            
+            // 记忆状态栏 - 玻璃效果
+            if (totalChars > 0)
+              _buildMemoryStatusBar(totalChars, isMemoryFull),
+            
+            // 消息列表
+            Expanded(
+              child: _messages.isEmpty
+                  ? _buildEmptyState()
+                  : ListView.builder(
+                      controller: _scrollCtrl,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                      itemCount: _messages.length,
+                      itemBuilder: (context, index) => _buildMessageItem(_messages[index]),
+                    ),
             ),
+          
+            // 华丽输入区域
+            _buildFancyInputArea(context),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.delete_outline),
-            tooltip: '清空对话',
-            onPressed: () {
-              setState(() {
-                _messages.clear();
-                _saveChatHistory();
-                _refManager.clearExternalReferences(); // Clear external refs
-              });
-            },
-          ),
-          // Persona Switcher
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.people_outline),
-            tooltip: '切换人格',
-            onSelected: (value) {
-              if (value == 'manage') {
-                _openPersonaManager();
-              } else {
-                _switchPersona(value);
-              }
-            },
-            itemBuilder: (context) {
-              return [
-                ..._personas.map((p) => PopupMenuItem(
-                  value: p.id,
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 24, height: 24,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          image: p.avatarPath != null && File(p.avatarPath!).existsSync()
-                              ? DecorationImage(image: FileImage(File(p.avatarPath!)), fit: BoxFit.cover)
-                              : null,
-                          color: Colors.grey[200],
-                        ),
-                        child: p.avatarPath == null ? const Icon(Icons.person, size: 16, color: Colors.grey) : null,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(p.name, style: TextStyle(
-                        fontWeight: p.id == _currentPersonaId ? FontWeight.bold : FontWeight.normal,
-                        color: p.id == _currentPersonaId ? Theme.of(context).primaryColor : null,
-                      )),
-                      if (p.id == _currentPersonaId) ...[
-                        const Spacer(),
-                        Icon(Icons.check, size: 16, color: Theme.of(context).primaryColor),
-                      ]
-                    ],
-                  ),
-                )),
-                const PopupMenuDivider(),
-                const PopupMenuItem(
-                  value: 'manage',
-                  child: Row(
-                    children: [
-                      Icon(Icons.settings_accessibility, size: 18),
-                      SizedBox(width: 8),
-                      Text('管理人格...'),
-                    ],
-                  ),
-                ),
-              ];
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: '设置',
-            onPressed: _openSettings,
+      ),
+    );
+  }
+
+  // 记忆状态栏
+  Widget _buildMemoryStatusBar(int totalChars, bool isMemoryFull) {
+    final progress = (totalChars / 20000).clamp(0.0, 1.0);
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: isMemoryFull 
+                ? Colors.red.withOpacity(0.15)
+                : AppColors.shadowLight,
+            blurRadius: 10,
+            offset: const Offset(0, 2),
           ),
         ],
+        border: Border.all(
+          color: isMemoryFull 
+              ? Colors.red.withOpacity(0.3)
+              : Colors.white.withOpacity(0.5),
+        ),
       ),
-      body: Column(
+      child: Row(
         children: [
-          // Memory Status Bar
-          if (totalChars > 0)
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 300),
-              width: double.infinity,
-              height: 40, // Always visible if there is content
-              color: isMemoryFull ? Colors.red[50] : Colors.grey[100],
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              gradient: isMemoryFull 
+                  ? const LinearGradient(colors: [Color(0xFFFF6B6B), Color(0xFFEE5A5A)])
+                  : AppColors.primaryGradient,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              isMemoryFull ? Icons.warning_amber_rounded : Icons.psychology_rounded, 
+              size: 16, 
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isMemoryFull ? '记忆即将满载' : '记忆容量',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: isMemoryFull ? Colors.red[700] : Colors.grey[700],
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Stack(
+                  children: [
+                    Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    FractionallySizedBox(
+                      widthFactor: progress,
+                      child: Container(
+                        height: 4,
+                        decoration: BoxDecoration(
+                          gradient: isMemoryFull 
+                              ? const LinearGradient(colors: [Color(0xFFFF6B6B), Color(0xFFEE5A5A)])
+                              : AppColors.primaryGradient,
+                          borderRadius: BorderRadius.circular(2),
+                          boxShadow: [
+                            BoxShadow(
+                              color: (isMemoryFull ? Colors.red : AppColors.primaryStart).withOpacity(0.4),
+                              blurRadius: 4,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '$totalChars',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: isMemoryFull ? Colors.red : AppColors.primaryStart,
+            ),
+          ),
+          if (totalChars > 500)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: _sending ? null : _performAdaptiveCompression,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      gradient: isMemoryFull 
+                          ? const LinearGradient(colors: [Color(0xFFFF6B6B), Color(0xFFEE5A5A)])
+                          : AppColors.primaryGradient,
+                      borderRadius: BorderRadius.circular(8),
+                      boxShadow: [
+                        BoxShadow(
+                          color: (isMemoryFull ? Colors.red : AppColors.primaryStart).withOpacity(0.3),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Text(
+                      '压缩',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // 空状态 - 带动画效果
+  Widget _buildEmptyState() {
+    return Center(
+      child: AnimatedBuilder(
+        animation: _floatAnimation,
+        builder: (context, child) {
+          return Transform.translate(
+            offset: Offset(0, _floatAnimation.value),
+            child: child,
+          );
+        },
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ScaleTransition(
+              scale: _pulseAnimation,
+              child: Container(
+                padding: const EdgeInsets.all(28),
+                decoration: BoxDecoration(
+                  gradient: AppColors.primaryGradient,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primaryStart.withOpacity(0.4),
+                      blurRadius: 30,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 48,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(height: 32),
+            ShaderMask(
+              shaderCallback: (bounds) => AppColors.primaryGradient.createShader(bounds),
+              child: const Text(
+                '开始新的对话',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppColors.shadowLight,
+                    blurRadius: 10,
+                  ),
+                ],
+              ),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(
-                    isMemoryFull ? Icons.warning_amber_rounded : Icons.storage_rounded, 
-                    size: 16, 
-                    color: isMemoryFull ? Colors.red : Colors.grey[600]
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      gradient: AppColors.primaryGradient,
+                      shape: BoxShape.circle,
+                    ),
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    isMemoryFull 
-                        ? '记忆库即将爆满 ($totalChars/20000)' 
-                        : '当前记忆: $totalChars / 20000 字符',
+                    _activePersona.name,
                     style: TextStyle(
-                      fontSize: 12, 
-                      color: isMemoryFull ? Colors.red : Colors.grey[800],
+                      fontSize: 14,
                       fontWeight: FontWeight.w500,
+                      color: Colors.grey[700],
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  if (totalChars > 500) // Allow compression if > 500 chars
-                    TextButton(
-                      onPressed: _sending ? null : _performAdaptiveCompression,
-                      style: TextButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        backgroundColor: isMemoryFull ? Colors.red[100] : Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: BorderSide(color: isMemoryFull ? Colors.red[200]! : Colors.grey[300]!)
-                        ),
-                      ),
-                      child: Text(
-                        '手动压缩', 
-                        style: TextStyle(
-                          fontSize: 11, 
-                          color: isMemoryFull ? Colors.red : Colors.blue[700]
-                        )
-                      ),
-                    ),
                 ],
               ),
             ),
-            
-          Expanded(
-            child: _messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(24),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                            boxShadow: [
-                              BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 10))
-                            ]
-                          ),
-                          child: Icon(Icons.chat_bubble_outline_rounded, size: 48, color: Theme.of(context).primaryColor.withOpacity(0.5)),
-                        ),
-                        const SizedBox(height: 24),
-                        Text('开始新的对话吧', style: TextStyle(color: Colors.grey[400], fontSize: 16)),
-                        const SizedBox(height: 8),
-                        Text('当前人格: ${_activePersona.name}', style: TextStyle(color: Colors.grey[400], fontSize: 12)),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollCtrl,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) => _buildMessageItem(_messages[index]),
-                  ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 华丽输入区域
+  Widget _buildFancyInputArea(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.shadowMedium,
+            blurRadius: 20,
+            offset: const Offset(0, -8),
           ),
-          
-          // Input Area
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.05),
-                  blurRadius: 10,
-                  offset: const Offset(0, -5),
+        ],
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // 加载状态
+            if (_sending)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryStart),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        _loadingStatus.isEmpty ? '正在思考...' : _loadingStatus,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: AppColors.primaryStart,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_sending)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-                      child: Row(
+              ),
+            // 已选图片预览
+            if (_selectedImage != null)
+              Container(
+                margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      AppColors.primaryStart.withOpacity(0.1),
+                      AppColors.primaryEnd.withOpacity(0.05),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.primaryStart.withOpacity(0.2)),
+                ),
+                child: Row(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.file(File(_selectedImage!.path), width: 50, height: 50, fit: BoxFit.cover),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          SizedBox(
-                            width: 12, height: 12,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Theme.of(context).primaryColor),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            _loadingStatus.isEmpty ? '对方正在输入...' : _loadingStatus,
-                            style: TextStyle(fontSize: 12, color: Theme.of(context).primaryColor, fontWeight: FontWeight.w500),
-                          ),
+                          const Text('已选择图片', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          Text('点击发送进行识图', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                         ],
                       ),
                     ),
-                  if (_selectedImage != null)
-                    Container(
-                      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                      padding: const EdgeInsets.all(8),
+                    IconButton(
+                      icon: Icon(Icons.close_rounded, size: 20, color: Colors.grey[400]),
+                      onPressed: () => setState(() => _selectedImage = null),
+                    ),
+                  ],
+                ),
+              ),
+            // 输入行
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  // 图片按钮
+                  _buildInputActionButton(
+                    icon: Icons.add_photo_alternate_rounded,
+                    onPressed: _sending ? null : _pickImage,
+                    tooltip: '发送图片',
+                  ),
+                  // 生图按钮
+                  _buildInputActionButton(
+                    icon: Icons.auto_fix_high_rounded,
+                    onPressed: _sending ? null : _manualGenerateImage,
+                    tooltip: 'AI 生图',
+                  ),
+                  const SizedBox(width: 8),
+                  // 输入框
+                  Expanded(
+                    child: Container(
                       decoration: BoxDecoration(
-                        color: Colors.grey[50],
-                        borderRadius: BorderRadius.circular(12),
+                        color: Colors.grey[100],
+                        borderRadius: BorderRadius.circular(24),
                         border: Border.all(color: Colors.grey[200]!),
                       ),
-                      child: Row(
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: Image.file(File(_selectedImage!.path), width: 48, height: 48, fit: BoxFit.cover),
-                          ),
-                          const SizedBox(width: 12),
-                          const Expanded(child: Text('已选择图片', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500))),
-                          IconButton(
-                            icon: const Icon(Icons.close, size: 20, color: Colors.grey),
-                            onPressed: () => setState(() => _selectedImage = null),
-                          ),
-                        ],
+                      child: TextField(
+                        controller: _inputCtrl,
+                        maxLines: 5,
+                        minLines: 1,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _sending ? null : _send(),
+                        style: const TextStyle(fontSize: 15),
+                        decoration: InputDecoration(
+                          hintText: '输入消息...',
+                          hintStyle: TextStyle(color: Colors.grey[400]),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                        ),
                       ),
                     ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.add_photo_alternate_outlined),
-                          color: Colors.grey[600],
-                          onPressed: _sending ? null : _pickImage,
-                          tooltip: '发送图片',
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.palette_outlined),
-                          color: Colors.grey[600],
-                          onPressed: _sending ? null : _manualGenerateImage,
-                          tooltip: 'AI 生图',
-                        ),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Colors.grey[100],
-                              borderRadius: BorderRadius.circular(24),
-                            ),
-                            child: TextField(
-                              controller: _inputCtrl,
-                              maxLines: 5,
-                              minLines: 1,
-                              textInputAction: TextInputAction.send,
-                              onSubmitted: (_) => _sending ? null : _send(),
-                              decoration: const InputDecoration(
-                                hintText: '输入消息...',
-                                border: InputBorder.none,
-                                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                filled: false,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        FloatingActionButton(
-                          onPressed: _sending ? null : _send,
-                          elevation: 0,
-                          mini: true,
-                          backgroundColor: _sending ? Colors.grey[300] : Theme.of(context).primaryColor,
-                          child: Icon(Icons.arrow_upward_rounded, color: _sending ? Colors.grey : Colors.white),
+                  ),
+                  const SizedBox(width: 8),
+                  // 发送按钮
+                  Container(
+                    decoration: BoxDecoration(
+                      gradient: _sending ? null : AppColors.primaryGradient,
+                      color: _sending ? Colors.grey[300] : null,
+                      shape: BoxShape.circle,
+                      boxShadow: _sending ? null : [
+                        BoxShadow(
+                          color: AppColors.primaryStart.withOpacity(0.4),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
                         ),
                       ],
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: _sending ? null : _send,
+                        borderRadius: BorderRadius.circular(24),
+                        child: Container(
+                          width: 48,
+                          height: 48,
+                          alignment: Alignment.center,
+                          child: Icon(
+                            Icons.arrow_upward_rounded,
+                            color: _sending ? Colors.grey[500] : Colors.white,
+                            size: 24,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputActionButton({
+    required IconData icon,
+    required VoidCallback? onPressed,
+    required String tooltip,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          child: Icon(
+            icon,
+            color: onPressed != null ? Colors.grey[600] : Colors.grey[400],
+            size: 24,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 华丽玻璃效果 AppBar
+  Widget _buildGlassAppBar(BuildContext context, int totalChars, bool isMemoryFull) {
+    return Container(
+      padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [AppColors.primaryStart, AppColors.primaryEnd],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primaryStart.withOpacity(0.3),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // 主 AppBar 区域
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(
+              children: [
+                const SizedBox(width: 8),
+                // 标题区域
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'One-API 助手',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: Colors.greenAccent,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.greenAccent.withOpacity(0.5),
+                                  blurRadius: 4,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            _chatModel,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.white.withOpacity(0.8),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // 操作按钮
+                _buildAppBarButton(
+                  icon: Icons.delete_outline_rounded,
+                  onPressed: () {
+                    setState(() {
+                      _messages.clear();
+                      _saveChatHistory();
+                      _refManager.clearExternalReferences();
+                    });
+                  },
+                  tooltip: '清空对话',
+                ),
+                _buildPersonaSwitcher(context),
+                _buildAppBarButton(
+                  icon: Icons.settings_outlined,
+                  onPressed: _openSettings,
+                  tooltip: '设置',
+                ),
+              ],
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildAppBarButton({
+    required IconData icon,
+    required VoidCallback onPressed,
+    required String tooltip,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Icon(icon, color: Colors.white, size: 20),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPersonaSwitcher(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: '切换人格',
+      offset: const Offset(0, 48),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      onSelected: (value) {
+        if (value == 'manage') {
+          _openPersonaManager();
+        } else {
+          _switchPersona(value);
+        }
+      },
+      itemBuilder: (context) {
+        return [
+          ..._personas.map((p) => PopupMenuItem(
+            value: p.id,
+            child: Row(
+              children: [
+                Container(
+                  width: 28, height: 28,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: p.id == _currentPersonaId 
+                        ? AppColors.primaryGradient 
+                        : null,
+                    color: p.id != _currentPersonaId ? Colors.grey[200] : null,
+                    image: p.avatarPath != null && File(p.avatarPath!).existsSync()
+                        ? DecorationImage(image: FileImage(File(p.avatarPath!)), fit: BoxFit.cover)
+                        : null,
+                  ),
+                  child: p.avatarPath == null 
+                      ? Icon(Icons.person, size: 16, color: p.id == _currentPersonaId ? Colors.white : Colors.grey) 
+                      : null,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(p.name, style: TextStyle(
+                    fontWeight: p.id == _currentPersonaId ? FontWeight.bold : FontWeight.normal,
+                    color: p.id == _currentPersonaId ? AppColors.primaryStart : null,
+                  )),
+                ),
+                if (p.id == _currentPersonaId)
+                  Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: const BoxDecoration(
+                      gradient: AppColors.primaryGradient,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.check, size: 12, color: Colors.white),
+                  ),
+              ],
+            ),
+          )),
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: 'manage',
+            child: Row(
+              children: [
+                Icon(Icons.settings_accessibility, size: 20, color: Colors.grey),
+                SizedBox(width: 12),
+                Text('管理人格...'),
+              ],
+            ),
+          ),
+        ];
+      },
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(Icons.people_outline, color: Colors.white, size: 20),
       ),
     );
   }
@@ -1816,10 +2261,16 @@ $userText
       return Center(
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 16),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: BoxDecoration(
-            color: Colors.grey[200],
+            gradient: LinearGradient(
+              colors: [
+                Colors.grey[200]!.withOpacity(0.8),
+                Colors.grey[100]!.withOpacity(0.8),
+              ],
+            ),
             borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.grey[300]!.withOpacity(0.5)),
           ),
           child: Text(
             m.content,
@@ -1829,7 +2280,7 @@ $userText
       );
     }
 
-    // Compressed Message UI
+    // 压缩消息 UI - 更华丽
     if (m.isCompressed) {
       return Padding(
         padding: const EdgeInsets.only(bottom: 12),
@@ -1842,36 +2293,70 @@ $userText
             ],
             Container(
               width: 200,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.grey[200],
-                borderRadius: BorderRadius.circular(12),
+                gradient: LinearGradient(
+                  colors: [Colors.grey[100]!, Colors.grey[50]!],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: Colors.grey[300]!),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.grey.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.compress, size: 14, color: Colors.grey[600]),
-                      const SizedBox(width: 4),
-                      Text(
-                        '已压缩记忆 (${(m.compressionRatio! * 100).toInt()}%)',
-                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey[600]),
+                      Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          gradient: AppColors.primaryGradient,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.compress, size: 12, color: Colors.white),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '已压缩 (${(m.compressionRatio! * 100).toInt()}%)',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey[700]),
+                        ),
+                      ),
                       Text(
                         '${m.content.length}字',
                         style: TextStyle(fontSize: 10, color: Colors.grey[500]),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 4),
-                  LinearProgressIndicator(
-                    value: m.compressionRatio,
-                    backgroundColor: Colors.grey[300],
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.grey[400]!),
-                    minHeight: 2,
+                  const SizedBox(height: 8),
+                  Stack(
+                    children: [
+                      Container(
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      FractionallySizedBox(
+                        widthFactor: m.compressionRatio!,
+                        child: Container(
+                          height: 4,
+                          decoration: BoxDecoration(
+                            gradient: AppColors.primaryGradient,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1885,15 +2370,16 @@ $userText
       );
     }
 
+    // 普通消息 - 华丽气泡
     return Padding(
-      padding: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.only(bottom: 20),
       child: Row(
         mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser) ...[
             _buildAvatar(isUser: false),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
           ],
           Flexible(
             child: Column(
@@ -1901,27 +2387,48 @@ $userText
               children: [
                 if (!isUser)
                   Padding(
-                    padding: const EdgeInsets.only(left: 4, bottom: 4),
-                    child: Text(
-                      _activePersona.name,
-                      style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                    padding: const EdgeInsets.only(left: 4, bottom: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            gradient: AppColors.primaryGradient,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _activePersona.name,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
-                    color: isUser ? Theme.of(context).primaryColor : Colors.white,
+                    gradient: isUser ? AppColors.userMessageGradient : null,
+                    color: isUser ? null : Colors.white,
                     borderRadius: BorderRadius.only(
-                      topLeft: const Radius.circular(18),
-                      topRight: const Radius.circular(18),
-                      bottomLeft: Radius.circular(isUser ? 18 : 4),
-                      bottomRight: Radius.circular(isUser ? 4 : 18),
+                      topLeft: const Radius.circular(20),
+                      topRight: const Radius.circular(20),
+                      bottomLeft: Radius.circular(isUser ? 20 : 4),
+                      bottomRight: Radius.circular(isUser ? 4 : 20),
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
+                        color: isUser 
+                            ? AppColors.primaryStart.withOpacity(0.3)
+                            : Colors.black.withOpacity(0.06),
+                        blurRadius: isUser ? 12 : 8,
+                        offset: const Offset(0, 4),
                       ),
                     ],
                   ),
@@ -1968,6 +2475,14 @@ $userText
                         MarkdownBody(
                           data: m.content,
                           selectable: true,
+                          inlineSyntaxes: [
+                            BlockMathSyntax(),
+                            InlineMathSyntax(),
+                          ],
+                          builders: {
+                            'inline_math': MathBuilder(isBlock: false),
+                            'block_math': MathBuilder(isBlock: true),
+                          },
                           styleSheet: MarkdownStyleSheet(
                             p: TextStyle(
                               color: isUser ? Colors.white : Colors.black87,
@@ -2079,31 +2594,52 @@ $userText
   Widget _buildAvatar({required bool isUser}) {
     if (isUser) {
       return Container(
-        width: 36, height: 36,
+        width: 40, height: 40,
         decoration: BoxDecoration(
-          color: Theme.of(context).primaryColor.withOpacity(0.1),
+          gradient: AppColors.primaryGradient,
           shape: BoxShape.circle,
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.primaryStart.withOpacity(0.3),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
-        child: Icon(Icons.person, size: 20, color: Theme.of(context).primaryColor),
+        child: const Icon(Icons.person_rounded, size: 22, color: Colors.white),
       );
     } else {
       final avatarPath = _activePersona.avatarPath;
       final hasAvatar = avatarPath != null && File(avatarPath).existsSync();
       
       return Container(
-        width: 36, height: 36,
+        width: 40, height: 40,
         decoration: BoxDecoration(
-          color: Colors.white,
+          gradient: hasAvatar ? null : AppColors.primaryGradient,
+          color: hasAvatar ? Colors.white : null,
           shape: BoxShape.circle,
           image: hasAvatar 
               ? DecorationImage(image: FileImage(File(avatarPath)), fit: BoxFit.cover)
               : null,
           boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2)),
+            BoxShadow(
+              color: AppColors.primaryStart.withOpacity(0.25),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
           ],
         ),
         child: !hasAvatar 
-            ? Center(child: Text(_activePersona.name.isNotEmpty ? _activePersona.name[0] : '?', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)))
+            ? Center(
+                child: Text(
+                  _activePersona.name.isNotEmpty ? _activePersona.name[0] : '?',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: Colors.white,
+                  ),
+                ),
+              )
             : null,
       );
     }
