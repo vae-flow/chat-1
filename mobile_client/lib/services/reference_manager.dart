@@ -176,9 +176,21 @@ class ReferenceManager {
     final buffer = StringBuffer();
     buffer.writeln('\n【参考资料 (References)】');
     for (var i = 0; i < refs.length; i++) {
-      buffer.writeln('${i + 1}. ${refs[i].title} (${refs[i].sourceName})');
-      buffer.writeln('   摘要: ${refs[i].snippet}');
-      buffer.writeln('   链接: ${refs[i].url}');
+      final ref = refs[i];
+      if (ref.sourceType == 'vision') {
+        // Vision analysis result
+        buffer.writeln('${i + 1}. [图片分析] ${ref.title}');
+        buffer.writeln('   内容: ${ref.snippet}');
+      } else if (ref.sourceType == 'generated') {
+        // Generated image
+        buffer.writeln('${i + 1}. [已生成图片] ${ref.title}');
+        buffer.writeln('   描述: ${ref.snippet}');
+      } else {
+        // Web search result
+        buffer.writeln('${i + 1}. ${ref.title} (${ref.sourceName})');
+        buffer.writeln('   摘要: ${ref.snippet}');
+        buffer.writeln('   链接: ${ref.url}');
+      }
     }
     return buffer.toString();
   }

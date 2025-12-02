@@ -440,11 +440,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     await _performImageGeneration(prompt);
   }
 
-  Future<void> _performImageGeneration(String prompt, {bool addUserMessage = true, bool manageSendingState = true}) async {
+  /// Returns the local path of the generated image on success, null on failure
+  Future<String?> _performImageGeneration(String prompt, {bool addUserMessage = true, bool manageSendingState = true}) async {
     if (_imgBase.contains('your-oneapi-host') || _imgKey.isEmpty) {
       _showError('请先配置生图 API');
       _openSettings();
-      return;
+      return null;
     }
 
     if (manageSendingState) {
@@ -478,9 +479,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _saveChatHistory();
       });
       _scrollToBottom();
+      
+      return localPath; // Return path for tool chaining
 
     } catch (e) {
       _showError('生图异常：$e');
+      return null;
     } finally {
       if (manageSendingState) {
         setState(() => _sending = false);
@@ -1346,30 +1350,76 @@ $chunk
     final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute} (星期${['','一','二','三','四','五','六','日'][now.weekday]})";
     final memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
     
-    // Format References (Observations)
+    // Format References (Observations) with rich metadata
     final refsBuffer = StringBuffer();
     if (sessionRefs.isNotEmpty) {
-      for (var i = 0; i < sessionRefs.length; i++) {
-        String snippet = sessionRefs[i].snippet;
-        if (snippet.length > 800) {
-          snippet = '${snippet.substring(0, 800)}...';
+      // Group by source type for clarity
+      final visionRefs = sessionRefs.where((r) => r.sourceType == 'vision').toList();
+      final generatedRefs = sessionRefs.where((r) => r.sourceType == 'generated').toList();
+      final webRefs = sessionRefs.where((r) => r.sourceType != 'vision' && r.sourceType != 'generated').toList();
+      
+      int idx = 1;
+      
+      if (visionRefs.isNotEmpty) {
+        refsBuffer.writeln('📷 [图片分析结果]');
+        for (var r in visionRefs) {
+          String snippet = r.snippet;
+          if (snippet.length > 1000) snippet = '${snippet.substring(0, 1000)}...';
+          refsBuffer.writeln('  $idx. ${r.title}: $snippet');
+          idx++;
         }
-        refsBuffer.writeln('${i + 1}. ${sessionRefs[i].title}: $snippet');
+      }
+      
+      if (generatedRefs.isNotEmpty) {
+        refsBuffer.writeln('🎨 [已生成图片]');
+        for (var r in generatedRefs) {
+          refsBuffer.writeln('  $idx. ${r.title}: ${r.snippet}');
+          idx++;
+        }
+      }
+      
+      if (webRefs.isNotEmpty) {
+        refsBuffer.writeln('🔍 [网络搜索结果]');
+        for (var r in webRefs) {
+          String snippet = r.snippet;
+          if (snippet.length > 500) snippet = '${snippet.substring(0, 500)}...';
+          refsBuffer.writeln('  $idx. [${r.sourceName}] ${r.title}');
+          refsBuffer.writeln('     摘要: $snippet');
+          refsBuffer.writeln('     来源: ${r.url}');
+          idx++;
+        }
       }
     } else {
       refsBuffer.writeln('None yet.');
     }
 
-    // Format Previous Actions
+    // Format Previous Actions with clear status indicators
     final prevActionsBuffer = StringBuffer();
     if (previousDecisions.isNotEmpty) {
       for (var i = 0; i < previousDecisions.length; i++) {
         final d = previousDecisions[i];
         final contentInfo = d.query ?? d.content ?? 'N/A';
-        prevActionsBuffer.writeln('${i + 1}. Action: ${d.type.name.toUpperCase()} | Target: "$contentInfo" | Reason: ${d.reason}');
+        
+        // Extract result status from reason if present
+        String status = '⏳ pending';
+        if (d.reason?.contains('[RESULT:') == true) {
+          if (d.reason!.contains('successfully') || d.reason!.contains('complete')) {
+            status = '✅ success';
+          } else if (d.reason!.contains('failed') || d.reason!.contains('No results')) {
+            status = '❌ failed';
+          } else {
+            status = '✅ done';
+          }
+        }
+        
+        prevActionsBuffer.writeln('Step ${i + 1}: ${d.type.name.toUpperCase()} $status');
+        prevActionsBuffer.writeln('  Target: "$contentInfo"');
+        if (d.reason != null && d.reason!.isNotEmpty) {
+          prevActionsBuffer.writeln('  Notes: ${d.reason}');
+        }
       }
     } else {
-      prevActionsBuffer.writeln('None yet.');
+      prevActionsBuffer.writeln('None yet - this is the first planning step.');
     }
 
     // Format Chat History
@@ -1438,21 +1488,35 @@ $chunk
 
     final searchAvailable = resolvedSearchProvider != null;
     final drawAvailable = !_imgBase.contains('your-oneapi-host') && _imgKey.isNotEmpty;
+    final visionAvailable = !_visionBase.contains('your-oneapi-host') && _visionKey.isNotEmpty;
+
+    // Check if we have an active image in this session
+    final hasSessionImage = sessionRefs.any((r) => r.sourceType == 'vision');
 
     final toolbelt = '''
 ### TOOLBELT (what you can call)
 - search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider (web search returns short references)" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
-- draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
+- draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content; set continue=true if you want to comment on the result)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
+- vision: ${visionAvailable ? "AVAILABLE (analyze an image; put custom analysis prompt in content; if user uploaded image, analysis result is in <current_observations>)" : "UNAVAILABLE (vision API not configured)"}
 - answer: ALWAYS AVAILABLE for reasoning, summaries, or when other tools are unavailable.
-If a tool is marked UNAVAILABLE, fall back to answer and clearly state the missing capability or info you need.
 
-### CAPABILITY COMBINATIONS
-- research: search -> summarize in answer (include citations if you have refs)
-- vision: analyze user image + answer; can also search based on what you saw
-- image creation: draw based on user request or your analysis of a vision input
-- planning/output: pure reasoning when no external tools help
-These are examples, not a fixed menu. Invent new combinations if they better serve the goal. Always try to combine available tools to achieve the user's goal before giving up.
-If user asks for an unsupported channel (e.g., send email / call API not provided), reply via answer with a blocker note and request config/info.
+### TOOL CHAINING (Important!)
+You can chain tools by setting "continue": true in your output. This tells the system NOT to end after this action.
+Examples:
+- search -> search again with refined query -> answer (multiple search iterations)
+- draw -> answer (generate image, then comment on it)
+- vision result in observations -> search for related info -> answer (analyze image, then research, then respond)
+
+If a tool is marked UNAVAILABLE, fall back to answer and clearly state the missing capability.
+${hasSessionImage ? """
+⚠️ **IMAGE IN SESSION**: User uploaded an image. Check <current_observations> for the analysis.
+The vision result starts with【类型：XXX】indicating the image type. Use this to decide:
+- 【表格】but data incomplete? → vision with "请完整提取表格所有行列"
+- 【票据】but missing details? → vision with "请提取所有商品明细和金额"  
+- 【代码】and user asks to fix? → search for the error message
+- 【商品】and user asks price? → search for product info online
+- 【地图】and user asks directions? → use the extracted location info
+""" : ""}
 ''';
 
     // 2. Construct System Prompt with XML Tags for strict separation
@@ -1467,7 +1531,7 @@ The user message is strictly structured. You must distinguish between:
 - <current_time>: The precise current time. Use this for relative time queries (e.g. "today", "last week").
 - <user_profile>: Deep psychological and factual profile of the user. Use this to infer intent and tailor your strategy.
 - <chat_history>: Recent conversation context.
-- <current_observations>: Information gathered from search tools in THIS session.
+- <current_observations>: Information gathered from tools (search results, vision analysis) in THIS session. **If image was uploaded, look for【类型：XXX】to understand the image type.**
 - <action_history>: Actions you have already performed in THIS session.
 - <user_input>: The actual request from the user.
 
@@ -1497,16 +1561,34 @@ Your objective is to complete the user's goal with iterative steps until done or
    - If search is unavailable, choose ANSWER and ask for the missing key or confirm offline constraints.
 
 2. **DRAW (draw)**:
-   - USE WHEN: User explicitly asks for an image/drawing/painting.
+   - USE WHEN: User explicitly asks for an image/drawing/painting/illustration.
+   - STRATEGY: Craft a detailed, descriptive prompt for the image generator. Include style, mood, colors, composition.
+   - CHAINING: Set "continue": true if you want to comment on or explain the generated image afterward.
    - If draw is unavailable, choose ANSWER and state that image generation is not configured.
 
-3. **ANSWER (answer)**:
-   - USE WHEN: <current_observations> are sufficient.
-   - OR: The request is purely logical/creative/conversational.
-   - OR: You have tried multiple searches and cannot find more info (fail gracefully).
-   - OR: The user asks for unsupported actions (e.g., send email, access local files). In this case, explain the blocker and ask for specific missing info/config if it could make it possible.
+3. **VISION (vision)**:
+   - USE WHEN: You need ADDITIONAL or SPECIALIZED analysis of the user's uploaded image.
+   - NOTE: The initial analysis is in <current_observations>. Use vision again for specialized extraction:
+     * **Table/Excel**: "请用Markdown表格格式提取所有数据，保留精确数值"
+     * **Receipt/Invoice**: "请提取商家、日期、金额、商品明细"
+     * **Code/Terminal**: "请完整提取代码，保持缩进格式"
+     * **Chart/Graph**: "请提取所有数据点的具体数值和趋势"
+     * **Map/Location**: "请提取地点名称、地址、距离信息"
+     * **UI/Design**: "请描述界面布局，提取所有按钮和文字"
+     * **Product**: "请提取品牌、型号、价格、规格参数"
+     * **Chat screenshot**: "请完整提取对话内容，标注发送者"
+     * **Specific Q&A**: "图中左上角的数字是多少？"
+   - The content field is the analysis prompt - be SPECIFIC about what you need.
+   - If no image was uploaded in this session, DO NOT use vision.
 
-4. **REMINDERS (Side Task)**:
+4. **ANSWER (answer)**:
+   - USE WHEN: <current_observations> are sufficient to respond.
+   - OR: The request is purely logical/creative/conversational (no tools needed).
+   - OR: You have tried multiple searches and cannot find more info (fail gracefully).
+   - OR: The user asks for unsupported actions. In this case, explain the blocker and ask for specific missing info/config.
+   - ALWAYS end with answer - this is the terminal action that produces user-visible output.
+
+5. **REMINDERS (Side Task)**:
    - Extract future tasks into the "reminders" list.
 
 ### OBSERVATION QUALITY
@@ -1515,12 +1597,15 @@ Your objective is to complete the user's goal with iterative steps until done or
 ### OUTPUT FORMAT
 Return a JSON object (no markdown):
 {
-  "type": "search" | "draw" | "answer",
+  "type": "search" | "draw" | "vision" | "answer",
   "reason": "[Intent: ...] [Gap: ...] [Strategy: ...]",
-  "query": "Search query (optimized for search engine)",
-  "content": "Image prompt OR Answer text",
+  "query": "Search query (for search only)",
+  "content": "Image prompt (draw) / Analysis prompt (vision) / Answer text (answer)",
+  "continue": false,
   "reminders": []
 }
+
+Set "continue": true if you want to perform another action after this one (e.g., draw then comment, or search then search again).
 ''';
 
     final userPrompt = '''
@@ -1622,13 +1707,36 @@ $userText
           baseUrl: _visionBase,
           apiKey: _visionKey,
           model: _visionModel,
+          // Fallback to Chat API if Vision fails
+          fallbackBaseUrl: _chatBase,
+          fallbackApiKey: _chatKey,
+          fallbackModel: _chatModel,
         );
         if (visionRefs.isNotEmpty) {
           await _refManager.addExternalReferences(visionRefs);
           sessionRefs.addAll(visionRefs);
+        } else {
+          // Analysis returned empty - add placeholder so Agent knows there's an image
+          sessionRefs.add(ReferenceItem(
+            title: '用户上传的图片',
+            url: currentSessionImagePath,
+            snippet: '⚠️ 图片分析未返回内容，可能需要重新分析',
+            sourceName: 'VisionAPI',
+            imageId: currentSessionImagePath,
+            sourceType: 'vision',
+          ));
         }
       } catch (e) {
         debugPrint('Vision analyze error: $e');
+        // Add error placeholder so Agent knows there's an unanalyzed image
+        sessionRefs.add(ReferenceItem(
+          title: '用户上传的图片',
+          url: currentSessionImagePath,
+          snippet: '⚠️ 图片分析失败: $e - 可使用VISION工具重试',
+          sourceName: 'VisionAPI',
+          imageId: currentSessionImagePath,
+          sourceType: 'vision',
+        ));
       }
     } else {
       // Text Only Input
@@ -1690,6 +1798,13 @@ $userText
               if (uniqueNewRefs.isNotEmpty) {
                 sessionRefs.addAll(uniqueNewRefs);
                 debugPrint('Added ${uniqueNewRefs.length} unique refs (${newRefs.length - uniqueNewRefs.length} duplicates skipped)');
+                // Record success with result summary
+                final topTitles = uniqueNewRefs.take(3).map((r) => r.title).join(', ');
+                sessionDecisions.last = AgentDecision(
+                  type: AgentActionType.search,
+                  query: decision.query,
+                  reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results - $topTitles]',
+                );
               }
               // Continue loop to re-evaluate with new info
             } else {
@@ -1699,7 +1814,7 @@ $userText
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.search,
                 query: decision.query,
-                reason: '${decision.reason} [RESULT: No results found]',
+                reason: '${decision.reason} [RESULT: No results found - try different keywords]',
               );
               // Check if we've had too many empty searches
               final emptySearches = sessionDecisions.where((d) => 
@@ -1714,8 +1829,14 @@ $userText
               // Otherwise continue loop - planner will see empty result in action history
             }
           } catch (searchError) {
-            // Search failed - graceful degradation: continue with existing refs or answer directly
+            // Search failed - record in action history for planner visibility
             debugPrint('Search failed: $searchError. Falling back to answer.');
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.search,
+              query: decision.query,
+              reason: '${decision.reason} [RESULT: Search error - $searchError]',
+            );
+            // Graceful degradation: continue with existing refs or answer directly
             setState(() => _loadingStatus = '搜索服务暂时不可用，正在生成回答...');
             await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
             break;
@@ -1724,14 +1845,121 @@ $userText
         else if (decision.type == AgentActionType.draw && decision.content != null) {
           // Action: Draw
           setState(() => _loadingStatus = '正在生成图片...');
-          await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
-          break; // Drawing is a terminal action
-        } 
-        else {
-          // Action: Answer (or fallback)
+          final generatedPath = await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
+          if (generatedPath != null) {
+            // Success - record in action history
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.draw,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: Image generated at $generatedPath]',
+              continueAfter: decision.continueAfter,
+            );
+            
+            // Auto-analyze the generated image to get rich semantic info
+            setState(() => _loadingStatus = '正在分析生成的图片...');
+            String imageDescription = '图片已根据提示词生成: ${decision.content}';
+            try {
+              final genVisionRefs = await analyzeImage(
+                imagePath: generatedPath,
+                baseUrl: _visionBase,
+                apiKey: _visionKey,
+                model: _visionModel,
+                userPrompt: '请简洁描述这张AI生成的图片内容，包括主体、风格、色调。一段话即可。',
+                fallbackBaseUrl: _chatBase,
+                fallbackApiKey: _chatKey,
+                fallbackModel: _chatModel,
+              );
+              if (genVisionRefs.isNotEmpty && !genVisionRefs.first.snippet.contains('⚠️')) {
+                imageDescription = '【提示词】${decision.content}\n【实际生成】${genVisionRefs.first.snippet}';
+              }
+            } catch (e) {
+              debugPrint('Auto-analyze generated image failed: $e');
+            }
+            
+            // Add generated image info with rich description to sessionRefs
+            sessionRefs.add(ReferenceItem(
+              title: '生成的图片',
+              url: generatedPath,
+              snippet: imageDescription,
+              sourceName: 'ImageGen',
+              imageId: generatedPath,
+              sourceType: 'generated',
+            ));
+            // If continue flag is set, keep looping (e.g., to add a comment about the image)
+            if (!decision.continueAfter) {
+              break;
+            }
+          } else {
+            // Generation returned null (failed)
+            debugPrint('Draw returned null');
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.draw,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: Draw failed]',
+            );
+            // Fallback to answer explaining the failure
+            setState(() => _loadingStatus = '生图失败，正在回复...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
+        }
+        else if (decision.type == AgentActionType.vision && currentSessionImagePath != null) {
+          // Action: Additional Vision Analysis (with custom prompt)
+          setState(() => _loadingStatus = '正在深度分析图片...');
+          try {
+            final customPrompt = decision.content ?? '请详细分析这张图片的内容。';
+            final visionRefs = await analyzeImage(
+              imagePath: currentSessionImagePath,
+              baseUrl: _visionBase,
+              apiKey: _visionKey,
+              model: _visionModel,
+              userPrompt: customPrompt,
+              // Fallback to Chat API if Vision fails
+              fallbackBaseUrl: _chatBase,
+              fallbackApiKey: _chatKey,
+              fallbackModel: _chatModel,
+            );
+            if (visionRefs.isNotEmpty) {
+              // Add to session refs (avoid duplicates)
+              final existingIds = sessionRefs.map((r) => r.imageId).toSet();
+              final newRefs = visionRefs.where((r) => !existingIds.contains(r.imageId)).toList();
+              sessionRefs.addAll(newRefs);
+              debugPrint('Added ${newRefs.length} vision refs');
+              // Record success in action history
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.vision,
+                content: customPrompt,
+                reason: '${decision.reason} [RESULT: Vision analysis complete, ${newRefs.length} new insights]',
+              );
+            } else {
+              // Vision returned empty - record for planner
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.vision,
+                content: customPrompt,
+                reason: '${decision.reason} [RESULT: Vision returned no insights]',
+              );
+            }
+            // Continue loop to process the new vision info
+          } catch (visionError) {
+            debugPrint('Vision analysis failed: $visionError');
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.vision,
+              reason: '${decision.reason} [RESULT: Vision failed - $visionError]',
+            );
+          }
+        }
+        else if (decision.type == AgentActionType.answer || 
+                 (decision.type == AgentActionType.vision && currentSessionImagePath == null)) {
+          // Action: Answer (or vision without image = fallback to answer)
           setState(() => _loadingStatus = '正在撰写回复...');
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           break; // Answer is a terminal action
+        }
+        else {
+          // Unknown action type - fallback to answer
+          setState(() => _loadingStatus = '正在撰写回复...');
+          await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+          break;
         }
         
         steps++;

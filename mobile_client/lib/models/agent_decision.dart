@@ -1,11 +1,12 @@
-enum AgentActionType { answer, search, draw }
+enum AgentActionType { answer, search, draw, vision }
 
 class AgentDecision {
   final AgentActionType type;
-  final String? content; // For answer text or draw prompt
+  final String? content; // For answer text or draw prompt or vision analysis prompt
   final String? query;   // For search query
   final String? reason;  // The "Thought" - why this decision was made
   final List<Map<String, dynamic>>? reminders; // Preserved feature
+  final bool continueAfter; // If true, don't break the loop after this action
 
   AgentDecision({
     required this.type,
@@ -13,6 +14,7 @@ class AgentDecision {
     this.query,
     this.reason,
     this.reminders,
+    this.continueAfter = false,
   });
 
   factory AgentDecision.fromJson(Map<String, dynamic> json) {
@@ -21,6 +23,7 @@ class AgentDecision {
     switch (typeStr) {
       case 'search': type = AgentActionType.search; break;
       case 'draw': type = AgentActionType.draw; break;
+      case 'vision': type = AgentActionType.vision; break;
       default: type = AgentActionType.answer;
     }
 
@@ -32,6 +35,7 @@ class AgentDecision {
       reminders: json['reminders'] != null 
         ? List<Map<String, dynamic>>.from(json['reminders'])
         : null,
+      continueAfter: json['continue'] == true,
     );
   }
 }
