@@ -473,17 +473,42 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['txt', 'md', 'json', 'dart', 'py', 'js', 'html', 'css', 'java', 'kt', 'swift', 'c', 'cpp', 'h'],
+        allowedExtensions: [
+          // Text & Documents
+          'txt', 'md', 'markdown', 'rst', 'log', 'csv', 'tsv',
+          // Code - Common
+          'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+          // Code - Web
+          'html', 'htm', 'css', 'scss', 'sass', 'less', 'js', 'jsx', 'ts', 'tsx', 'vue', 'svelte',
+          // Code - Backend
+          'py', 'pyw', 'pyi', 'java', 'kt', 'kts', 'scala', 'groovy', 'go', 'rs', 'rb', 'php',
+          // Code - Systems
+          'c', 'cpp', 'cc', 'cxx', 'h', 'hpp', 'hxx', 'cs', 'fs', 'fsx',
+          // Code - Mobile
+          'swift', 'dart', 'm', 'mm',
+          // Code - Shell & Scripts
+          'sh', 'bash', 'zsh', 'fish', 'ps1', 'psm1', 'bat', 'cmd',
+          // Code - Data & Query
+          'sql', 'graphql', 'gql',
+          // Code - Functional
+          'hs', 'lhs', 'elm', 'clj', 'cljs', 'erl', 'ex', 'exs',
+          // Code - Other
+          'lua', 'r', 'pl', 'pm', 'tcl', 'awk', 'sed', 'vim',
+          // Markup & Config
+          'tex', 'bib', 'sty', 'cls',
+          // Data formats
+          'ndjson', 'jsonl', 'geojson',
+        ],
       );
 
       if (result != null && result.files.single.path != null) {
         final file = File(result.files.single.path!);
         final filename = result.files.single.name;
         
-        // Check size (limit to 5MB for now to avoid memory issues)
+        // Check size (limit to 10MB for text files)
         final size = await file.length();
-        if (size > 5 * 1024 * 1024) {
-          _showError('文件过大 (限制5MB)');
+        if (size > 10 * 1024 * 1024) {
+          _showError('文件过大 (限制10MB)');
           return;
         }
 
@@ -493,12 +518,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         });
 
         try {
-          final content = await file.readAsString();
+          // Try to read as UTF-8, fallback to Latin1 if fails
+          String content;
+          try {
+            content = await file.readAsString(encoding: utf8);
+          } catch (e) {
+            // Fallback for non-UTF8 files
+            final bytes = await file.readAsBytes();
+            content = latin1.decode(bytes);
+          }
           
           await _knowledgeService.ingestFile(
             filename: filename,
             content: content,
-            summarizer: (chunk) => _generateSummary(chunk, 0.3), // 30% summary ratio
+            summarizer: (chunk) => _generateKnowledgeSummary(chunk, filename), // File-type aware summary
           );
 
           // Get stats for user feedback
@@ -1267,6 +1300,192 @@ $text
       debugPrint('Summary failed: $e');
     }
     return text; // Fallback
+  }
+
+  /// Generate file-type aware summary for knowledge base indexing
+  Future<String> _generateKnowledgeSummary(String chunk, String filename) async {
+    final config = await _getWorkerConfig();
+    final ext = filename.toLowerCase().split('.').last;
+    
+    // Determine file type and appropriate prompt
+    String typeHint;
+    String extractionFocus;
+    
+    // Code files
+    if (['dart', 'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'kt', 'swift', 'go', 'rs', 'rb', 'php', 'c', 'cpp', 'cs', 'scala'].contains(ext)) {
+      typeHint = 'This is SOURCE CODE';
+      extractionFocus = '''Extract and list:
+1. Class/Function/Method names with their purpose (one line each)
+2. Key imports/dependencies
+3. Main logic flow or algorithm summary
+4. Important variables/constants
+Format: Use bullet points. Be technical and precise.''';
+    }
+    // Config/Data files
+    else if (['json', 'yaml', 'yml', 'toml', 'xml', 'ini', 'cfg', 'conf'].contains(ext)) {
+      typeHint = 'This is a CONFIGURATION/DATA file';
+      extractionFocus = '''Extract and list:
+1. Top-level keys/sections
+2. Important configuration values
+3. Data structure overview
+4. Any URLs, paths, or credentials (redact sensitive values)
+Format: Hierarchical bullet points showing structure.''';
+    }
+    // Documentation/Text
+    else if (['md', 'markdown', 'rst', 'txt', 'log'].contains(ext)) {
+      typeHint = 'This is DOCUMENTATION/TEXT';
+      extractionFocus = '''Extract and list:
+1. Main topics/headings
+2. Key concepts or definitions
+3. Important conclusions or action items
+4. Any code examples or commands mentioned
+Format: Concise bullet points preserving key information.''';
+    }
+    // Data files
+    else if (['csv', 'tsv', 'ndjson', 'jsonl'].contains(ext)) {
+      typeHint = 'This is TABULAR/STRUCTURED DATA';
+      extractionFocus = '''Extract and list:
+1. Column names/field names
+2. Data types for each column
+3. Sample values (first 2-3 rows)
+4. Total approximate row count if visible
+Format: Table-like description.''';
+    }
+    // SQL/Query
+    else if (['sql', 'graphql', 'gql'].contains(ext)) {
+      typeHint = 'This is DATABASE/QUERY code';
+      extractionFocus = '''Extract and list:
+1. Table/Collection names involved
+2. Query types (SELECT, INSERT, CREATE, etc.)
+3. Key conditions/filters
+4. Joins or relationships
+Format: Technical bullet points.''';
+    }
+    // Web files
+    else if (['html', 'htm', 'vue', 'svelte'].contains(ext)) {
+      typeHint = 'This is WEB MARKUP/COMPONENT';
+      extractionFocus = '''Extract and list:
+1. Page/Component structure
+2. Key elements (forms, buttons, sections)
+3. Any embedded scripts or styles
+4. Data bindings or props
+Format: Structural outline.''';
+    }
+    // Shell/Scripts
+    else if (['sh', 'bash', 'ps1', 'bat', 'cmd'].contains(ext)) {
+      typeHint = 'This is a SHELL SCRIPT';
+      extractionFocus = '''Extract and list:
+1. Main commands being executed
+2. Variables and their purposes
+3. Control flow (if/else, loops)
+4. File/directory operations
+Format: Step-by-step summary.''';
+    }
+    // Default
+    else {
+      typeHint = 'This is a TEXT file';
+      extractionFocus = '''Summarize the key content:
+1. Main topics covered
+2. Important facts or data
+3. Any structured information
+Format: Concise bullet points.''';
+    }
+    
+    final prompt = '''$typeHint (.$ext file)
+
+TASK: Create a searchable index summary for this content chunk.
+The summary will be used to help an AI assistant find relevant information later.
+
+$extractionFocus
+
+CONTENT:
+$chunk
+
+OUTPUT REQUIREMENTS:
+- Maximum 300 words
+- Use keywords that would help find this content
+- Be specific, not vague
+- Chinese response preferred if content is Chinese''';
+
+    try {
+      String apiEndpoint = config.base.replaceAll(RegExp(r'/+$'), '');
+      apiEndpoint = '$apiEndpoint/chat/completions';
+      
+      final uri = Uri.parse(apiEndpoint);
+      final body = json.encode({
+        'model': config.model,
+        'messages': [
+          {'role': 'system', 'content': 'You are an expert at creating searchable index summaries for code and documents. Be concise but comprehensive.'},
+          {'role': 'user', 'content': prompt}
+        ],
+        'temperature': 0.3,
+        'stream': false,
+      });
+
+      final resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer ${config.key}',
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      ).timeout(const Duration(minutes: 3));
+
+      if (resp.statusCode == 200) {
+        final decodedBody = utf8.decode(resp.bodyBytes);
+        final data = json.decode(decodedBody);
+        return data['choices'][0]['message']['content'] ?? _fallbackSummary(chunk, ext);
+      } else {
+        debugPrint('Knowledge summary API error: ${resp.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('Knowledge summary failed: $e');
+    }
+    return _fallbackSummary(chunk, ext);
+  }
+
+  /// Fallback summary when API fails - extract key patterns
+  String _fallbackSummary(String chunk, String ext) {
+    final lines = chunk.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    final buffer = StringBuffer();
+    buffer.writeln('[Fallback Summary - API unavailable]');
+    
+    // For code: extract function/class definitions
+    if (['dart', 'py', 'js', 'ts', 'java', 'kt', 'go', 'rs'].contains(ext)) {
+      final patterns = [
+        RegExp(r'(class|interface|enum)\s+(\w+)'),
+        RegExp(r'(def|func|function|fn)\s+(\w+)'),
+        RegExp(r'(public|private|async)?\s*(static)?\s*\w+\s+(\w+)\s*\('),
+      ];
+      final matches = <String>{};
+      for (var line in lines.take(50)) {
+        for (var pattern in patterns) {
+          final match = pattern.firstMatch(line);
+          if (match != null) {
+            matches.add(line.trim().substring(0, line.trim().length.clamp(0, 80)));
+          }
+        }
+      }
+      if (matches.isNotEmpty) {
+        buffer.writeln('Definitions found:');
+        for (var m in matches.take(10)) {
+          buffer.writeln('  - $m');
+        }
+      }
+    }
+    
+    // Show first few meaningful lines
+    buffer.writeln('Content preview:');
+    for (var line in lines.take(5)) {
+      final trimmed = line.trim();
+      if (trimmed.length > 100) {
+        buffer.writeln('  ${trimmed.substring(0, 100)}...');
+      } else {
+        buffer.writeln('  $trimmed');
+      }
+    }
+    
+    return buffer.toString();
   }
 
   Future<void> _performDeepProfiling() async {
