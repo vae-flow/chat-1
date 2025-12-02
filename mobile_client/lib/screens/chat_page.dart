@@ -4155,6 +4155,7 @@ $userText
                                     fontWeight: FontWeight.w500,
                                   ),
                                   overflow: TextOverflow.ellipsis,
+                                ),
                               ),
                             ],
                           ),
