@@ -2361,9 +2361,34 @@ After executing a hypothesized approach:
    - FIELDS: "filename" (e.g., "report.md", "code.py") and "content" (the full text/code).
    - NOTE: This triggers a system file picker for the user to choose the save location.
 
+5. **READ_KNOWLEDGE (read_knowledge)** - 📚 IMPORTANT FOR UPLOADED FILES:
+   - USE WHEN: User asks about content from uploaded files, or you see relevant entries in <knowledge_index>.
+   - HOW TO USE:
+     1. First, scan <knowledge_index> for files and chunk summaries
+     2. Match user's question keywords against chunk summaries
+     3. Identify ALL chunks whose summary might be relevant (don't miss any!)
+     4. Put ALL relevant chunk_ids in "content", separated by commas
+   - BATCH READING: You can read multiple chunks at once!
+     * content: "id1, id2, id3" → reads all three in one call
+     * Maximum ~15000 chars total will be returned
+   - EXAMPLE: If user asks "explain the authentication flow" and you see:
+     ```
+     📄 File: auth_service.dart
+       - Chunk 0 (ID: 123_0): AuthService class, login(), logout()...
+       - Chunk 1 (ID: 123_3000): TokenManager, refreshToken()...
+       - Chunk 2 (ID: 123_6000): PasswordValidator, hashPassword()...
+     ```
+     → You should read chunks 0 AND 1 together: content="123_0, 123_3000"
+     → Don't read one by one! That wastes steps.
+   - ALWAYS set "continue": true - you need to process the content after reading
+
+6. **DELETE_KNOWLEDGE (delete_knowledge)**:
+   - USE WHEN: User asks to remove files/chunks from knowledge base.
+   - Use file_id to delete entire file, or chunk_id for specific chunk.
+
 **🧠 THINKING TOOLS (Deep Think):**
 
-5. **REFLECT (reflect)**:
+7. **REFLECT (reflect)**:
    - USE WHEN: Need to critically examine current approach before proceeding.
    - TRIGGERS:
      * About to answer but confidence < 0.8
@@ -2374,14 +2399,14 @@ After executing a hypothesized approach:
    - Put your self-critique in the "content" field.
    - ALWAYS set "continue": true after reflect.
 
-6. **HYPOTHESIZE (hypothesize)**:
+8. **HYPOTHESIZE (hypothesize)**:
    - USE WHEN: Problem has multiple valid approaches or current approach failed.
    - Generate 2-4 hypotheses in the "hypotheses" array.
    - Select best one in "selected_hypothesis" with justification.
    - **IMPORTANT**: After executing the selected hypothesis, use REFLECT to verify success.
    - ALWAYS set "continue": true after hypothesize.
 
-7. **CLARIFY (clarify)**:
+9. **CLARIFY (clarify)**:
    - USE WHEN: Cannot proceed without user input.
    - Put your question in "content" field - be specific about what you need.
    - TRIGGERS:
@@ -2394,7 +2419,7 @@ After executing a hypothesized approach:
 
 **📝 OUTPUT TOOL:**
 
-8. **ANSWER (answer)**:
+10. **ANSWER (answer)**:
    - USE WHEN: <current_observations> are sufficient AND confidence >= 0.7.
    - OR: Pure logical/creative/conversational request.
    - OR: Exhausted all approaches (fail gracefully with explanation).
@@ -2866,54 +2891,101 @@ $userText
           }
         }
         else if (decision.type == AgentActionType.read_knowledge && decision.content != null) {
-          // Action: Read Knowledge Chunk
+          // Action: Read Knowledge Chunk(s) - supports multiple IDs separated by comma
           setState(() => _loadingStatus = '正在读取知识库...');
-          final chunkId = decision.content!;
-          final chunkContent = await _knowledgeService.getChunkContent(chunkId);
           
-          if (chunkContent != null) {
-            // Truncate if too long to prevent context explosion
-            String displayContent = chunkContent;
-            if (chunkContent.length > 6000) {
-              displayContent = '${chunkContent.substring(0, 6000)}\n\n[... Content truncated. Full chunk is ${chunkContent.length} chars.]';
+          // Parse chunk IDs (support comma-separated for batch reading)
+          final chunkIds = decision.content!
+              .split(RegExp(r'[,\s]+'))
+              .map((id) => id.trim())
+              .where((id) => id.isNotEmpty)
+              .toList();
+          
+          final successfulReads = <String>[];
+          final failedReads = <String>[];
+          final combinedContent = StringBuffer();
+          int totalChars = 0;
+          const maxTotalChars = 15000; // Limit total content to prevent context explosion
+          
+          for (final chunkId in chunkIds) {
+            if (totalChars >= maxTotalChars) {
+              failedReads.add('$chunkId (skipped: context limit reached)');
+              continue;
             }
             
-            sessionDecisions.last = AgentDecision(
-              type: AgentActionType.read_knowledge,
-              content: chunkId,
-              reason: '${decision.reason} [RESULT: Successfully read chunk $chunkId (${chunkContent.length} chars)]',
-              continueAfter: true, // Always continue to process the content
-            );
-            
-            sessionRefs.add(ReferenceItem(
-              title: '📖 知识库内容 [$chunkId]',
-              url: 'internal://knowledge/$chunkId',
-              snippet: displayContent,
-              sourceName: 'KnowledgeBase',
-              sourceType: 'knowledge',
-            ));
+            final chunkContent = _knowledgeService.getChunkContent(chunkId);
+            if (chunkContent != null) {
+              successfulReads.add(chunkId);
+              
+              // Calculate remaining budget
+              final remaining = maxTotalChars - totalChars;
+              String displayContent = chunkContent;
+              if (chunkContent.length > remaining) {
+                displayContent = '${chunkContent.substring(0, remaining)}\n[... truncated to fit context limit]';
+              }
+              
+              combinedContent.writeln('═══ Chunk [$chunkId] ═══');
+              combinedContent.writeln(displayContent);
+              combinedContent.writeln('');
+              totalChars += displayContent.length;
+              
+              // Also add as individual reference for tracking
+              sessionRefs.add(ReferenceItem(
+                title: '📖 知识库内容 [$chunkId]',
+                url: 'internal://knowledge/$chunkId',
+                snippet: displayContent.length > 500 
+                    ? '${displayContent.substring(0, 500)}...' 
+                    : displayContent,
+                sourceName: 'KnowledgeBase',
+                sourceType: 'knowledge',
+              ));
+            } else {
+              failedReads.add(chunkId);
+            }
+          }
+          
+          // Build result message
+          String resultMsg;
+          if (successfulReads.isNotEmpty) {
+            resultMsg = 'Read ${successfulReads.length} chunk(s): ${successfulReads.join(", ")} ($totalChars chars total)';
+            if (failedReads.isNotEmpty) {
+              resultMsg += '. Failed: ${failedReads.join(", ")}';
+            }
           } else {
-            // Chunk not found - provide guidance
+            // All failed
             final availableIds = _knowledgeService.getAllChunkIds();
             final suggestion = availableIds.isNotEmpty 
                 ? 'Available IDs: ${availableIds.take(5).join(", ")}${availableIds.length > 5 ? "..." : ""}'
                 : 'Knowledge base is empty.';
-            
-            sessionDecisions.last = AgentDecision(
-              type: AgentActionType.read_knowledge,
-              content: chunkId,
-              reason: '${decision.reason} [RESULT: Chunk $chunkId NOT FOUND. $suggestion]',
-              continueAfter: true,
-            );
+            resultMsg = 'All chunks NOT FOUND: ${failedReads.join(", ")}. $suggestion';
             
             sessionRefs.add(ReferenceItem(
               title: '⚠️ 知识库查询失败',
               url: 'internal://knowledge/error',
-              snippet: 'Chunk ID "$chunkId" not found.\n$suggestion',
+              snippet: 'Requested chunks not found.\n$suggestion',
               sourceName: 'KnowledgeBase',
               sourceType: 'system_note',
             ));
           }
+          
+          // Add combined content as a single comprehensive reference
+          if (successfulReads.length > 1) {
+            sessionRefs.add(ReferenceItem(
+              title: '📚 知识库批量读取 [${successfulReads.length} chunks]',
+              url: 'internal://knowledge/batch',
+              snippet: combinedContent.toString(),
+              sourceName: 'KnowledgeBase',
+              sourceType: 'knowledge',
+            ));
+          }
+          
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.read_knowledge,
+            content: decision.content,
+            reason: '${decision.reason} [RESULT: $resultMsg]',
+            continueAfter: true,
+          );
+          
           // Explicitly continue loop - Agent needs to process the retrieved content
           steps++;
           continue;
