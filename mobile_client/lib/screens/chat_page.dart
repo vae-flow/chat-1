@@ -4155,160 +4155,160 @@ $userText
                                     fontWeight: FontWeight.w500,
                                   ),
                                   overflow: TextOverflow.ellipsis,
-                                ),
                               ),
                             ],
                           ),
                         ),
-            // 已选图片预览
-            if (_selectedImage != null)
-              Container(
-                margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      AppColors.primaryStart.withOpacity(0.1),
-                      AppColors.primaryEnd.withOpacity(0.05),
-                    ],
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppColors.primaryStart.withOpacity(0.2)),
-                ),
-                child: Row(
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: Image.file(File(_selectedImage!.path), width: 50, height: 50, fit: BoxFit.cover),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('已选择图片', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                          Text('点击发送进行识图', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                // 已选图片预览
+                if (_selectedImage != null)
+                  Container(
+                    margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppColors.primaryStart.withOpacity(0.1),
+                          AppColors.primaryEnd.withOpacity(0.05),
                         ],
                       ),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.primaryStart.withOpacity(0.2)),
                     ),
-                    IconButton(
-                      icon: Icon(Icons.close_rounded, size: 20, color: Colors.grey[400]),
-                      onPressed: () => setState(() => _selectedImage = null),
-                    ),
-                  ],
-                ),
-              ),
-            // 输入行
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  // 图片按钮
-                  _buildInputActionButton(
-                    icon: Icons.add_photo_alternate_rounded,
-                    onPressed: _sending ? null : _pickImage,
-                    tooltip: '发送图片',
-                  ),
-                  // 文件按钮
-                  _buildInputActionButton(
-                    icon: Icons.attach_file_rounded,
-                    onPressed: _sending ? null : _pickAndIngestFile,
-                    tooltip: '上传文件',
-                  ),
-                  // 生图按钮
-                  _buildInputActionButton(
-                    icon: Icons.auto_fix_high_rounded,
-                    onPressed: _sending ? null : _manualGenerateImage,
-                    tooltip: 'AI 生图',
-                  ),
-                  const SizedBox(width: 8),
-                  // 输入框
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.grey[100],
-                        borderRadius: BorderRadius.circular(24),
-                        border: Border.all(color: Colors.grey[200]!),
-                      ),
-                      child: TextField(
-                        controller: _inputCtrl,
-                        maxLines: 5,
-                        minLines: 1,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _sending ? null : _send(),
-                        style: const TextStyle(fontSize: 15),
-                        decoration: InputDecoration(
-                          hintText: '输入消息...',
-                          hintStyle: TextStyle(color: Colors.grey[400]),
-                          border: InputBorder.none,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.file(File(_selectedImage!.path), width: 50, height: 50, fit: BoxFit.cover),
                         ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // 发送按钮 - 带脉冲动画
-                  AnimatedBuilder(
-                    animation: _pulseController,
-                    builder: (context, child) {
-                      final canSend = !_sending && (_inputCtrl.text.trim().isNotEmpty || _selectedImage != null);
-                      return Transform.scale(
-                        scale: canSend ? 1.0 + (_pulseAnimation.value - 1.0) * 0.3 : 1.0,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            gradient: _sending ? null : AppColors.primaryGradient,
-                            color: _sending ? Colors.grey[300] : null,
-                            shape: BoxShape.circle,
-                            boxShadow: _sending ? null : [
-                              BoxShadow(
-                                color: AppColors.primaryStart.withOpacity(0.3 + _pulseAnimation.value * 0.2),
-                                blurRadius: 12 + _pulseAnimation.value * 8,
-                                offset: const Offset(0, 4),
-                                spreadRadius: _pulseAnimation.value * 2,
-                              ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('已选择图片', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                              Text('点击发送进行识图', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
                             ],
                           ),
-                          child: Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              onTap: _sending ? null : _send,
-                              borderRadius: BorderRadius.circular(24),
-                              child: Container(
-                                width: 48,
-                                height: 48,
-                                alignment: Alignment.center,
-                                child: AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 200),
-                                  child: _sending
-                                      ? SizedBox(
-                                          width: 20,
-                                          height: 20,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            valueColor: AlwaysStoppedAnimation(Colors.grey[500]),
-                                          ),
-                                        )
-                                      : Icon(
-                                          Icons.arrow_upward_rounded,
-                                          key: const ValueKey('send'),
-                                          color: Colors.white,
-                                          size: 24,
-                                        ),
-                                ),
-                              ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.close_rounded, size: 20, color: Colors.grey[400]),
+                          onPressed: () => setState(() => _selectedImage = null),
+                        ),
+                      ],
+                    ),
+                  ),
+                // 输入行
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 8, 8, 12),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      // 图片按钮
+                      _buildInputActionButton(
+                        icon: Icons.add_photo_alternate_rounded,
+                        onPressed: _sending ? null : _pickImage,
+                        tooltip: '发送图片',
+                      ),
+                      // 文件按钮
+                      _buildInputActionButton(
+                        icon: Icons.attach_file_rounded,
+                        onPressed: _sending ? null : _pickAndIngestFile,
+                        tooltip: '上传文件',
+                      ),
+                      // 生图按钮
+                      _buildInputActionButton(
+                        icon: Icons.auto_fix_high_rounded,
+                        onPressed: _sending ? null : _manualGenerateImage,
+                        tooltip: 'AI 生图',
+                      ),
+                      const SizedBox(width: 8),
+                      // 输入框
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.grey[100],
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(color: Colors.grey[200]!),
+                          ),
+                          child: TextField(
+                            controller: _inputCtrl,
+                            maxLines: 5,
+                            minLines: 1,
+                            textInputAction: TextInputAction.send,
+                            onSubmitted: (_) => _sending ? null : _send(),
+                            style: const TextStyle(fontSize: 15),
+                            decoration: InputDecoration(
+                              hintText: '输入消息...',
+                              hintStyle: TextStyle(color: Colors.grey[400]),
+                              border: InputBorder.none,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                             ),
                           ),
                         ),
-                      );
-                    },
+                      ),
+                      const SizedBox(width: 8),
+                      // 发送按钮 - 带脉冲动画
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          final canSend = !_sending && (_inputCtrl.text.trim().isNotEmpty || _selectedImage != null);
+                          return Transform.scale(
+                            scale: canSend ? 1.0 + (_pulseAnimation.value - 1.0) * 0.3 : 1.0,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                gradient: _sending ? null : AppColors.primaryGradient,
+                                color: _sending ? Colors.grey[300] : null,
+                                shape: BoxShape.circle,
+                                boxShadow: _sending ? null : [
+                                  BoxShadow(
+                                    color: AppColors.primaryStart.withOpacity(0.3 + _pulseAnimation.value * 0.2),
+                                    blurRadius: 12 + _pulseAnimation.value * 8,
+                                    offset: const Offset(0, 4),
+                                    spreadRadius: _pulseAnimation.value * 2,
+                                  ),
+                                ],
+                              ),
+                              child: Material(
+                                color: Colors.transparent,
+                                child: InkWell(
+                                  onTap: _sending ? null : _send,
+                                  borderRadius: BorderRadius.circular(24),
+                                  child: Container(
+                                    width: 48,
+                                    height: 48,
+                                    alignment: Alignment.center,
+                                    child: AnimatedSwitcher(
+                                      duration: const Duration(milliseconds: 200),
+                                      child: _sending
+                                          ? SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                valueColor: AlwaysStoppedAnimation(Colors.grey[500]),
+                                              ),
+                                            )
+                                          : Icon(
+                                              Icons.arrow_upward_rounded,
+                                              key: const ValueKey('send'),
+                                              color: Colors.white,
+                                              size: 24,
+                                            ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
-      ),
       ),
     );
   }
