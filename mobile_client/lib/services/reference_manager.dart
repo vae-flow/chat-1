@@ -408,12 +408,12 @@ class ReferenceManager {
       
       for (var i = 0; i < refs.length; i++) {
         final ref = refs[i];
-        final reliabilityIcon = ref.reliability >= 0.8 ? '🟢' : 
-                               (ref.reliability >= 0.6 ? '🟡' : '🔴');
+        final reliabilityIcon = (ref.reliability ?? 0.5) >= 0.8 ? '🟢' : 
+                               ((ref.reliability ?? 0.5) >= 0.6 ? '🟡' : '🔴');
         sourceData.writeln('【来源 ${i + 1}】$reliabilityIcon');
         sourceData.writeln('标题: ${ref.title}');
         sourceData.writeln('URL: ${ref.url}');
-        sourceData.writeln('可信度: ${(ref.reliability * 100).round()}%');
+        sourceData.writeln('可信度: ${((ref.reliability ?? 0.5) * 100).round()}%');
         sourceData.writeln('权威级别: ${ref.authorityLevel}');
         sourceData.writeln('内容:\n${ref.snippet}\n');
         sourceData.writeln('---\n');

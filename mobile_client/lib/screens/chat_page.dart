@@ -3027,8 +3027,8 @@ $userText
           
           // Create clarification message and end the Agent loop
           final clarifyMessage = ChatMessage(
-            role: 'assistant',
-            content: clarifyBuffer.toString(),
+            'assistant',
+            clarifyBuffer.toString(),
           );
           
           setState(() {
