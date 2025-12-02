@@ -619,7 +619,7 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
         // Priority 3: div with content-related class/id
         if (mainContent.isEmpty) {
           final contentDivMatch = RegExp(
-            r'<div[^>]*(?:class|id)=["\'][^"\']*(?:content|article|post|entry|main)[^"\']*["\'][^>]*>([\s\S]*?)</div>',
+            r'<div[^>]*(?:class|id)=["' "'" r'][^"' "'" r']*(?:content|article|post|entry|main)[^"' "'" r']*["' "'" r'][^>]*>([\s\S]*?)</div>',
             caseSensitive: false
           ).firstMatch(cleaned);
           if (contentDivMatch != null) {
@@ -699,11 +699,11 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
       .replaceAll('&copy;', '©')
       .replaceAll('&reg;', '®')
       .replaceAll('&trade;', '™')
-      .replaceAll(RegExp(r'&#(\d+);'), (m) {
+      .replaceAllMapped(RegExp(r'&#(\d+);'), (m) {
         final code = int.tryParse(m.group(1) ?? '');
         return code != null ? String.fromCharCode(code) : m.group(0)!;
       })
-      .replaceAll(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
+      .replaceAllMapped(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
         final code = int.tryParse(m.group(1) ?? '', radix: 16);
         return code != null ? String.fromCharCode(code) : m.group(0)!;
       });

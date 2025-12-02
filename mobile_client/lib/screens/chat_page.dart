@@ -3010,7 +3010,7 @@ $userText
             final urlRef = await _refManager.fetchUrlContent(url);
             
             // Check if fetch was successful
-            if (urlRef.reliability > 0.0) {
+            if ((urlRef.reliability ?? 0.0) > 0.0) {
               // Success - add to session refs
               sessionRefs.add(urlRef);
               
@@ -4146,20 +4146,20 @@ $userText
                             children: [
                               _buildBouncingDots(),
                               const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(
-                            _loadingStatus.isEmpty ? '正在思考...' : _loadingStatus,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: AppColors.primaryStart,
-                              fontWeight: FontWeight.w500,
-                            ),
-                            overflow: TextOverflow.ellipsis,
+                              Expanded(
+                                child: Text(
+                                  _loadingStatus.isEmpty ? '正在思考...' : _loadingStatus,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: AppColors.primaryStart,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
-                    ),
-                  ),
             // 已选图片预览
             if (_selectedImage != null)
               Container(
