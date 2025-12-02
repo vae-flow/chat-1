@@ -62,7 +62,7 @@ class ReferenceManager {
       },
       body: json.encode({
         'query': query,
-        'numResults': 3,
+        'numResults': 5,
         'useAutoprompt': true,
         'contents': {'text': true} 
       }),
@@ -87,7 +87,7 @@ class ReferenceManager {
     // Fix: Use 'count' parameter as per documentation
     // Ensure URL handles /v1 if not present in baseUrl, or assume user configures it.
     // We will use the baseUrl as provided, assuming it includes /v1 if needed (updated in Settings).
-    final uri = Uri.parse('$baseUrl/search?query=${Uri.encodeComponent(query)}&count=3');
+    final uri = Uri.parse('$baseUrl/search?query=${Uri.encodeComponent(query)}&count=5');
     final resp = await http.get(
       uri,
       headers: {'X-API-Key': key},
@@ -136,7 +136,7 @@ class ReferenceManager {
 
   Future<List<ReferenceItem>> _searchBrave(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Brave Key not configured');
-    final uri = Uri.parse('$baseUrl/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=3');
+    final uri = Uri.parse('$baseUrl/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=5');
     final resp = await http.get(
       uri,
       headers: {

@@ -186,16 +186,33 @@ Future<List<ReferenceItem>> analyzeImage({
       // Best-effort parsing: accept common keys
       final items = <ReferenceItem>[];
       String title = 'Image Analysis';
-      String snippet = '';
+      final descriptions = <String>[];
+
       if (data['description'] != null) {
-        snippet = data['description'];
-      } else if (data['captions'] is List && data['captions'].isNotEmpty) {
-        snippet = (data['captions'] as List).join(' ');
-      } else if (data['objects'] is List) {
-        snippet = (data['objects'] as List).map((o) => o['name']).whereType<String>().join(', ');
-      } else {
-        snippet = json.encode(data).toString();
+        descriptions.add('Desc: ${data['description']}');
       }
+      if (data['captions'] is List && data['captions'].isNotEmpty) {
+        descriptions.add('Captions: ${(data['captions'] as List).join(" | ")}');
+      }
+      if (data['objects'] is List && (data['objects'] as List).isNotEmpty) {
+        final objs = (data['objects'] as List)
+            .map((o) {
+              if (o is Map && o['name'] != null) return o['name'];
+              return o.toString();
+            })
+            .whereType<String>()
+            .toList();
+        if (objs.isNotEmpty) {
+          descriptions.add('Objects: ${objs.join(", ")}');
+        }
+      }
+      if (data['text'] != null) {
+        descriptions.add('Text: ${data['text']}');
+      }
+
+      String snippet = descriptions.isNotEmpty
+          ? descriptions.join(' ; ')
+          : json.encode(data).toString();
 
       items.add(ReferenceItem(
         title: title,

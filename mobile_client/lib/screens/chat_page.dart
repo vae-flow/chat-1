@@ -362,6 +362,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   // Cache for Global Memory to avoid reading prefs constantly
   String _globalMemoryCache = '';
+  String? _lastCompressionNote;
 
   Future<void> _saveChatHistory() async {
     try {
@@ -473,7 +474,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       final localPath = await downloadAndSaveImage(imageUrl, StorageType.chatImage);
 
       setState(() {
-        _messages.add(ChatMessage('assistant', '图片生成成功', localImagePath: localPath));
+        _messages.add(ChatMessage('assistant', '图片生成成功\n$prompt', localImagePath: localPath));
         _saveChatHistory();
       });
       _scrollToBottom();
@@ -507,6 +508,84 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
     
     return buffer.toString();
+  }
+
+  /// Compress a history list into system summaries before发送给大模型，保持顺序与上限控制
+  Future<List<ChatMessage>> _compressHistoryForTransport(
+    List<ChatMessage> history, {
+    required int targetChars,
+    int keepTail = 4,
+    int depth = 0,
+  }) async {
+    int total = history.fold(0, (p, c) => p + c.content.length);
+    if (total <= targetChars) {
+      if (depth == 0) _lastCompressionNote = null;
+      return history;
+    }
+
+    // Keep the most recent messages intact
+    keepTail = keepTail.clamp(2, history.length).toInt();
+    final tail = history.sublist(history.length - keepTail);
+    final older = history.sublist(0, history.length - keepTail);
+
+    // Flatten older messages into chunks
+    const int chunkSize = 8000;
+    final List<String> chunkStrings = [];
+    final buffer = StringBuffer();
+    for (final m in older) {
+      buffer.writeln('${m.role}: ${m.content}');
+      if (buffer.length >= chunkSize) {
+        chunkStrings.add(buffer.toString());
+        buffer.clear();
+      }
+    }
+    if (buffer.isNotEmpty) {
+      chunkStrings.add(buffer.toString());
+    }
+
+    if (chunkStrings.isEmpty) return history;
+
+    final totalOlderLen = chunkStrings.fold(0, (p, c) => p + c.length);
+    if (totalOlderLen == 0) return history;
+    // Desired ratio so that compressed older + tail ~= targetChars
+    final desiredRatio = (targetChars * 0.9) / totalOlderLen;
+    final double ratio = desiredRatio.clamp(0.2, 0.7).toDouble();
+
+    final compressedMsgs = <ChatMessage>[];
+    for (int i = 0; i < chunkStrings.length; i++) {
+      final summary = await _generateSummary(chunkStrings[i], ratio);
+      compressedMsgs.add(
+        ChatMessage(
+          'system',
+          '【压缩摘要 #${i + 1}/${chunkStrings.length} | ratio ${(ratio * 100).toInt()}%】\n$summary',
+          isMemory: true,
+          isCompressed: true,
+          compressionRatio: ratio,
+          originalLength: chunkStrings[i].length,
+        ),
+      );
+    }
+
+    final merged = [...compressedMsgs, ...tail];
+    final mergedLen = merged.fold(0, (p, c) => p + c.content.length);
+
+    if (depth == 0) {
+      _lastCompressionNote =
+          '【压缩提示】上下文超限，已将早期消息分块压缩为 ${chunkStrings.length} 条摘要，压缩比约 ${(ratio * 100).toInt()}%，保留最近 $keepTail 条原文；可能有细节缺失，如需细节请明确指出。';
+    }
+
+    // If still too long, do one more pass with a slightly tighter ratio
+    if (mergedLen > targetChars && compressedMsgs.isNotEmpty && depth < 2) {
+      final tighterTarget = (targetChars * 0.8).toInt();
+      return _compressHistoryForTransport(
+        merged,
+        targetChars: tighterTarget,
+        keepTail: keepTail,
+        depth: depth + 1,
+      );
+    }
+
+    return merged;
   }
 
   Future<List<ChatMessage>> _ensureContextFits(List<ChatMessage> history, int limit) async {
@@ -594,6 +673,11 @@ ${_activePersona.prompt}
 $timeString
 
 $refString
+
+【对话透明度】
+- 若你感到上下文被压缩、信息缺失或需要用户补充，请直接在回复里说明缺口并提出具体问题。
+- 工具性调用（搜索/生图/识图）无需赘述细节，但请在最终回答中提示哪些部分依赖了这些工具或因未配置而缺失。
+- 如果已有系统提示说明“压缩/缺少信息”，请结合该提示，继续追问关键细节而不是沉默。
 ''';
 
     if (manageSendingState) {
@@ -639,18 +723,26 @@ $refString
         // Use historyOverride if provided, otherwise use current _messages
         var historyToUse = historyOverride ?? _messages;
 
-        // Enforce Context Limit (~30k chars final target) using Recursive Compression
-        // If history is too long, we compress it recursively until it fits.
-        // User's API supports 30K context, so we use higher limits
-        if (historyToUse.fold(0, (sum, m) => sum + m.content.length) > 25000) {
-           if (manageSendingState) {
-             setState(() => _loadingStatus = '上下文过长，正在递归压缩...');
-           }
-           historyToUse = await _ensureContextFits(historyToUse, 30000);
+        // Enforce Context Limit using worker压缩，多次调用 summary 模型，保留尾部原文
+        const int chatContextCap = 60000;
+        if (historyToUse.fold(0, (sum, m) => sum + m.content.length) > chatContextCap) {
+          if (manageSendingState) {
+            setState(() => _loadingStatus = '上下文过长，正在分块压缩...');
+          }
+          historyToUse = await _compressHistoryForTransport(
+            historyToUse,
+            targetChars: chatContextCap,
+            keepTail: 6,
+          );
         }
+
+        final compressionNote = _lastCompressionNote;
+        _lastCompressionNote = null; // reset
 
         messagesPayload = [
           {'role': 'system', 'content': timeAwareSystemPrompt},
+          if (compressionNote != null)
+            {'role': 'system', 'content': compressionNote},
           ...historyToUse.map((m) {
             String msgContent = m.content;
             if (msgContent.isEmpty && (m.imageUrl != null || m.localImagePath != null)) {
@@ -659,13 +751,17 @@ $refString
             return {'role': m.role, 'content': msgContent};
           }).where((m) => m['content'].toString().isNotEmpty)
         ];
+
+        if (compressionNote != null && manageSendingState) {
+          _showError(compressionNote);
+        }
       }
 
       final body = json.encode({
         'model': model,
         'messages': messagesPayload,
         'stream': _enableStream,
-        'max_tokens': 30000,
+        'max_tokens': 60000,
       });
 
       if (_enableStream) {
@@ -687,6 +783,7 @@ $refString
 
         if (streamedResponse.statusCode == 200) {
           String fullContent = '';
+          String? finishReason;
           await for (final line in streamedResponse.stream.transform(utf8.decoder).transform(const LineSplitter())) {
             if (line.startsWith('data: ')) {
               final data = line.substring(6).trim();
@@ -694,6 +791,7 @@ $refString
               try {
                 final jsonVal = json.decode(data);
                 final delta = jsonVal['choices']?[0]?['delta']?['content'];
+                finishReason = jsonVal['choices']?[0]?['finish_reason'] ?? finishReason;
                 if (delta != null) {
                   fullContent += delta;
                   setState(() {
@@ -715,6 +813,10 @@ $refString
             }
           }
           _saveChatHistory();
+          // Check if output was truncated due to token limit
+          if (finishReason == 'length') {
+            _showError('⚠️ 输出被服务端截断 (finish_reason: length)，回复可能不完整');
+          }
           // _checkAndCompressMemory(); // Removed auto-compress as per user request
         } else {
            // Stream request failed, remove placeholder
@@ -739,6 +841,7 @@ $refString
           final decodedBody = utf8.decode(resp.bodyBytes);
           final data = json.decode(decodedBody);
           final reply = data['choices'][0]['message']['content'] ?? '';
+          final finishReason = data['choices']?[0]?['finish_reason'];
           setState(() {
             _messages.add(ChatMessage(
               'assistant', 
@@ -749,6 +852,10 @@ $refString
           });
           _scrollToBottom();
           
+          // Check if output was truncated
+          if (finishReason == 'length') {
+            _showError('⚠️ 输出被服务端截断 (finish_reason: length)，回复可能不完整');
+          }
           // _checkAndCompressMemory(); // Removed auto-compress as per user request
 
         } else {
@@ -956,22 +1063,49 @@ $refString
     }
   }
 
+  /// Get Worker API config with fallback chain: Worker Pro -> Router -> Chat
+  Future<({String base, String key, String model})> _getWorkerConfig() async {
+    final prefs = await SharedPreferences.getInstance();
+    
+    // Try Worker Pro first (thinking tasks like summarization)
+    final workerProBase = prefs.getString('worker_pro_base') ?? '';
+    final workerProKeys = prefs.getString('worker_pro_keys') ?? '';
+    final workerProModel = prefs.getString('worker_pro_model') ?? '';
+    
+    if (workerProBase.isNotEmpty && workerProKeys.isNotEmpty && !workerProBase.contains('your-oneapi-host')) {
+      // Use first key from comma-separated list
+      final firstKey = workerProKeys.split(',').map((k) => k.trim()).where((k) => k.isNotEmpty).firstOrNull ?? '';
+      if (firstKey.isNotEmpty) {
+        return (base: workerProBase, key: firstKey, model: workerProModel.isNotEmpty ? workerProModel : 'gpt-4o-mini');
+      }
+    }
+    
+    // Fallback to Router API
+    if (!_routerBase.contains('your-oneapi-host') && _routerKey.isNotEmpty) {
+      return (base: _routerBase, key: _routerKey, model: _routerModel);
+    }
+    
+    // Final fallback to Chat API
+    final effectiveBase = _chatBase.contains('your-oneapi-host') ? 'https://api.openai.com/v1' : _chatBase;
+    return (base: effectiveBase, key: _chatKey, model: _summaryModel);
+  }
+
   Future<String> _generateSummary(String text, double ratio) async {
-    // Use the summary model
-    final effectiveBase = (_chatBase.contains('your-oneapi-host')) ? 'https://api.openai.com/v1' : _chatBase;
-    final effectiveKey = _chatKey;
+    // Use Worker config with fallback chain
+    final config = await _getWorkerConfig();
+    final double effectiveRatio = ratio.clamp(0.2, 0.7).toDouble();
     
     final prompt = '''
-Please summarize the following text to retain approximately ${(ratio * 100).toInt()}% of the original information density.
-Focus on key facts and decisions.
+Please summarize the following text to retain approximately ${(effectiveRatio * 100).toInt()}% of the original information density (never compress beyond 20%).
+Focus on key facts, decisions, and order of events.
 Original Text:
 $text
 ''';
 
     try {
-      final uri = Uri.parse('${effectiveBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+      final uri = Uri.parse('${config.base.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
       final body = json.encode({
-        'model': _summaryModel,
+        'model': config.model,
         'messages': [
           {'role': 'system', 'content': 'You are a concise summarizer.'},
           {'role': 'user', 'content': prompt}
@@ -982,7 +1116,7 @@ $text
       final resp = await http.post(
         uri,
         headers: {
-          'Authorization': 'Bearer $effectiveKey',
+          'Authorization': 'Bearer ${config.key}',
           'Content-Type': 'application/json',
         },
         body: body,
@@ -1253,6 +1387,17 @@ $chunk
       limitedAgentMsgs.add(m);
     }
     contextMsgs = limitedAgentMsgs.reversed.toList();
+
+    // If still above soft cap, proactively compress older parts via worker API
+    final agentTotal = contextMsgs.fold(0, (p, c) => p + c.content.length);
+    if (agentTotal > 10000) {
+      contextMsgs = await _compressHistoryForTransport(
+        contextMsgs,
+        targetChars: 9500,
+        keepTail: 6,
+      );
+      _lastCompressionNote = null; // planner压缩不对用户弹提示
+    }
         
     final contextBuffer = StringBuffer();
     for (var m in contextMsgs) {
@@ -1267,10 +1412,55 @@ $chunk
       contextBuffer.writeln('$roleName: ${m.content}');
     }
 
+    // Tool availability summary so the planner knows what it can actually use
+    final prefs = await SharedPreferences.getInstance();
+    final searchProviderPref = prefs.getString('search_provider') ?? 'auto';
+    final exaKey = prefs.getString('exa_key') ?? '';
+    final youKey = prefs.getString('you_key') ?? '';
+    final braveKey = prefs.getString('brave_key') ?? '';
+
+    String? resolvedSearchProvider;
+    if (searchProviderPref == 'exa' && exaKey.isNotEmpty) {
+      resolvedSearchProvider = 'Exa';
+    } else if (searchProviderPref == 'you' && youKey.isNotEmpty) {
+      resolvedSearchProvider = 'You.com';
+    } else if (searchProviderPref == 'brave' && braveKey.isNotEmpty) {
+      resolvedSearchProvider = 'Brave';
+    } else if (searchProviderPref == 'auto') {
+      if (exaKey.isNotEmpty) {
+        resolvedSearchProvider = 'Exa';
+      } else if (youKey.isNotEmpty) {
+        resolvedSearchProvider = 'You.com';
+      } else if (braveKey.isNotEmpty) {
+        resolvedSearchProvider = 'Brave';
+      }
+    }
+
+    final searchAvailable = resolvedSearchProvider != null;
+    final drawAvailable = !_imgBase.contains('your-oneapi-host') && _imgKey.isNotEmpty;
+
+    final toolbelt = '''
+### TOOLBELT (what you can call)
+- search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider (web search returns short references)" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
+- draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
+- answer: ALWAYS AVAILABLE for reasoning, summaries, or when other tools are unavailable.
+If a tool is marked UNAVAILABLE, fall back to answer and clearly state the missing capability or info you need.
+
+### CAPABILITY COMBINATIONS
+- research: search -> summarize in answer (include citations if you have refs)
+- vision: analyze user image + answer; can also search based on what you saw
+- image creation: draw based on user request or your analysis of a vision input
+- planning/output: pure reasoning when no external tools help
+These are examples, not a fixed menu. Invent new combinations if they better serve the goal. Always try to combine available tools to achieve the user's goal before giving up.
+If user asks for an unsupported channel (e.g., send email / call API not provided), reply via answer with a blocker note and request config/info.
+''';
+
     // 2. Construct System Prompt with XML Tags for strict separation
     final systemPrompt = '''
 You are the "Brain" of an advanced autonomous agent. 
 Your goal is to satisfy the User's Request through iterative reasoning and tool usage.
+
+$toolbelt
 
 ### INPUT STRUCTURE
 The user message is strictly structured. You must distinguish between:
@@ -1288,13 +1478,15 @@ ${_activePersona.prompt}
 </persona>
 
 ### STRATEGIC THINKING (Chain of Thought)
-Before deciding, perform a "Strategic Analysis" in the `reason` field:
+Your objective is to complete the user's goal with iterative steps until done or truly blocked. Before deciding, perform a "Strategic Analysis" in the `reason` field:
 1. **Time Awareness**: Check <current_time>. If the user asks for "latest news", "weather", or "stock price", you MUST use the current date in your search query.
 2. **Intent Classification**: Is the user asking for a Fact, an Opinion, a Creative Work, or just Chatting?
 3. **Gap Analysis**: Compare <user_input> with <current_observations>. What specific information is missing?
 4. **Iteration Check**: Look at <action_history>. 
    - If previous searches failed, CHANGE your keywords or strategy.
    - If you have searched 2+ times and have partial info, consider if it's "good enough" to answer.
+5. **Feasibility**: If the request needs unavailable tools or user-specific data, explicitly ask for that data or explain the blocker in the answer.
+6. **Goal-first Loop**: Think in small loops toward the end-goal, not a static todo list. Consider multiple hypotheses/paths; pick the highest-leverage next action; if it fails, adapt and try another angle (e.g., narrower query, different search term, pure reasoning). Stop only when the goal is met or clearly impossible with current tools/info.
 
 ### DECISION LOGIC
 1. **SEARCH (search)**: 
@@ -1302,17 +1494,23 @@ Before deciding, perform a "Strategic Analysis" in the `reason` field:
    - STRATEGY: Use specific, targeted queries. If "Python tutorial" failed, try "Python for beginners 2024".
    - SINGLE TARGET: Focus on ONE specific information target per search step. If you need A and B, search A first, then search B in the next step. Do NOT combine unrelated topics.
    - RECURSIVE: If the user asks for "Deep Dive", and you found a summary, search again for the specific terms in that summary.
+   - If search is unavailable, choose ANSWER and ask for the missing key or confirm offline constraints.
 
 2. **DRAW (draw)**:
    - USE WHEN: User explicitly asks for an image/drawing/painting.
+   - If draw is unavailable, choose ANSWER and state that image generation is not configured.
 
 3. **ANSWER (answer)**:
    - USE WHEN: <current_observations> are sufficient.
    - OR: The request is purely logical/creative/conversational.
    - OR: You have tried multiple searches and cannot find more info (fail gracefully).
+   - OR: The user asks for unsupported actions (e.g., send email, access local files). In this case, explain the blocker and ask for specific missing info/config if it could make it possible.
 
 4. **REMINDERS (Side Task)**:
    - Extract future tasks into the "reminders" list.
+
+### OBSERVATION QUALITY
+- If you receive vision-derived observations, assume they may be sparse. When needed, ask the user for clearer images or specific details you cannot see. Do not invent unobserved objects or text.
 
 ### OUTPUT FORMAT
 Return a JSON object (no markdown):
@@ -1495,11 +1693,25 @@ $userText
               }
               // Continue loop to re-evaluate with new info
             } else {
-              // Search returned nothing, force answer to avoid loop
-              debugPrint('Search returned no results. Forcing answer.');
-              setState(() => _loadingStatus = '搜索无结果，正在生成回答...');
-              await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
-              break;
+              // Search returned nothing - let planner decide next action (may rewrite query)
+              debugPrint('Search returned no results. Continuing to let planner rewrite query.');
+              // Mark this in action history so planner knows to try different keywords
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.search,
+                query: decision.query,
+                reason: '${decision.reason} [RESULT: No results found]',
+              );
+              // Check if we've had too many empty searches
+              final emptySearches = sessionDecisions.where((d) => 
+                d.type == AgentActionType.search && d.reason?.contains('[RESULT: No results') == true
+              ).length;
+              if (emptySearches >= 3) {
+                debugPrint('3+ empty searches, forcing answer.');
+                setState(() => _loadingStatus = '多次搜索无结果，正在生成回答...');
+                await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+                break;
+              }
+              // Otherwise continue loop - planner will see empty result in action history
             }
           } catch (searchError) {
             // Search failed - graceful degradation: continue with existing refs or answer directly
