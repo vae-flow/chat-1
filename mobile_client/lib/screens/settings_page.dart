@@ -53,6 +53,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _braveBaseCtrl = TextEditingController();
   final _braveKeyCtrl = TextEditingController();
   String _searchProvider = 'mock';
+  bool _enableSearchSynthesis = true;  // Worker综合分析开关
 
   // Worker Pro (思考型内部处理)
   final _workerProBaseCtrl = TextEditingController();
@@ -145,6 +146,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _braveBaseCtrl.text = prefs.getString('brave_base') ?? 'https://api.search.brave.com';
       _braveKeyCtrl.text = prefs.getString('brave_key') ?? '';
       _searchProvider = prefs.getString('search_provider') ?? 'auto';
+      _enableSearchSynthesis = prefs.getBool('enable_search_synthesis') ?? true;
 
       // Worker Pro (思考型)
       _workerProBaseCtrl.text = prefs.getString('worker_pro_base') ?? '';
@@ -194,6 +196,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('brave_base', _braveBaseCtrl.text.trim());
     await prefs.setString('brave_key', _braveKeyCtrl.text.trim());
     await prefs.setString('search_provider', _searchProvider);
+    await prefs.setBool('enable_search_synthesis', _enableSearchSynthesis);
 
     // Worker Pro (思考型)
     await prefs.setString('worker_pro_base', _workerProBaseCtrl.text.trim());
@@ -392,6 +395,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
           onChanged: (val) {
             if (val != null) setState(() => _searchProvider = val);
           },
+        ),
+        const SizedBox(height: 16),
+        
+        SwitchListTile(
+          title: const Text('启用搜索结果综合分析'),
+          subtitle: const Text('使用 Worker API 对搜索结果进行全局视角综合，提取共识、分歧和盲区'),
+          value: _enableSearchSynthesis,
+          onChanged: (v) => setState(() => _enableSearchSynthesis = v),
+          contentPadding: EdgeInsets.zero,
         ),
         const SizedBox(height: 24),
 

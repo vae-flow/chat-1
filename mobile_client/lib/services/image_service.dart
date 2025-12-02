@@ -14,7 +14,8 @@ Future<String> fetchImageGenerationUrl({
   required String model,
   required bool useChatApi,
 }) async {
-  final cleanBaseUrl = baseUrl.replaceAll(RegExp(r"/\$"), "");
+  // Normalize URL - only remove trailing slashes, respect user's path
+  String cleanBaseUrl = baseUrl.replaceAll(RegExp(r'/+$'), '');
   
   if (useChatApi) {
     // Chat API Logic
@@ -276,7 +277,7 @@ Future<List<ReferenceItem>> analyzeImage({
       final result = await _callVisionApi(
         baseUrl: fallbackBaseUrl!,
         apiKey: fallbackApiKey!,
-        model: fallbackModel ?? 'gpt-4o-mini',
+        model: fallbackModel ?? model, // Use primary model as fallback if not specified
         base64Image: base64Image,
         mimeType: mimeType,
         prompt: analysisPrompt,
@@ -318,7 +319,8 @@ Future<List<ReferenceItem>?> _callVisionApi({
   int? fileSizeKB,
   bool isFallback = false,
 }) async {
-  final cleanBase = baseUrl.replaceAll(RegExp(r"/\$"), "");
+  // Normalize URL - only remove trailing slashes, respect user's path
+  String cleanBase = baseUrl.replaceAll(RegExp(r'/+$'), '');
   final uri = Uri.parse('$cleanBase/chat/completions');
 
   final body = json.encode({

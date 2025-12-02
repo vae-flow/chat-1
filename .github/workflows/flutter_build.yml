@@ -43,6 +43,36 @@ jobs:
           cat <<EOF > update_config.py
           import os
           import re
+          import shutil
+
+          def copy_overrides():
+              print("Copying Android overrides...")
+              # 1. Copy Resources (XML config, Strings)
+              if os.path.exists('android_overrides/res'):
+                  shutil.copytree('android_overrides/res', 'android/app/src/main/res', dirs_exist_ok=True)
+                  print("Copied resources")
+
+              # 2. Copy Kotlin Files (MainActivity, GlobalActionService)
+              # Dynamic path finding for robustness
+              target_kotlin_dir = 'android/app/src/main/kotlin/com/oneapi/pro/oneapi_assistant_pro'
+              source_kotlin_dir = 'android_overrides/src/main/kotlin/com/oneapi/pro/oneapi_assistant_pro'
+              
+              # If target doesn't exist exactly there, try to find where MainActivity.kt is
+              if not os.path.exists(target_kotlin_dir):
+                  print(f"Target dir {target_kotlin_dir} not found, searching for MainActivity.kt...")
+                  for root, dirs, files in os.walk('android/app/src/main/kotlin'):
+                      if 'MainActivity.kt' in files:
+                          target_kotlin_dir = root
+                          print(f"Found MainActivity at {target_kotlin_dir}")
+                          break
+              
+              if os.path.exists(source_kotlin_dir) and os.path.exists(target_kotlin_dir):
+                  for file in os.listdir(source_kotlin_dir):
+                      if file.endswith('.kt'):
+                          shutil.copy(os.path.join(source_kotlin_dir, file), target_kotlin_dir)
+                          print(f"Copied {file} to {target_kotlin_dir}")
+              else:
+                  print(f"Warning: Kotlin directories not found. Source: {os.path.exists(source_kotlin_dir)}, Target: {os.path.exists(target_kotlin_dir)}")
 
           def update_manifest():
               path = 'android/app/src/main/AndroidManifest.xml'
@@ -69,8 +99,26 @@ jobs:
                       content = content.replace('<application', '<application android:usesCleartextTraffic="true"')
                       print("Enabled Cleartext Traffic")
 
-                  content = content.replace('android:label="oneapi_assistant_pro"', 'android:label="One-API Pro"')
+                  content = content.replace('android:label="oneapi_assistant_pro"', 'android:label="Assistant"')
                   print("Updated App Label")
+                  
+                  # Inject Service Declaration
+                  service_decl = '''
+                  <service android:name=".GlobalActionService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+                  '''
+                  if '.GlobalActionService' not in content:
+                      # Insert before closing application tag
+                      content = content.replace('</application>', service_decl + '\\n    </application>')
+                      print("Injected Accessibility Service declaration")
 
               with open(path, 'w', encoding='utf-8') as f:
                   f.write(content)
@@ -123,6 +171,11 @@ jobs:
                   if 'defaultConfig {' in content and 'multiDexEnabled' not in content:
                       content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled true')
                       print("Enabled multiDex (Groovy)")
+                  
+                  # 3. Update Application ID (Enable side-by-side install)
+                  if 'applicationId' in content:
+                      content = re.sub(r'applicationId\s+["\'].*["\']', 'applicationId "com.oneapi.pro.assistant"', content)
+                      print("Updated applicationId to com.oneapi.pro.assistant")
               else:
                   # Kotlin DSL
                   if 'compileOptions {' in content and 'isCoreLibraryDesugaringEnabled' not in content:
@@ -142,6 +195,11 @@ jobs:
                       content = content.replace('defaultConfig {', 'defaultConfig {\\n        multiDexEnabled = true')
                       print("Enabled multiDex (Kotlin)")
 
+                  # 3. Update Application ID (Enable side-by-side install)
+                  if 'applicationId' in content:
+                      content = re.sub(r'applicationId\s*=\s*["\'].*["\']', 'applicationId = "com.oneapi.pro.assistant"', content)
+                      print("Updated applicationId to com.oneapi.pro.assistant")
+
               with open(path, 'w', encoding='utf-8') as f:
                   f.write(content)
               
@@ -151,6 +209,7 @@ jobs:
 
           if __name__ == "__main__":
               print("Starting Configuration Update...")
+              copy_overrides()
               update_manifest()
               update_gradle()
               print("Configuration Update Complete.")
@@ -174,11 +233,11 @@ jobs:
       - name: Rename APK with Version
         run: |
           VERSION=$(date +%Y%m%d_%H%M)
-          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/OneAPI_Pro_v${VERSION}.apk
-          echo "APK renamed to: OneAPI_Pro_v${VERSION}.apk"
+          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/assistant_v${VERSION}.apk
+          echo "APK renamed to: assistant_v${VERSION}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: OneAPI_Pro_${{ github.run_number }}
-          path: mobile_client/build/app/outputs/flutter-apk/OneAPI_Pro_*.apk
+          name: Assistant_Pro_${{ github.run_number }}
+          path: mobile_client/build/app/outputs/flutter-apk/assistant_*.apk

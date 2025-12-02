@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">One-API Assistant Pro System Control Service. Allows the AI Agent to perform global actions like Home, Back, and Notifications.</string>
+</resources>

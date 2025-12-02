@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -17,7 +18,11 @@ import '../models/reference_item.dart';
 import '../models/agent_decision.dart';
 import '../services/reference_manager.dart';
 import '../services/image_service.dart';
+import '../services/file_saver.dart';
+import '../services/system_control.dart';
+import '../services/knowledge_service.dart';
 import '../utils/constants.dart';
+import 'package:file_picker/file_picker.dart';
 import 'settings_page.dart';
 import 'persona_manager_page.dart';
 import '../main.dart';  // For AppColors
@@ -112,11 +117,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final ImagePicker _picker = ImagePicker();
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
   final ReferenceManager _refManager = ReferenceManager();
+  final KnowledgeService _knowledgeService = KnowledgeService();
   
   bool _sending = false;
   String _loadingStatus = ''; // To show detailed agent status
   final List<ChatMessage> _messages = [];
   XFile? _selectedImage;
+  
+  // Deep Think: Pending clarification state
+  Map<String, dynamic>? _pendingClarification;
 
   // Settings
   // Chat
@@ -174,7 +183,11 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _initAnimations();
     _initNotifications();
     _loadSettings();
-    _loadPersonas();
+    _loadPersonas().then((_) {
+      // Initialize knowledge base with current persona after personas are loaded
+      _knowledgeService.init();
+      _knowledgeService.setPersona(_currentPersonaId);
+    });
     _loadChatHistory();
   }
   
@@ -296,7 +309,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     // 2. Load new persona's history (and inject global memory)
     await _loadChatHistory();
     
-    // 3. Persist the switch
+    // 3. Switch knowledge base to new persona
+    await _knowledgeService.setPersona(id);
+    
+    // 4. Persist the switch
     await _savePersonas();
     
     // Optional: Add a system note if history is empty to indicate switch
@@ -351,6 +367,18 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _messages.addAll(loadedMsgs);
       });
       
+      // 3. Restore Pending Clarification State (for session recovery)
+      final pendingStr = prefs.getString('pending_clarification_$_currentPersonaId');
+      if (pendingStr != null && pendingStr.isNotEmpty) {
+        try {
+          _pendingClarification = json.decode(pendingStr) as Map<String, dynamic>;
+          debugPrint('Restored pending clarification state');
+        } catch (e) {
+          debugPrint('Failed to restore pending clarification: $e');
+          _pendingClarification = null;
+        }
+      }
+      
       // Scroll to bottom after loading
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollCtrl.hasClients) {
@@ -383,6 +411,13 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           .toList();
       
       await prefs.setStringList('chat_history_$_currentPersonaId', history);
+      
+      // 3. Save Pending Clarification State (for session recovery)
+      if (_pendingClarification != null) {
+        await prefs.setString('pending_clarification_$_currentPersonaId', json.encode(_pendingClarification));
+      } else {
+        await prefs.remove('pending_clarification_$_currentPersonaId');
+      }
     } catch (e) {
       debugPrint('Failed to save chat history: $e');
     }
@@ -426,6 +461,73 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       }
     } catch (e) {
       _showError('选择图片失败: $e');
+    }
+  }
+
+  Future<void> _pickAndIngestFile() async {
+    // Ensure knowledge base is initialized for current persona
+    if (_knowledgeService.currentPersonaId != _currentPersonaId) {
+      await _knowledgeService.setPersona(_currentPersonaId);
+    }
+    
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['txt', 'md', 'json', 'dart', 'py', 'js', 'html', 'css', 'java', 'kt', 'swift', 'c', 'cpp', 'h'],
+      );
+
+      if (result != null && result.files.single.path != null) {
+        final file = File(result.files.single.path!);
+        final filename = result.files.single.name;
+        
+        // Check size (limit to 5MB for now to avoid memory issues)
+        final size = await file.length();
+        if (size > 5 * 1024 * 1024) {
+          _showError('文件过大 (限制5MB)');
+          return;
+        }
+
+        setState(() {
+          _sending = true;
+          _loadingStatus = '正在读取并索引文件...';
+        });
+
+        try {
+          final content = await file.readAsString();
+          
+          await _knowledgeService.ingestFile(
+            filename: filename,
+            content: content,
+            summarizer: (chunk) => _generateSummary(chunk, 0.3), // 30% summary ratio
+          );
+
+          // Get stats for user feedback
+          final stats = _knowledgeService.getStats();
+          final fileInfo = _knowledgeService.files.where((f) => f.filename == filename).lastOrNull;
+          final chunkCount = fileInfo?.chunks.length ?? 0;
+          
+          setState(() {
+            _messages.add(ChatMessage('system', 
+              '✅ 文件 "$filename" 已成功索引到知识库。\n'
+              '📊 共切分为 $chunkCount 个知识块\n'
+              '📚 知识库现有 ${stats['fileCount']} 个文件，${stats['chunkCount']} 个知识块\n'
+              '💡 现在您可以询问关于该文件的内容了。', 
+              isMemory: true));
+            _saveChatHistory();
+          });
+          
+          _showSuccessSnackBar('文件索引完成 ($chunkCount 块)');
+        } catch (e) {
+          _showError('处理文件失败: $e');
+        } finally {
+          setState(() {
+            _sending = false;
+            _loadingStatus = '';
+          });
+        }
+      }
+    } catch (e) {
+      _showError('选择文件失败: $e');
     }
   }
 
@@ -692,7 +794,9 @@ $refString
     _scrollToBottom();
 
     try {
-      final uri = Uri.parse('${apiBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+      // Normalize URL - only remove trailing slashes, respect user's path configuration
+      String cleanBase = apiBase.replaceAll(RegExp(r'/+$'), '');
+      final uri = Uri.parse('$cleanBase/chat/completions');
       
       Object messagesPayload;
       
@@ -1067,31 +1171,53 @@ $refString
     }
   }
 
-  /// Get Worker API config with fallback chain: Worker Pro -> Router -> Chat
+  /// Get Worker API config with fallback chain: Worker -> Worker Pro -> Router -> Chat
   Future<({String base, String key, String model})> _getWorkerConfig() async {
     final prefs = await SharedPreferences.getInstance();
     
-    // Try Worker Pro first (thinking tasks like summarization)
+    // Helper to check if URL is valid (not placeholder)
+    bool isValidUrl(String url) {
+      return url.isNotEmpty && 
+             !url.contains('your-oneapi-host') && 
+             !url.contains('your-api-host');
+    }
+    
+    // Get user's configured chat model as ultimate fallback
+    final userChatModel = prefs.getString('chat_model') ?? '';
+    
+    // Try Worker first (execution tasks)
+    final workerBase = prefs.getString('worker_base') ?? '';
+    final workerKeys = prefs.getString('worker_keys') ?? '';
+    final workerModel = prefs.getString('worker_model') ?? '';
+    
+    if (isValidUrl(workerBase) && workerKeys.isNotEmpty) {
+      final firstKey = workerKeys.split(',').map((k) => k.trim()).where((k) => k.isNotEmpty).firstOrNull ?? '';
+      if (firstKey.isNotEmpty) {
+        // Use configured model, or fallback to user's chat model
+        return (base: workerBase, key: firstKey, model: workerModel.isNotEmpty ? workerModel : (userChatModel.isNotEmpty ? userChatModel : 'gpt-4o-mini'));
+      }
+    }
+    
+    // Try Worker Pro (thinking tasks like summarization)
     final workerProBase = prefs.getString('worker_pro_base') ?? '';
     final workerProKeys = prefs.getString('worker_pro_keys') ?? '';
     final workerProModel = prefs.getString('worker_pro_model') ?? '';
     
-    if (workerProBase.isNotEmpty && workerProKeys.isNotEmpty && !workerProBase.contains('your-oneapi-host')) {
-      // Use first key from comma-separated list
+    if (isValidUrl(workerProBase) && workerProKeys.isNotEmpty) {
       final firstKey = workerProKeys.split(',').map((k) => k.trim()).where((k) => k.isNotEmpty).firstOrNull ?? '';
       if (firstKey.isNotEmpty) {
-        return (base: workerProBase, key: firstKey, model: workerProModel.isNotEmpty ? workerProModel : 'gpt-4o-mini');
+        return (base: workerProBase, key: firstKey, model: workerProModel.isNotEmpty ? workerProModel : (userChatModel.isNotEmpty ? userChatModel : 'gpt-4o-mini'));
       }
     }
     
     // Fallback to Router API
-    if (!_routerBase.contains('your-oneapi-host') && _routerKey.isNotEmpty) {
-      return (base: _routerBase, key: _routerKey, model: _routerModel);
+    if (isValidUrl(_routerBase) && _routerKey.isNotEmpty) {
+      return (base: _routerBase, key: _routerKey, model: _routerModel.isNotEmpty ? _routerModel : (userChatModel.isNotEmpty ? userChatModel : 'gpt-4o-mini'));
     }
     
     // Final fallback to Chat API
-    final effectiveBase = _chatBase.contains('your-oneapi-host') ? 'https://api.openai.com/v1' : _chatBase;
-    return (base: effectiveBase, key: _chatKey, model: _summaryModel);
+    final effectiveBase = isValidUrl(_chatBase) ? _chatBase : 'https://api.openai.com/v1';
+    return (base: effectiveBase, key: _chatKey, model: _summaryModel.isNotEmpty ? _summaryModel : (userChatModel.isNotEmpty ? userChatModel : 'gpt-4o-mini'));
   }
 
   Future<String> _generateSummary(String text, double ratio) async {
@@ -1107,7 +1233,11 @@ $text
 ''';
 
     try {
-      final uri = Uri.parse('${config.base.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+      // Normalize base URL - only remove trailing slashes, respect user's path
+      String apiEndpoint = config.base.replaceAll(RegExp(r'/+$'), '');
+      apiEndpoint = '$apiEndpoint/chat/completions';
+      
+      final uri = Uri.parse(apiEndpoint);
       final body = json.encode({
         'model': config.model,
         'messages': [
@@ -1130,6 +1260,8 @@ $text
         final decodedBody = utf8.decode(resp.bodyBytes);
         final data = json.decode(decodedBody);
         return data['choices'][0]['message']['content'] ?? text;
+      } else {
+        debugPrint('Summary API error: ${resp.statusCode} - ${resp.body}');
       }
     } catch (e) {
       debugPrint('Summary failed: $e');
@@ -1145,27 +1277,117 @@ $text
     }
 
     // Use a notifier to update a modal progress dialog so the UI doesn't appear to "hang".
-    final ValueNotifier<String> progress = ValueNotifier<String>('准备读取历史记录...');
+    final ValueNotifier<String> progress = ValueNotifier<String>('🔮 准备读取历史记录...');
+    final ValueNotifier<double> progressValue = ValueNotifier<double>(0.0);
+    final ValueNotifier<String> funFact = ValueNotifier<String>('');
+
+    // Fun facts to display during profiling
+    final funFacts = [
+      '💡 正在分析你的思维模式...',
+      '🎨 探索你的审美偏好...',
+      '🧠 解码你的决策风格...',
+      '❤️ 感知你的情感特征...',
+      '🎯 理解你的目标与追求...',
+      '🔍 发现隐藏的行为规律...',
+      '✨ 构建专属于你的画像...',
+      '🌟 每一次对话都让我更懂你...',
+    ];
+    int factIndex = 0;
+
+    // Rotate fun facts
+    Timer? factTimer;
+    factTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      factIndex = (factIndex + 1) % funFacts.length;
+      funFact.value = funFacts[factIndex];
+    });
+    funFact.value = funFacts[0];
 
     if (!mounted) return;
 
-    // Show non-dismissible progress dialog
+    // Show non-dismissible progress dialog with enhanced UI
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => PopScope(
         canPop: false,
         child: AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           content: SizedBox(
-            width: 300,
+            width: 320,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const CircularProgressIndicator(),
+                // Animated gradient icon
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    gradient: AppColors.primaryGradient,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primaryStart.withOpacity(0.4),
+                        blurRadius: 20,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.psychology_rounded, size: 40, color: Colors.white),
+                ),
+                const SizedBox(height: 20),
+                // Title
+                const Text(
+                  '深度刻画进行中',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                // Fun fact with animation
+                ValueListenableBuilder<String>(
+                  valueListenable: funFact,
+                  builder: (context, fact, _) => AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 500),
+                    child: Text(
+                      fact,
+                      key: ValueKey(fact),
+                      style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                // Progress bar
+                ValueListenableBuilder<double>(
+                  valueListenable: progressValue,
+                  builder: (context, value, _) => Column(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: LinearProgressIndicator(
+                          value: value > 0 ? value : null,
+                          minHeight: 8,
+                          backgroundColor: Colors.grey[200],
+                          valueColor: const AlwaysStoppedAnimation<Color>(AppColors.primaryStart),
+                        ),
+                      ),
+                      if (value > 0) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          '${(value * 100).toInt()}%',
+                          style: TextStyle(fontSize: 12, color: Colors.grey[500], fontWeight: FontWeight.w500),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 12),
+                // Status text
                 ValueListenableBuilder<String>(
                   valueListenable: progress,
-                  builder: (context, value, _) => Text(value, textAlign: TextAlign.center),
+                  builder: (context, value, _) => Text(
+                    value, 
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                  ),
                 ),
               ],
             ),
@@ -1187,21 +1409,31 @@ $text
 
     try {
       debugPrint('Deep profiling started');
+      progressValue.value = 0.05;
 
       // 1. Gather ALL History (Archive + Active)
       final dir = await getApplicationDocumentsDirectory();
       final archivePath = '${dir.path}/chat_archive.jsonl';
       final allHistoryBuffer = StringBuffer();
 
-      // Read Archive in Isolate (non-blocking)
-      progress.value = '读取归档记录...';
+      // Read Archive in Isolate (non-blocking) with error handling
+      progress.value = '📚 读取归档记录...';
+      progressValue.value = 0.1;
       debugPrint('Reading archive from $archivePath');
-      final archiveContent = await compute(_processHistoryInIsolate, archivePath);
+      String archiveContent = '';
+      try {
+        archiveContent = await compute(_processHistoryInIsolate, archivePath)
+            .timeout(const Duration(seconds: 30));
+      } catch (e) {
+        debugPrint('Archive read failed (non-fatal): $e');
+        // Continue without archive - not fatal
+      }
       allHistoryBuffer.write(archiveContent);
       debugPrint('Archive read complete, length: ${archiveContent.length}');
+      progressValue.value = 0.2;
 
       // Add unarchived active messages
-      progress.value = '合并当前会话消息...';
+      progress.value = '💬 合并当前会话消息...';
       for (var m in _messages) {
         if (!m.isArchived) {
           allHistoryBuffer.writeln('[${_activePersona.id}] ${m.role}: ${m.content}');
@@ -1210,12 +1442,13 @@ $text
 
       final fullText = allHistoryBuffer.toString();
       if (fullText.isEmpty) {
-        progress.value = '无足够历史记录';
+        progress.value = '⚠️ 无足够历史记录';
         _showError('没有足够的历史记录进行刻画');
         setState(() {
           _loadingStatus = '';
           _sending = false;
         });
+        factTimer?.cancel();
         return;
       }
 
@@ -1226,37 +1459,128 @@ $text
         int end = (i + chunkSize < fullText.length) ? i + chunkSize : fullText.length;
         chunks.add(fullText.substring(i, end));
       }
+      progressValue.value = 0.25;
+
+      // Gather user-initiated content only (NOT search results - those are already processed by AI)
+      // Focus on: user-uploaded images analysis, user's creative requests
+      progress.value = '🖼️ 收集用户主动分享内容...';
+      final refsHistoryBuffer = StringBuffer();
+      
+      // Get stored references from reference manager
+      final allRefs = await _refManager.getAllStoredReferences();
+      if (allRefs.isNotEmpty) {
+        // Only user-initiated content: vision (user uploaded images) and generated (user's creative intent)
+        // Skip search refs - they are raw materials already processed into conversation
+        final visionRefs = allRefs.where((r) => r.sourceType == 'vision').toList();
+        final generatedRefs = allRefs.where((r) => r.sourceType == 'generated').toList();
+        
+        if (visionRefs.isNotEmpty) {
+          refsHistoryBuffer.writeln('【用户上传图片分析 - ${visionRefs.length}次】');
+          refsHistoryBuffer.writeln('（用户主动分享的图片反映其关注点和审美）');
+          for (var r in visionRefs.take(15)) {
+            final snippet = r.snippet.length > 150 ? '${r.snippet.substring(0, 150)}...' : r.snippet;
+            refsHistoryBuffer.writeln('- $snippet');
+          }
+        }
+        if (generatedRefs.isNotEmpty) {
+          refsHistoryBuffer.writeln('\n【用户创作请求 - ${generatedRefs.length}次】');
+          refsHistoryBuffer.writeln('（用户的生图请求反映其创意需求和审美取向）');
+          for (var r in generatedRefs.take(15)) {
+            refsHistoryBuffer.writeln('- ${r.snippet}');
+          }
+        }
+      }
+      final refsHistory = refsHistoryBuffer.toString();
+      progressValue.value = 0.3;
 
       String currentProfile = _globalMemoryCache;
 
-      // 3. Iterative Profiling with retries and non-blocking UI updates
+      // 3. PHASE 1: Deep Conversation Analysis (chunked)
+      progress.value = '🧠 第一阶段：对话深度分析...';
+      final totalChunks = chunks.length;
       for (int i = 0; i < chunks.length; i++) {
         final chunk = chunks[i];
-        final statusText = '正在深度刻画... (${i + 1}/${chunks.length})';
+        final chunkProgress = 0.3 + (0.65 * (i + 1) / totalChunks);
+        progressValue.value = chunkProgress;
+        final statusText = '🔍 深度刻画中... (${i + 1}/$totalChunks)';
         progress.value = statusText;
         setState(() => _loadingStatus = statusText);
 
-        // Build prompt
+        // Include refs history only in the first chunk to provide full context
+        final refsContext = (i == 0 && refsHistory.isNotEmpty) 
+            ? '\n\n【用户行为足迹 - 搜索/视觉/创作历史】：\n$refsHistory\n' 
+            : '';
+
+        // Build prompt with multi-dimensional profiling framework
         final prompt = '''
-你是一位拥有超强洞察力的“首席用户侧写师”。
-这是用户历史对话的第 ${i + 1}/${chunks.length} 部分。请基于【当前画像】和【本段对话】，更新用户画像。
+【首席用户侧写师 - 核心使命】
+你的唯一目标是"完全理解这个用户"。通过用户的一切直接痕迹，构建一份能让任何AI瞬间理解这个人的完整画像。
 
-【当前画像】：
+═══════════════════════════════════════════════════════════
+【最核心输入：当前用户画像】（严禁信息丢失！）
+═══════════════════════════════════════════════════════════
 $currentProfile
+═══════════════════════════════════════════════════════════
 
-【本段对话片段】：
+【重要性说明】
+上述【当前用户画像】是之前所有对话和刻画的结晶，代表对用户的累积理解。
+⚠️ 严禁直接覆盖！必须在此基础上扩展、深化、精炼。
+⚠️ 已有维度必须保留！可以新增维度，但不能删除任何已存在的分析维度。
+
+═══════════════════════════════════════════════════════════
+【本轮分析素材】（第 ${i + 1}/${chunks.length} 部分）
+═══════════════════════════════════════════════════════════
+【用户直接对话内容】：
 $chunk
 
-【核心指令】：
-1. **融合更新**：将【当前画像】作为基础，融合【本段对话】中的新信息。
-2. **严格保留**：【当前画像】中已有的关键信息（如性格、习惯、背景）必须保留，严禁直接覆盖或丢失。
-3. **动态聚类**：观察信息点，自动归纳出最能概括这些信息的类别。
-4. **深度推断**：透过现象看本质。
+【用户主动分享的内容】（如有）：
+$refsContext
+═══════════════════════════════════════════════════════════
 
-请输出更新后的画像。只输出内容。
+【动态维度发现机制】
+不要使用固定的分析框架！请根据用户的实际内容，自主发现并构建最适合这个用户的分析维度。
+
+思考路径：
+1. 这个用户在对话中展现了哪些独特特征？
+2. 现有画像中有哪些维度？必须全部保留并深化
+3. 本轮对话揭示了哪些新的维度？应该新增
+4. 不同信息之间有什么关联和矛盾？
+5. 表面信息背后隐藏着什么深层洞察？
+
+可能的维度方向（仅供参考，请自主扩展）：
+- 认知与思维模式
+- 情感与价值观
+- 行为与习惯
+- 知识与技能
+- 社交与人际
+- 需求与期望
+- 性格与特质
+- 目标与追求
+- 痛点与困扰
+- 表达风格
+- 决策偏好
+- 时间感知
+- 审美取向
+- 生活状态
+- ...（请根据用户特点自由扩展）
+
+【核心指令】
+1. 【严格继承】当前画像中的所有维度和核心信息必须保留
+2. 【增量更新】在继承基础上融合本轮新发现
+3. 【维度扩展】发现新维度时直接新增，永不删除旧维度
+4. 【深度挖掘】透过现象看本质，推断隐含信息
+5. 【矛盾标注】发现与现有画像矛盾时，标注并分析原因
+6. 【信息溯源】新增信息时可注明来源（如"从本轮对话推断"）
+
+【输出要求】
+直接输出完整的用户画像，使用清晰的结构化格式。
+无需任何元评论或解释。
+字数不限，越详细越好，但请保持条理清晰。
 ''';
 
-        final uri = Uri.parse('${_profileBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+        // Normalize URL - only remove trailing slashes, respect user's path
+        String cleanProfileBase = _profileBase.replaceAll(RegExp(r'/+$'), '');
+        final uri = Uri.parse('$cleanProfileBase/chat/completions');
         final body = json.encode({
           'model': _profileModel,
           'messages': [
@@ -1311,15 +1635,20 @@ $chunk
         await Future.delayed(const Duration(milliseconds: 100));
       }
 
-      // 4. Final Save
+      // 4. Final Save with celebration
+      progressValue.value = 1.0;
+      progress.value = '✨ 画像构建完成！';
+      await Future.delayed(const Duration(milliseconds: 500));
+      
       setState(() {
         _globalMemoryCache = currentProfile;
         _saveChatHistory();
         _loadingStatus = '';
         _sending = false;
       });
-      progress.value = '深度刻画完成';
-      _showError('深度刻画完成！');
+      
+      // Show success with confetti-style message
+      _showSuccessSnackBar('🎉 深度刻画完成！我更懂你了~');
     } catch (e) {
       debugPrint('Deep profiling exception: $e');
       _showError('刻画失败: $e');
@@ -1328,6 +1657,9 @@ $chunk
         _sending = false;
       });
     } finally {
+      // Clean up timer
+      factTimer?.cancel();
+      
       if (mounted) {
         try {
           await Navigator.of(context, rootNavigator: true).maybePop();
@@ -1335,6 +1667,8 @@ $chunk
       }
       try {
         progress.dispose();
+        progressValue.dispose();
+        funFact.dispose();
       } catch (_) {}
     }
   }
@@ -1348,23 +1682,71 @@ $chunk
     // 1. Prepare Context Data
     final now = DateTime.now();
     final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute} (星期${['','一','二','三','四','五','六','日'][now.weekday]})";
-    final memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
     
-    // Format References (Observations) with rich metadata
+    // Knowledge Index
+    final knowledgeIndex = _knowledgeService.getKnowledgeIndex();
+    
+    // User Profile (No truncation - critical context)
+    String memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
+    
+    // Format References (Observations) with rich metadata AND strict limits
     final refsBuffer = StringBuffer();
     if (sessionRefs.isNotEmpty) {
       // Group by source type for clarity
+      final synthesisRefs = sessionRefs.where((r) => r.sourceType == 'synthesis').toList();
       final visionRefs = sessionRefs.where((r) => r.sourceType == 'vision').toList();
       final generatedRefs = sessionRefs.where((r) => r.sourceType == 'generated').toList();
-      final webRefs = sessionRefs.where((r) => r.sourceType != 'vision' && r.sourceType != 'generated').toList();
+      final thinkingRefs = sessionRefs.where((r) => 
+        r.sourceType == 'reflection' || r.sourceType == 'hypothesis' || r.sourceType == 'system' || r.sourceType == 'system_note'
+      ).toList();
+      
+      // Filter web refs
+      var webRefs = sessionRefs.where((r) => 
+        r.sourceType != 'vision' && r.sourceType != 'generated' && 
+        r.sourceType != 'reflection' && r.sourceType != 'hypothesis' && 
+        r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis'
+      ).toList();
+      
+      // LIMIT CONTEXT: Keep only recent/relevant references to prevent context explosion
+      if (webRefs.length > 15) {
+        // Keep first 3 (often most relevant) and last 12 (most recent)
+        final first3 = webRefs.take(3).toList();
+        final last12 = webRefs.skip(webRefs.length - 12).toList();
+        webRefs = [...first3, ...last12];
+        refsBuffer.writeln('⚠️ (Note: Some older search results were hidden to save context space)');
+      }
       
       int idx = 1;
       
+      // Global Synthesis first (most important overview)
+      if (synthesisRefs.isNotEmpty) {
+        refsBuffer.writeln('🌐 [全局视角综合分析]');
+        refsBuffer.writeln('⚡ 以下是 AI Worker 对所有搜索结果的综合分析，提供全局视角：');
+        // Keep only last 2 synthesis results
+        for (var r in synthesisRefs.reversed.take(2).toList().reversed) {
+          refsBuffer.writeln('${r.snippet}');
+          idx++;
+        }
+        refsBuffer.writeln('');
+      }
+      
+      // Deep Think observations (recent context)
+      if (thinkingRefs.isNotEmpty) {
+        refsBuffer.writeln('🧠 [深度思考/系统记录]');
+        // Keep last 10 thinking notes
+        for (var r in thinkingRefs.skip(thinkingRefs.length > 10 ? thinkingRefs.length - 10 : 0)) {
+          refsBuffer.writeln('  $idx. ${r.title}');
+          refsBuffer.writeln('     ${r.snippet}');
+          idx++;
+        }
+      }
+      
       if (visionRefs.isNotEmpty) {
         refsBuffer.writeln('📷 [图片分析结果]');
-        for (var r in visionRefs) {
+        // Keep last 5 vision results
+        for (var r in visionRefs.skip(visionRefs.length > 5 ? visionRefs.length - 5 : 0)) {
           String snippet = r.snippet;
-          if (snippet.length > 1000) snippet = '${snippet.substring(0, 1000)}...';
+          if (snippet.length > 800) snippet = '${snippet.substring(0, 800)}...';
           refsBuffer.writeln('  $idx. ${r.title}: $snippet');
           idx++;
         }
@@ -1379,11 +1761,37 @@ $chunk
       }
       
       if (webRefs.isNotEmpty) {
-        refsBuffer.writeln('🔍 [网络搜索结果]');
+        refsBuffer.writeln('🔍 [网络搜索结果 - 显示${webRefs.length}条]');
         for (var r in webRefs) {
           String snippet = r.snippet;
+          // Stricter truncation for web results
           if (snippet.length > 500) snippet = '${snippet.substring(0, 500)}...';
-          refsBuffer.writeln('  $idx. [${r.sourceName}] ${r.title}');
+          
+          // Add reliability indicator
+          String reliabilityIcon = '⚪';
+          if (r.reliability != null) {
+            if (r.reliability! >= 0.8) {
+              reliabilityIcon = '🟢'; // High reliability
+            } else if (r.reliability! >= 0.6) {
+              reliabilityIcon = '🟡'; // Medium reliability
+            } else {
+              reliabilityIcon = '🔴'; // Low reliability
+            }
+          }
+          
+          // Add authority tag
+          String authorityTag = '';
+          if (r.authorityLevel != null && r.authorityLevel != 'unknown') {
+            final authorityLabels = {
+              'official': '官方',
+              'academic': '学术',
+              'professional': '专业',
+              'ugc': 'UGC',
+            };
+            authorityTag = ' [${authorityLabels[r.authorityLevel] ?? r.authorityLevel}]';
+          }
+          
+          refsBuffer.writeln('  $idx. $reliabilityIcon [${r.sourceName}]$authorityTag ${r.title}');
           refsBuffer.writeln('     摘要: $snippet');
           refsBuffer.writeln('     来源: ${r.url}');
           idx++;
@@ -1393,60 +1801,113 @@ $chunk
       refsBuffer.writeln('None yet.');
     }
 
-    // Format Previous Actions with clear status indicators
+    // Format Previous Actions with clear status indicators and Deep Think info
     final prevActionsBuffer = StringBuffer();
+    
+    // META-COGNITION: Detect patterns in action history
+    int consecutiveSearches = 0;
+    int failedSearches = 0;
+    int totalReflections = 0;
+    AgentActionType? lastActionType;
+    
     if (previousDecisions.isNotEmpty) {
       for (var i = 0; i < previousDecisions.length; i++) {
         final d = previousDecisions[i];
         final contentInfo = d.query ?? d.content ?? 'N/A';
         
+        // Track patterns for meta-cognition
+        if (d.type == AgentActionType.search) {
+          if (lastActionType == AgentActionType.search) {
+            consecutiveSearches++;
+          } else {
+            consecutiveSearches = 1;
+          }
+          if (d.reason?.contains('failed') == true || d.reason?.contains('No results') == true) {
+            failedSearches++;
+          }
+        }
+        if (d.type == AgentActionType.reflect) totalReflections++;
+        lastActionType = d.type;
+        
         // Extract result status from reason if present
         String status = '⏳ pending';
-        if (d.reason?.contains('[RESULT:') == true) {
+        String typeIcon = '🔧';
+        
+        if (d.type == AgentActionType.reflect) {
+          typeIcon = '🧠';
+          status = '💭 reflected';
+        } else if (d.type == AgentActionType.hypothesize) {
+          typeIcon = '💡';
+          status = '🔀 ${d.hypotheses?.length ?? 0} hypotheses';
+        } else if (d.type == AgentActionType.clarify) {
+          typeIcon = '❓';
+          status = '🗣️ awaiting user input';
+        } else if (d.reason?.contains('[RESULT:') == true) {
           if (d.reason!.contains('successfully') || d.reason!.contains('complete')) {
             status = '✅ success';
-          } else if (d.reason!.contains('failed') || d.reason!.contains('No results')) {
+          } else if (d.reason!.contains('failed') || d.reason!.contains('No results') || d.reason!.contains('error')) {
             status = '❌ failed';
           } else {
             status = '✅ done';
           }
         }
         
-        prevActionsBuffer.writeln('Step ${i + 1}: ${d.type.name.toUpperCase()} $status');
+        // Add confidence indicator
+        String confidenceStr = '';
+        if (d.confidence != null) {
+          final pct = (d.confidence! * 100).toInt();
+          confidenceStr = pct >= 80 ? ' 🟢$pct%' : (pct >= 50 ? ' 🟡$pct%' : ' 🔴$pct%');
+        }
+        
+        prevActionsBuffer.writeln('Step ${i + 1}: $typeIcon ${d.type.name.toUpperCase()} $status$confidenceStr');
         prevActionsBuffer.writeln('  Target: "$contentInfo"');
+        if (d.uncertainties != null && d.uncertainties!.isNotEmpty) {
+          prevActionsBuffer.writeln('  Uncertainties: ${d.uncertainties!.join(", ")}');
+        }
+        if (d.selectedHypothesis != null) {
+          prevActionsBuffer.writeln('  Selected: ${d.selectedHypothesis}');
+        }
         if (d.reason != null && d.reason!.isNotEmpty) {
           prevActionsBuffer.writeln('  Notes: ${d.reason}');
+        }
+      }
+      
+      // META-COGNITION ALERTS
+      prevActionsBuffer.writeln('\n--- META-COGNITION ALERTS ---');
+      if (consecutiveSearches >= 2) {
+        prevActionsBuffer.writeln('⚠️ PATTERN: $consecutiveSearches consecutive searches. Consider: REFLECT on current approach or HYPOTHESIZE alternatives.');
+      }
+      if (failedSearches >= 2) {
+        prevActionsBuffer.writeln('🚨 ALERT: $failedSearches failed searches. MUST change strategy: use different keywords, broader/narrower scope, or HYPOTHESIZE new angle.');
+      }
+      if (previousDecisions.length >= 5 && totalReflections == 0) {
+        prevActionsBuffer.writeln('💡 SUGGESTION: 5+ steps without reflection. Consider REFLECT to ensure you\'re on the right track.');
+      }
+      if (previousDecisions.length >= 3 && !previousDecisions.any((d) => d.type == AgentActionType.hypothesize)) {
+        final hasFailure = previousDecisions.any((d) => d.reason?.contains('failed') == true || d.reason?.contains('No results') == true);
+        if (hasFailure) {
+          prevActionsBuffer.writeln('💡 SUGGESTION: Multiple failures without hypothesizing. Use HYPOTHESIZE to explore alternative approaches.');
         }
       }
     } else {
       prevActionsBuffer.writeln('None yet - this is the first planning step.');
     }
 
-    // Format Chat History
-    final historyCount = _messages.length;
-    var contextMsgs = historyCount > 0 
-        ? _messages.sublist((historyCount - 20).clamp(0, historyCount)) 
-        : <ChatMessage>[];
-    
-    // Enforce Soft Limit (~10k chars) for Agent Context
-    int agentContextChars = 0;
-    final limitedAgentMsgs = <ChatMessage>[];
-    for (final m in contextMsgs.reversed) {
-      if (agentContextChars + m.content.length > 10000) break;
-      agentContextChars += m.content.length;
-      limitedAgentMsgs.add(m);
-    }
-    contextMsgs = limitedAgentMsgs.reversed.toList();
+    // Format Chat History（改为“先压缩后限长”，不再直接丢弃旧消息）
+    var contextMsgs = List<ChatMessage>.from(_messages);
 
-    // If still above soft cap, proactively compress older parts via worker API
+    // 计算总长，如超限则对旧消息分块摘要，保留最近几条原文
+    const int agentCharBudget = 10000;
     final agentTotal = contextMsgs.fold(0, (p, c) => p + c.content.length);
-    if (agentTotal > 10000) {
+    if (agentTotal > agentCharBudget) {
       contextMsgs = await _compressHistoryForTransport(
         contextMsgs,
-        targetChars: 9500,
-        keepTail: 6,
+        targetChars: agentCharBudget,
+        keepTail: 8, // 保留最近交互，旧的转为摘要卡片
       );
-      _lastCompressionNote = null; // planner压缩不对用户弹提示
+      // _compressHistoryForTransport 内部会写 _lastCompressionNote 供 UI 使用
+    } else {
+      _lastCompressionNote = null;
     }
         
     final contextBuffer = StringBuffer();
@@ -1495,17 +1956,102 @@ $chunk
 
     final toolbelt = '''
 ### TOOLBELT (what you can call)
+
+**🔧 ACTION TOOLS:**
 - search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider (web search returns short references)" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
 - draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content; set continue=true if you want to comment on the result)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
 - vision: ${visionAvailable ? "AVAILABLE (analyze an image; put custom analysis prompt in content; if user uploaded image, analysis result is in <current_observations>)" : "UNAVAILABLE (vision API not configured)"}
-- answer: ALWAYS AVAILABLE for reasoning, summaries, or when other tools are unavailable.
+- read_knowledge: AVAILABLE - Read content from the local knowledge base.
+  * USE WHEN: User asks about uploaded files or specific topics in the <knowledge_index>.
+  * content: The "chunk_id" from the <knowledge_index>.
+  * NOTE: You must first check <knowledge_index> to find the relevant chunk_id.
+- delete_knowledge: AVAILABLE - Delete content from the knowledge base.
+  * USE WHEN: User asks to remove, delete, or clean up files/chunks from knowledge base.
+  * content: Either a "file_id" to delete entire file, OR a "chunk_id" to delete specific chunk.
+  * NOTE: This action is irreversible. Confirm with user if ambiguous.
+- save_file: ALWAYS AVAILABLE - Save text or code to a local file. Use when user asks to "save", "download", "create file", or "export". Put filename in "filename" and content in "content".
+- system_control: AVAILABLE - Control device global actions.
+  * content: "home", "back", "recents", "notifications", "lock", "screenshot"
+  * NOTE: Requires Accessibility Service. If action fails, ask user to enable it.
+
+**🧠 THINKING TOOLS (Deep Think Mode):**
+- reflect: ALWAYS AVAILABLE - Stop and critically examine your reasoning. Use when:
+  * You're about to answer but confidence < 0.8
+  * You've made 2+ searches without clear progress
+  * The problem seems complex or multi-faceted
+  * You detect potential logical flaws in your approach
+- hypothesize: ALWAYS AVAILABLE - Generate multiple solution paths before committing. Use when:
+  * The problem has multiple valid approaches
+  * Initial approach failed, need alternatives
+  * User request is ambiguous, need to explore interpretations
+- clarify: ALWAYS AVAILABLE - Ask user for more information. Use when:
+  * Critical information is missing that only user can provide
+  * User's request is ambiguous and guessing would be risky
+  * Need confirmation before taking irreversible action
+  * Observations contain unreliable sources and user verification needed
+
+**📝 OUTPUT TOOL:**
+- answer: ALWAYS AVAILABLE for final response to user.
+
+### SOURCE RELIABILITY PROTOCOL (关键!)
+Every piece of information has a reliability level. You MUST assess source quality:
+
+**Source Authority Levels:**
+- 🏛️ official: Government (.gov), Educational (.edu), Official docs → Reliability 0.9+
+- 📚 authoritative: Wikipedia, StackOverflow, arXiv, GitHub → Reliability 0.8+
+- 📰 news: Reuters, BBC, major newspapers → Reliability 0.7+
+- 💬 social: Twitter/X, Weibo, Instagram → Reliability 0.4-0.5
+- 🗣️ forum: Reddit, Zhihu, Quora, BBS → Reliability 0.4-0.6
+- ❓ unknown: Other sources → Reliability 0.5-0.6
+
+**Information Sufficiency Check (Before Answering):**
+You MUST evaluate in `info_sufficiency`:
+```json
+"info_sufficiency": {
+  "is_sufficient": true/false,
+  "missing_info": ["specific info 1", "specific info 2"],
+  "unreliable_sources": ["source that needs verification"],
+  "suggested_action": "search" | "ask_user" | "verify" | "proceed_with_caveats",
+  "clarify_question": "如果是ask_user，这里写要问用户的具体问题"
+}
+```
+
+**When to use CLARIFY:**
+1. User asks for personal preferences/choices without giving criteria
+2. Request requires private info (account numbers, passwords, personal data)
+3. All available sources are low-reliability (<0.5) and topic is important
+4. Detected contradiction between sources, need user to confirm which is correct
+5. Time-sensitive info (prices, stocks, events) where freshness is critical
+
+### DEEP THINK PROTOCOL (重要!)
+You are equipped with advanced reasoning capabilities. Use them:
+
+1. **CONFIDENCE TRACKING**: Always assess your confidence (0.0-1.0) in the current approach.
+   - confidence >= 0.8: Proceed to answer
+   - confidence 0.5-0.8: Consider one more search or reflect
+   - confidence < 0.5: Must hypothesize alternatives or reflect on approach
+
+2. **UNCERTAINTY AWARENESS**: List known gaps in your knowledge for this task.
+   - Be specific: "不确定2024年的最新价格" not just "信息可能过时"
+
+3. **MULTI-HYPOTHESIS REASONING**: For complex problems:
+   - Generate 2-3 hypotheses before acting
+   - Evaluate each hypothesis's likelihood and effort
+   - Select the best one and explain why
+
+4. **SELF-REFLECTION TRIGGERS**: Automatically reflect when:
+   - 3+ actions taken without reaching answer
+   - Search returned irrelevant results
+   - Detected contradiction in observations
+   - About to give up or say "I don't know"
 
 ### TOOL CHAINING (Important!)
 You can chain tools by setting "continue": true in your output. This tells the system NOT to end after this action.
 Examples:
-- search -> search again with refined query -> answer (multiple search iterations)
-- draw -> answer (generate image, then comment on it)
-- vision result in observations -> search for related info -> answer (analyze image, then research, then respond)
+- hypothesize -> search (best hypothesis) -> reflect -> answer
+- search -> reflect (check if enough) -> search again -> answer
+- reflect -> hypothesize (new approach) -> search -> answer
+- clarify -> (user responds) -> search with new info -> answer
 
 If a tool is marked UNAVAILABLE, fall back to answer and clearly state the missing capability.
 ${hasSessionImage ? """
@@ -1532,6 +2078,13 @@ The user message is strictly structured. You must distinguish between:
 - <user_profile>: Deep psychological and factual profile of the user. Use this to infer intent and tailor your strategy.
 - <chat_history>: Recent conversation context.
 - <current_observations>: Information gathered from tools (search results, vision analysis) in THIS session. **If image was uploaded, look for【类型：XXX】to understand the image type.**
+  * **🌐 全局视角综合分析**: If present, this is an AI Worker's synthesis of all search results, providing:
+    - Cross-source consensus (what multiple sources agree on)
+    - Divergences (where sources disagree)
+    - Reliability assessment (overall trustworthiness)
+    - Blind spots (what information is missing)
+    - Key facts and confidence level
+  * Use this synthesis to get a quick understanding before diving into individual sources.
 - <action_history>: Actions you have already performed in THIS session.
 - <user_input>: The actual request from the user.
 
@@ -1549,63 +2102,129 @@ Your objective is to complete the user's goal with iterative steps until done or
 4. **Iteration Check**: Look at <action_history>. 
    - If previous searches failed, CHANGE your keywords or strategy.
    - If you have searched 2+ times and have partial info, consider if it's "good enough" to answer.
-5. **Feasibility**: If the request needs unavailable tools or user-specific data, explicitly ask for that data or explain the blocker in the answer.
-6. **Goal-first Loop**: Think in small loops toward the end-goal, not a static todo list. Consider multiple hypotheses/paths; pick the highest-leverage next action; if it fails, adapt and try another angle (e.g., narrower query, different search term, pure reasoning). Stop only when the goal is met or clearly impossible with current tools/info.
+   - **META-COGNITION ALERTS**: Check <action_history> for alerts. If you see warnings about consecutive failures or repeated patterns, you MUST change your approach.
+5. **Cross-Tool Feedback**: Verify consistency between different sources:
+   - Does Vision result contradict Search results? → Use REFLECT to reconcile
+   - Does Synthesis global_summary align with your understanding? → If not, dig deeper
+   - Did previous hypothesis fail after execution? → Use REFLECT to analyze why, then HYPOTHESIZE new approach
+6. **Feasibility**: If the request needs unavailable tools or user-specific data, explicitly ask for that data or explain the blocker in the answer.
+7. **Goal-first Loop**: Think in small loops toward the end-goal, not a static todo list. Consider multiple hypotheses/paths; pick the highest-leverage next action; if it fails, adapt and try another angle (e.g., narrower query, different search term, pure reasoning). Stop only when the goal is met or clearly impossible with current tools/info.
+
+### HYPOTHESIS VERIFICATION PROTOCOL
+After executing a hypothesized approach:
+1. Check if the result matches the hypothesis expectation
+2. If mismatch: REFLECT on why, update mental model, then HYPOTHESIZE again
+3. If match: Increase confidence and proceed toward answer
+4. Never blindly trust a hypothesis - always verify with evidence
 
 ### DECISION LOGIC
+
+**🔧 ACTION TOOLS:**
+
 1. **SEARCH (search)**: 
    - USE WHEN: Information is missing, outdated, or needs verification.
    - STRATEGY: Use specific, targeted queries. If "Python tutorial" failed, try "Python for beginners 2024".
-   - SINGLE TARGET: Focus on ONE specific information target per search step. If you need A and B, search A first, then search B in the next step. Do NOT combine unrelated topics.
-   - RECURSIVE: If the user asks for "Deep Dive", and you found a summary, search again for the specific terms in that summary.
-   - If search is unavailable, choose ANSWER and ask for the missing key or confirm offline constraints.
+   - SINGLE TARGET: Focus on ONE specific information target per search step.
+   - If search is unavailable, choose ANSWER and ask for the missing key.
 
 2. **DRAW (draw)**:
    - USE WHEN: User explicitly asks for an image/drawing/painting/illustration.
-   - STRATEGY: Craft a detailed, descriptive prompt for the image generator. Include style, mood, colors, composition.
-   - CHAINING: Set "continue": true if you want to comment on or explain the generated image afterward.
-   - If draw is unavailable, choose ANSWER and state that image generation is not configured.
+   - STRATEGY: Craft a detailed, descriptive prompt. Include style, mood, colors, composition.
+   - CHAINING: Set "continue": true if you want to comment on the result afterward.
 
 3. **VISION (vision)**:
    - USE WHEN: You need ADDITIONAL or SPECIALIZED analysis of the user's uploaded image.
-   - NOTE: The initial analysis is in <current_observations>. Use vision again for specialized extraction:
-     * **Table/Excel**: "请用Markdown表格格式提取所有数据，保留精确数值"
-     * **Receipt/Invoice**: "请提取商家、日期、金额、商品明细"
-     * **Code/Terminal**: "请完整提取代码，保持缩进格式"
-     * **Chart/Graph**: "请提取所有数据点的具体数值和趋势"
-     * **Map/Location**: "请提取地点名称、地址、距离信息"
-     * **UI/Design**: "请描述界面布局，提取所有按钮和文字"
-     * **Product**: "请提取品牌、型号、价格、规格参数"
-     * **Chat screenshot**: "请完整提取对话内容，标注发送者"
-     * **Specific Q&A**: "图中左上角的数字是多少？"
-   - The content field is the analysis prompt - be SPECIFIC about what you need.
+   - NOTE: Initial analysis is in <current_observations>. Use vision again for specialized extraction.
    - If no image was uploaded in this session, DO NOT use vision.
 
-4. **ANSWER (answer)**:
-   - USE WHEN: <current_observations> are sufficient to respond.
-   - OR: The request is purely logical/creative/conversational (no tools needed).
-   - OR: You have tried multiple searches and cannot find more info (fail gracefully).
-   - OR: The user asks for unsupported actions. In this case, explain the blocker and ask for specific missing info/config.
-   - ALWAYS end with answer - this is the terminal action that produces user-visible output.
+4. **SAVE_FILE (save_file)**:
+   - USE WHEN: User wants to save content (code, text, report) to a file.
+   - FIELDS: "filename" (e.g., "report.md", "code.py") and "content" (the full text/code).
+   - NOTE: This triggers a system file picker for the user to choose the save location.
 
-5. **REMINDERS (Side Task)**:
-   - Extract future tasks into the "reminders" list.
+**🧠 THINKING TOOLS (Deep Think):**
 
-### OBSERVATION QUALITY
-- If you receive vision-derived observations, assume they may be sparse. When needed, ask the user for clearer images or specific details you cannot see. Do not invent unobserved objects or text.
+5. **REFLECT (reflect)**:
+   - USE WHEN: Need to critically examine current approach before proceeding.
+   - TRIGGERS:
+     * About to answer but confidence < 0.8
+     * 3+ actions taken without clear progress
+     * Detected contradiction or confusion
+     * Search results seem irrelevant or low-reliability
+     * **After HYPOTHESIZE execution to verify if hypothesis was correct**
+   - Put your self-critique in the "content" field.
+   - ALWAYS set "continue": true after reflect.
+
+6. **HYPOTHESIZE (hypothesize)**:
+   - USE WHEN: Problem has multiple valid approaches or current approach failed.
+   - Generate 2-4 hypotheses in the "hypotheses" array.
+   - Select best one in "selected_hypothesis" with justification.
+   - **IMPORTANT**: After executing the selected hypothesis, use REFLECT to verify success.
+   - ALWAYS set "continue": true after hypothesize.
+
+7. **CLARIFY (clarify)**:
+   - USE WHEN: Cannot proceed without user input.
+   - Put your question in "content" field - be specific about what you need.
+   - TRIGGERS:
+     * Missing critical info only user knows (personal preferences, private data)
+     * All sources are unreliable (<0.5) for important decisions
+     * Contradictory info requires user judgment
+     * Ambiguous request with multiple valid interpretations
+   - This is a TERMINAL action - waits for user response.
+   - Include "info_sufficiency" explaining why clarification is needed.
+
+**📝 OUTPUT TOOL:**
+
+8. **ANSWER (answer)**:
+   - USE WHEN: <current_observations> are sufficient AND confidence >= 0.7.
+   - OR: Pure logical/creative/conversational request.
+   - OR: Exhausted all approaches (fail gracefully with explanation).
+   - This is the TERMINAL action - produces user-visible output.
+   - IMPORTANT: Before answering, if confidence < 0.7, use reflect first!
+   - If sources are low-reliability, include "source_caveats" in your answer.
+
+### OBSERVATION QUALITY & SOURCE METADATA
+- Each reference in <current_observations> may include reliability indicators:
+  * 🟢 高可信 (0.8+): Official/authoritative sources
+  * 🟡 中等 (0.5-0.8): News/blogs
+  * 🔴 低可信 (<0.5): Social/forums
+- If you receive vision-derived observations, assume they may be sparse.
+- If most sources are 🔴, consider using CLARIFY to verify with user.
 
 ### OUTPUT FORMAT
 Return a JSON object (no markdown):
 {
-  "type": "search" | "draw" | "vision" | "answer",
+  "type": "search" | "draw" | "vision" | "save_file" | "system_control" | "reflect" | "hypothesize" | "clarify" | "answer",
   "reason": "[Intent: ...] [Gap: ...] [Strategy: ...]",
+  "confidence": 0.0-1.0,
+  "uncertainties": ["specific unknown 1", "specific unknown 2"],
+  "info_sufficiency": {
+    "is_sufficient": true/false,
+    "missing_info": ["what's missing"],
+    "unreliable_sources": ["sources that need verification"],
+    "suggested_action": "search" | "ask_user" | "verify" | "proceed_with_caveats",
+    "clarify_question": "question for user if ask_user"
+  },
+  "source_caveats": ["caveat 1 about source reliability", "caveat 2"],
+  "hypotheses": ["approach A", "approach B", "approach C"],
+  "selected_hypothesis": "approach A because...",
   "query": "Search query (for search only)",
-  "content": "Image prompt (draw) / Analysis prompt (vision) / Answer text (answer)",
-  "continue": false,
+  "filename": "filename.ext (for save_file only)",
+  "content": "Reflection text / Answer text / Image prompt / Vision prompt / Clarify question / File content",
+  "continue": true/false,
   "reminders": []
 }
 
-Set "continue": true if you want to perform another action after this one (e.g., draw then comment, or search then search again).
+**REQUIRED FIELDS:**
+- type, reason, confidence: ALWAYS required
+- info_sufficiency: Required before answer/clarify
+- uncertainties: Required when confidence < 0.9
+- source_caveats: Required when answering with low-reliability sources
+- hypotheses, selected_hypothesis: Required for hypothesize action
+- query: Required for search action
+- filename: Required for save_file action
+- content: Required for answer, draw, vision, save_file, reflect, clarify
+- continue: Set true for all actions except final answer/clarify
 ''';
 
     final userPrompt = '''
@@ -1617,9 +2236,14 @@ $timeString
 $memoryContent
 </user_profile>
 
+<knowledge_index>
+$knowledgeIndex
+</knowledge_index>
+
 <chat_history>
 $contextBuffer
 </chat_history>
+
 
 <current_observations>
 ${refsBuffer.toString()}
@@ -1635,7 +2259,9 @@ $userText
 ''';
 
     try {
-      final uri = Uri.parse('${effectiveBase.replaceAll(RegExp(r"/\$"), "")}/chat/completions');
+      // Normalize URL - only remove trailing slashes, respect user's path
+      String cleanBase = effectiveBase.replaceAll(RegExp(r'/+$'), '');
+      final uri = Uri.parse('$cleanBase/chat/completions');
       final body = json.encode({
         'model': effectiveModel,
         'messages': [
@@ -1679,6 +2305,9 @@ $userText
   // _analyzeIntent removed as it is superseded by _planAgentStep and the Agent Loop.
 
   Future<void> _send() async {
+    // Prevent concurrent sends
+    if (_sending) return;
+    
     final content = _inputCtrl.text.trim();
     if (content.isEmpty && _selectedImage == null) return;
 
@@ -1754,6 +2383,40 @@ $userText
     List<AgentDecision> sessionDecisions = []; // Track decisions in this session
     int steps = 0;
     const int maxSteps = 20; 
+    
+    // Handle Pending Clarification - restore context from previous clarify request
+    if (_pendingClarification != null) {
+      debugPrint('Resuming from pending clarification...');
+      
+      // Restore previous session context
+      final prevRefs = _pendingClarification!['sessionRefs'] as List?;
+      final prevDecisions = _pendingClarification!['sessionDecisions'] as List?;
+      
+      if (prevRefs != null) {
+        for (var refJson in prevRefs) {
+          sessionRefs.add(ReferenceItem.fromJson(refJson as Map<String, dynamic>));
+        }
+      }
+      
+      if (prevDecisions != null) {
+        for (var decJson in prevDecisions) {
+          sessionDecisions.add(AgentDecision.fromJson(decJson as Map<String, dynamic>));
+        }
+        steps = sessionDecisions.length; // Continue from where we left off
+      }
+      
+      // Add user's clarification response as a special reference
+      sessionRefs.add(ReferenceItem(
+        title: '✅ 用户补充信息',
+        url: 'internal://user-clarification/${DateTime.now().millisecondsSinceEpoch}',
+        snippet: '【原始问题】${_pendingClarification!['originalQuery']}\n【用户回复】$content',
+        sourceName: 'User',
+        sourceType: 'user_input',
+      ));
+      
+      // Clear pending state
+      _pendingClarification = null;
+    }
 
     // If content is empty but we have an image, provide a default context for the Agent
     final effectiveUserText = content.isEmpty && currentSessionImagePath != null 
@@ -1796,29 +2459,100 @@ $userText
               final existingUrls = sessionRefs.map((r) => r.url).toSet();
               final uniqueNewRefs = newRefs.where((r) => !existingUrls.contains(r.url)).toList();
               if (uniqueNewRefs.isNotEmpty) {
+                // Check if synthesis is enabled
+                final prefs = await SharedPreferences.getInstance();
+                final enableSynthesis = prefs.getBool('enable_search_synthesis') ?? true;
+                
+                // Track search count for context
+                final searchCount = sessionDecisions.where((d) => d.type == AgentActionType.search).length;
+                
+                if (enableSynthesis) {
+                  // Synthesize search results using Worker API for global perspective
+                  setState(() => _loadingStatus = '正在综合分析搜索结果 (搜索#$searchCount)...');
+                  try {
+                    final synthesisResult = await _refManager.synthesizeSearchResults(
+                      refs: uniqueNewRefs,
+                      query: decision.query!,
+                    );
+                    
+                    // Add synthesis first if available (so Agent sees global perspective first)
+                    final synthesisRef = synthesisResult['synthesis'] as ReferenceItem?;
+                    if (synthesisRef != null) {
+                      // Enhance synthesis with search context
+                      final enhancedSynthesis = ReferenceItem(
+                        title: '🌐 搜索#$searchCount 综合分析 (查询: ${decision.query})',
+                        url: synthesisRef.url,
+                        snippet: '【本次搜索】"${decision.query}" 返回 ${uniqueNewRefs.length} 条结果\n【来源覆盖】${uniqueNewRefs.map((r) => r.sourceName).toSet().join(", ")}\n\n${synthesisRef.snippet}',
+                        sourceName: synthesisRef.sourceName,
+                        sourceType: 'synthesis',
+                        reliability: synthesisRef.reliability,
+                        authorityLevel: synthesisRef.authorityLevel,
+                        contentDate: synthesisRef.contentDate,
+                      );
+                      sessionRefs.add(enhancedSynthesis);
+                      debugPrint('Added global synthesis perspective for search #$searchCount');
+                      
+                      // Extract synthesis data for enhanced Agent decision feedback
+                      final synthesisData = synthesisResult['synthesisData'] as Map<String, dynamic>?;
+                      if (synthesisData != null) {
+                        final blindSpots = synthesisData['blind_spots'] as List?;
+                        final confidence = synthesisData['confidence_level'] as num?;
+                        if (blindSpots != null && blindSpots.isNotEmpty) {
+                          debugPrint('Synthesis identified blind spots: $blindSpots');
+                          // Add blind spots info to action history for Agent awareness
+                          sessionDecisions.last = AgentDecision(
+                            type: AgentActionType.search,
+                            query: decision.query,
+                            reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results. Synthesis confidence: ${((confidence ?? 0.7) * 100).round()}%. Blind spots: ${blindSpots.join("; ")}]',
+                          );
+                        }
+                      }
+                    }
+                  } catch (synthError) {
+                    debugPrint('Synthesis failed (non-critical): $synthError');
+                    // Continue without synthesis - non-critical failure
+                  }
+                }
+                
+                // Add individual refs after synthesis
                 sessionRefs.addAll(uniqueNewRefs);
                 debugPrint('Added ${uniqueNewRefs.length} unique refs (${newRefs.length - uniqueNewRefs.length} duplicates skipped)');
-                // Record success with result summary
-                final topTitles = uniqueNewRefs.take(3).map((r) => r.title).join(', ');
-                sessionDecisions.last = AgentDecision(
-                  type: AgentActionType.search,
-                  query: decision.query,
-                  reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results - $topTitles]',
-                );
+                
+                // Record success with result summary (if not already set by synthesis)
+                if (sessionDecisions.last.reason?.contains('Blind spots') != true) {
+                  final topTitles = uniqueNewRefs.take(3).map((r) => r.title).join(', ');
+                  final avgReliability = uniqueNewRefs.fold(0.0, (sum, r) => sum + (r.reliability ?? 0.5)) / uniqueNewRefs.length;
+                  sessionDecisions.last = AgentDecision(
+                    type: AgentActionType.search,
+                    query: decision.query,
+                    reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results (avg reliability: ${(avgReliability * 100).round()}%) - $topTitles]',
+                  );
+                }
               }
               // Continue loop to re-evaluate with new info
             } else {
               // Search returned nothing - let planner decide next action (may rewrite query)
               debugPrint('Search returned no results. Continuing to let planner rewrite query.');
+              
+              // Explicitly add a system note to observations so the Agent SEES the failure
+              sessionRefs.add(ReferenceItem(
+                title: 'System Notification: Search Failed',
+                url: 'internal://system/search-failed',
+                snippet: 'Search for "${decision.query}" returned 0 results. Please try different keywords or a broader topic.',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+
               // Mark this in action history so planner knows to try different keywords
+              final searchAttempt = sessionDecisions.where((d) => d.type == AgentActionType.search).length;
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.search,
                 query: decision.query,
-                reason: '${decision.reason} [RESULT: No results found - try different keywords]',
+                reason: '${decision.reason} [RESULT: Search #$searchAttempt returned 0 results. Suggestions: 1) Use different keywords 2) Broaden query 3) Try English terms]',
               );
               // Check if we've had too many empty searches
               final emptySearches = sessionDecisions.where((d) => 
-                d.type == AgentActionType.search && d.reason?.contains('[RESULT: No results') == true
+                d.type == AgentActionType.search && d.reason?.contains('[RESULT: Search #') == true && d.reason?.contains('returned 0') == true
               ).length;
               if (emptySearches >= 3) {
                 debugPrint('3+ empty searches, forcing answer.');
@@ -1847,17 +2581,10 @@ $userText
           setState(() => _loadingStatus = '正在生成图片...');
           final generatedPath = await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
           if (generatedPath != null) {
-            // Success - record in action history
-            sessionDecisions.last = AgentDecision(
-              type: AgentActionType.draw,
-              content: decision.content,
-              reason: '${decision.reason} [RESULT: Image generated at $generatedPath]',
-              continueAfter: decision.continueAfter,
-            );
-            
             // Auto-analyze the generated image to get rich semantic info
             setState(() => _loadingStatus = '正在分析生成的图片...');
             String imageDescription = '图片已根据提示词生成: ${decision.content}';
+            String analysisStatus = 'pending';
             try {
               final genVisionRefs = await analyzeImage(
                 imagePath: generatedPath,
@@ -1871,14 +2598,29 @@ $userText
               );
               if (genVisionRefs.isNotEmpty && !genVisionRefs.first.snippet.contains('⚠️')) {
                 imageDescription = '【提示词】${decision.content}\n【实际生成】${genVisionRefs.first.snippet}';
+                analysisStatus = 'analyzed';
+              } else {
+                analysisStatus = 'analysis_failed';
               }
             } catch (e) {
               debugPrint('Auto-analyze generated image failed: $e');
+              analysisStatus = 'analysis_error';
             }
+            
+            // Count generated images for context
+            final genCount = sessionRefs.where((r) => r.sourceType == 'generated').length + 1;
+            
+            // Success - record in action history with rich feedback
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.draw,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: Image #$genCount generated successfully. Analysis: $analysisStatus. ${analysisStatus == 'analyzed' ? 'Content verified.' : 'Manual verification recommended.'}]',
+              continueAfter: decision.continueAfter,
+            );
             
             // Add generated image info with rich description to sessionRefs
             sessionRefs.add(ReferenceItem(
-              title: '生成的图片',
+              title: '🎨 生成的图片 #$genCount',
               url: generatedPath,
               snippet: imageDescription,
               sourceName: 'ImageGen',
@@ -1892,10 +2634,11 @@ $userText
           } else {
             // Generation returned null (failed)
             debugPrint('Draw returned null');
+            final failedPrompt = decision.content ?? '';
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.draw,
               content: decision.content,
-              reason: '${decision.reason} [RESULT: Draw failed]',
+              reason: '${decision.reason} [RESULT: Draw FAILED. Possible causes: 1) Invalid prompt 2) Content policy violation 3) API error. Prompt was: "${failedPrompt.length > 50 ? failedPrompt.substring(0, 50) + "..." : failedPrompt}"]',
             );
             // Fallback to answer explaining the failure
             setState(() => _loadingStatus = '生图失败，正在回复...');
@@ -1903,9 +2646,219 @@ $userText
             break;
           }
         }
+        else if (decision.type == AgentActionType.read_knowledge && decision.content != null) {
+          // Action: Read Knowledge Chunk
+          setState(() => _loadingStatus = '正在读取知识库...');
+          final chunkId = decision.content!;
+          final chunkContent = await _knowledgeService.getChunkContent(chunkId);
+          
+          if (chunkContent != null) {
+            // Truncate if too long to prevent context explosion
+            String displayContent = chunkContent;
+            if (chunkContent.length > 6000) {
+              displayContent = '${chunkContent.substring(0, 6000)}\n\n[... Content truncated. Full chunk is ${chunkContent.length} chars.]';
+            }
+            
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.read_knowledge,
+              content: chunkId,
+              reason: '${decision.reason} [RESULT: Successfully read chunk $chunkId (${chunkContent.length} chars)]',
+              continueAfter: true, // Always continue to process the content
+            );
+            
+            sessionRefs.add(ReferenceItem(
+              title: '📖 知识库内容 [$chunkId]',
+              url: 'internal://knowledge/$chunkId',
+              snippet: displayContent,
+              sourceName: 'KnowledgeBase',
+              sourceType: 'knowledge',
+            ));
+          } else {
+            // Chunk not found - provide guidance
+            final availableIds = _knowledgeService.getAllChunkIds();
+            final suggestion = availableIds.isNotEmpty 
+                ? 'Available IDs: ${availableIds.take(5).join(", ")}${availableIds.length > 5 ? "..." : ""}'
+                : 'Knowledge base is empty.';
+            
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.read_knowledge,
+              content: chunkId,
+              reason: '${decision.reason} [RESULT: Chunk $chunkId NOT FOUND. $suggestion]',
+              continueAfter: true,
+            );
+            
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 知识库查询失败',
+              url: 'internal://knowledge/error',
+              snippet: 'Chunk ID "$chunkId" not found.\n$suggestion',
+              sourceName: 'KnowledgeBase',
+              sourceType: 'system_note',
+            ));
+          }
+          // Explicitly continue loop - Agent needs to process the retrieved content
+          steps++;
+          continue;
+        }
+        else if (decision.type == AgentActionType.delete_knowledge && decision.content != null) {
+          // Action: Delete from Knowledge Base
+          setState(() => _loadingStatus = '正在删除知识库内容...');
+          final targetId = decision.content!;
+          
+          // Try to delete as file first, then as chunk
+          bool deleted = await _knowledgeService.deleteFile(targetId);
+          String deleteType = 'file';
+          
+          if (!deleted) {
+            deleted = await _knowledgeService.deleteChunk(targetId);
+            deleteType = 'chunk';
+          }
+          
+          if (deleted) {
+            final stats = _knowledgeService.getStats();
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.delete_knowledge,
+              content: targetId,
+              reason: '${decision.reason} [RESULT: Successfully deleted $deleteType $targetId]',
+              continueAfter: true,
+            );
+            
+            sessionRefs.add(ReferenceItem(
+              title: '🗑️ 知识库已更新',
+              url: 'internal://knowledge/deleted/$targetId',
+              snippet: '已删除 $deleteType: $targetId\n当前知识库: ${stats['fileCount']} 个文件, ${stats['chunkCount']} 个知识块',
+              sourceName: 'KnowledgeBase',
+              sourceType: 'system',
+            ));
+          } else {
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.delete_knowledge,
+              content: targetId,
+              reason: '${decision.reason} [RESULT: Failed to delete - ID $targetId not found]',
+              continueAfter: true,
+            );
+            
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 删除失败',
+              url: 'internal://knowledge/delete-error',
+              snippet: 'ID "$targetId" 在知识库中未找到。请检查 <knowledge_index> 确认正确的 ID。',
+              sourceName: 'KnowledgeBase',
+              sourceType: 'system_note',
+            ));
+          }
+          steps++;
+          continue;
+        }
+        else if (decision.type == AgentActionType.save_file && decision.filename != null && decision.content != null) {
+          // Action: Save File
+          setState(() => _loadingStatus = '正在保存文件: ${decision.filename}...');
+          debugPrint('Agent saving file: ${decision.filename}');
+          
+          final savedPath = await FileSaver.saveTextFile(decision.filename!, decision.content!);
+          
+          if (savedPath != null) {
+             // Success
+             sessionDecisions.last = AgentDecision(
+                type: AgentActionType.save_file,
+                filename: decision.filename,
+                content: decision.content,
+                reason: '${decision.reason} [RESULT: File saved successfully to $savedPath]',
+                continueAfter: decision.continueAfter,
+             );
+             
+             sessionRefs.add(ReferenceItem(
+                title: '💾 文件已保存',
+                url: 'file://$savedPath',
+                snippet: '文件 ${decision.filename} 已保存。\n路径: $savedPath',
+                sourceName: 'FileSaver',
+                sourceType: 'system',
+             ));
+          } else {
+             // Failed or Cancelled
+             sessionDecisions.last = AgentDecision(
+                type: AgentActionType.save_file,
+                filename: decision.filename,
+                content: decision.content,
+                reason: '${decision.reason} [RESULT: File save cancelled or failed]',
+                continueAfter: decision.continueAfter,
+             );
+          }
+          
+          if (!decision.continueAfter) {
+             break;
+          }
+        }
+        else if (decision.type == AgentActionType.system_control && decision.content != null) {
+          // Action: System Control
+          final action = decision.content!.toLowerCase();
+          setState(() => _loadingStatus = '正在执行系统操作: $action...');
+          
+          // Check service status first
+          final isEnabled = await SystemControl.isServiceEnabled();
+          if (!isEnabled) {
+             // Service not enabled - ask user
+             sessionDecisions.last = AgentDecision(
+                type: AgentActionType.system_control,
+                content: decision.content,
+                reason: '${decision.reason} [RESULT: FAILED - Accessibility Service not enabled]',
+             );
+             
+             // Add system note
+             sessionRefs.add(ReferenceItem(
+                title: '⚠️ 需要权限',
+                url: 'internal://system/permission-required',
+                snippet: '执行 "$action" 失败。需要开启无障碍服务权限。\n请引导用户去设置开启。',
+                sourceName: 'SystemControl',
+                sourceType: 'system',
+             ));
+             
+             // Prompt user to open settings
+             setState(() {
+               _messages.add(ChatMessage('assistant', '执行该操作需要开启【无障碍服务】权限。\n请点击下方按钮开启，然后重试。'));
+               _messages.add(ChatMessage('system', '点击开启设置', isMemory: true)); // Placeholder for UI action if we had one, but text is fine
+             });
+             
+             // Open settings automatically
+             await SystemControl.openAccessibilitySettings();
+             break;
+          }
+          
+          bool success = false;
+          switch (action) {
+            case 'home': success = await SystemControl.goHome(); break;
+            case 'back': success = await SystemControl.goBack(); break;
+            case 'recents': success = await SystemControl.showRecents(); break;
+            case 'notifications': success = await SystemControl.showNotifications(); break;
+            case 'lock': success = await SystemControl.lockScreen(); break;
+            case 'screenshot': success = await SystemControl.takeScreenshot(); break;
+            default: 
+              success = false;
+              debugPrint('Unknown system action: $action');
+          }
+          
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.system_control,
+            content: decision.content,
+            reason: '${decision.reason} [RESULT: ${success ? "SUCCESS" : "FAILED"}]',
+            continueAfter: decision.continueAfter,
+          );
+          
+          if (success) {
+             sessionRefs.add(ReferenceItem(
+                title: '📱 系统操作执行',
+                url: 'internal://system/action-performed',
+                snippet: '已执行操作: $action',
+                sourceName: 'SystemControl',
+                sourceType: 'system',
+             ));
+          }
+          
+          if (!decision.continueAfter) break;
+        }
         else if (decision.type == AgentActionType.vision && currentSessionImagePath != null) {
           // Action: Additional Vision Analysis (with custom prompt)
-          setState(() => _loadingStatus = '正在深度分析图片...');
+          // Count existing vision analyses for context
+          final existingVisionCount = sessionRefs.where((r) => r.sourceType == 'vision').length;
+          setState(() => _loadingStatus = '正在深度分析图片 (第${existingVisionCount + 1}次分析)...');
           try {
             final customPrompt = decision.content ?? '请详细分析这张图片的内容。';
             final visionRefs = await analyzeImage(
@@ -1920,23 +2873,37 @@ $userText
               fallbackModel: _chatModel,
             );
             if (visionRefs.isNotEmpty) {
-              // Add to session refs (avoid duplicates)
-              final existingIds = sessionRefs.map((r) => r.imageId).toSet();
-              final newRefs = visionRefs.where((r) => !existingIds.contains(r.imageId)).toList();
-              sessionRefs.addAll(newRefs);
-              debugPrint('Added ${newRefs.length} vision refs');
-              // Record success in action history
+              // Mark as additional analysis with context
+              for (var ref in visionRefs) {
+                // Enhance snippet with analysis context
+                final enhancedSnippet = '【分析视角】$customPrompt\n【分析结果】${ref.snippet}';
+                sessionRefs.add(ReferenceItem(
+                  title: '📷 深度分析 #${existingVisionCount + 1}: ${ref.title}',
+                  url: ref.url,
+                  snippet: enhancedSnippet,
+                  sourceName: ref.sourceName,
+                  imageId: ref.imageId,
+                  sourceType: 'vision',
+                ));
+              }
+              debugPrint('Added ${visionRefs.length} vision refs (analysis #${existingVisionCount + 1})');
+              
+              // Extract key insights for action history
+              final firstResult = visionRefs.first.snippet;
+              final summaryPreview = firstResult.length > 100 ? '${firstResult.substring(0, 100)}...' : firstResult;
+              
+              // Record success in action history with rich feedback
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.vision,
                 content: customPrompt,
-                reason: '${decision.reason} [RESULT: Vision analysis complete, ${newRefs.length} new insights]',
+                reason: '${decision.reason} [RESULT: Vision #${existingVisionCount + 1} complete. Key insight: $summaryPreview]',
               );
             } else {
               // Vision returned empty - record for planner
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.vision,
                 content: customPrompt,
-                reason: '${decision.reason} [RESULT: Vision returned no insights]',
+                reason: '${decision.reason} [RESULT: Vision returned no insights - try different analysis angle]',
               );
             }
             // Continue loop to process the new vision info
@@ -1944,13 +2911,166 @@ $userText
             debugPrint('Vision analysis failed: $visionError');
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.vision,
-              reason: '${decision.reason} [RESULT: Vision failed - $visionError]',
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: Vision failed - $visionError. Consider: 1) Different prompt 2) Fallback to describe without analysis]',
             );
+            // Continue loop - Agent will decide next action based on failure
           }
+        }
+        else if (decision.type == AgentActionType.reflect) {
+          // Action: Self-Reflection (Deep Think)
+          setState(() => _loadingStatus = '🤔 正在反思当前策略...');
+          debugPrint('Agent reflecting: ${decision.content}');
+          
+          // Record reflection in action history with insights
+          final reflectionSummary = decision.content ?? '自我审视当前方法';
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.reflect,
+            content: reflectionSummary,
+            reason: '${decision.reason} [REFLECTION: $reflectionSummary]',
+            confidence: decision.confidence,
+            uncertainties: decision.uncertainties,
+          );
+          
+          // Add reflection as a special observation for next iteration
+          sessionRefs.add(ReferenceItem(
+            title: '🧠 深度反思',
+            url: 'internal://reflection/${DateTime.now().millisecondsSinceEpoch}',
+            snippet: '【反思结论】$reflectionSummary\n【置信度】${((decision.confidence ?? 0.5) * 100).toInt()}%\n【待解决不确定性】${decision.uncertainties?.join(", ") ?? "无"}',
+            sourceName: 'DeepThink',
+            sourceType: 'reflection',
+          ));
+          
+          // Reflect always continues to next action
+          // (Agent will decide what to do based on reflection)
+        }
+        else if (decision.type == AgentActionType.hypothesize) {
+          // Action: Multi-Hypothesis Generation (Deep Think)
+          setState(() => _loadingStatus = '💡 正在生成多个假设方案...');
+          debugPrint('Agent hypothesizing: ${decision.hypotheses}');
+          
+          final hypothesesList = decision.hypotheses ?? ['默认方案'];
+          final selected = decision.selectedHypothesis ?? hypothesesList.first;
+          
+          // Record hypotheses in action history
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.hypothesize,
+            content: selected,
+            reason: '${decision.reason} [HYPOTHESES: ${hypothesesList.length} generated, selected: $selected]',
+            confidence: decision.confidence,
+            hypotheses: hypothesesList,
+            selectedHypothesis: selected,
+          );
+          
+          // Add hypothesis analysis as observation
+          final hypothesesBuffer = StringBuffer();
+          hypothesesBuffer.writeln('【候选方案】');
+          for (var i = 0; i < hypothesesList.length; i++) {
+            final isSelected = hypothesesList[i] == selected || selected.contains(hypothesesList[i]);
+            hypothesesBuffer.writeln('  ${i + 1}. ${isSelected ? "✅" : "○"} ${hypothesesList[i]}');
+          }
+          hypothesesBuffer.writeln('【选定方案】$selected');
+          
+          sessionRefs.add(ReferenceItem(
+            title: '💡 假设分析',
+            url: 'internal://hypothesis/${DateTime.now().millisecondsSinceEpoch}',
+            snippet: hypothesesBuffer.toString(),
+            sourceName: 'DeepThink',
+            sourceType: 'hypothesis',
+          ));
+          
+          // Hypothesize always continues to execute the selected hypothesis
+        }
+        else if (decision.type == AgentActionType.clarify) {
+          // Action: Request Clarification from User
+          setState(() => _loadingStatus = '❓ 需要您提供更多信息...');
+          debugPrint('Agent requesting clarification: ${decision.content}');
+          
+          final clarificationRequest = decision.content ?? '请提供更多信息';
+          final missingInfoList = decision.infoSufficiency?.missingInfo ?? [];
+          
+          // Record clarification request in action history
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.clarify,
+            content: clarificationRequest,
+            reason: '${decision.reason} [CLARIFY: Awaiting user input]',
+            confidence: decision.confidence,
+            infoSufficiency: decision.infoSufficiency,
+          );
+          
+          // Build a user-friendly clarification message
+          final clarifyBuffer = StringBuffer();
+          clarifyBuffer.writeln('🤔 **需要更多信息**\n');
+          clarifyBuffer.writeln(clarificationRequest);
+          
+          if (missingInfoList.isNotEmpty) {
+            clarifyBuffer.writeln('\n\n📋 **具体需要了解：**');
+            for (var i = 0; i < missingInfoList.length; i++) {
+              clarifyBuffer.writeln('${i + 1}. ${missingInfoList[i]}');
+            }
+          }
+          
+          if (decision.infoSufficiency != null && !decision.infoSufficiency!.isSufficient) {
+            clarifyBuffer.writeln('\n📊 当前信息充分度: 不足');
+          }
+          
+          clarifyBuffer.writeln('\n\n*请回复补充信息后，我将继续为您分析。*');
+          
+          // Add clarification to session refs for context
+          sessionRefs.add(ReferenceItem(
+            title: '❓ 信息请求',
+            url: 'internal://clarify/${DateTime.now().millisecondsSinceEpoch}',
+            snippet: '【缺失信息】${missingInfoList.join("; ")}\n【状态】等待用户回复',
+            sourceName: 'DeepThink',
+            sourceType: 'system',
+          ));
+          
+          // Create clarification message and end the Agent loop
+          final clarifyMessage = ChatMessage(
+            role: 'assistant',
+            content: clarifyBuffer.toString(),
+          );
+          
+          setState(() {
+            _messages.add(clarifyMessage);
+            _sending = false;
+            _loadingStatus = '';
+          });
+          
+          // Save the clarification state so next user message continues the flow
+          _pendingClarification = {
+            'sessionRefs': sessionRefs.map((r) => r.toJson()).toList(),
+            'sessionDecisions': sessionDecisions.map((d) => d.toJson()).toList(),
+            'originalQuery': content,
+          };
+          
+          await _saveChatHistory();
+          return; // Exit Agent loop, wait for user input
         }
         else if (decision.type == AgentActionType.answer || 
                  (decision.type == AgentActionType.vision && currentSessionImagePath == null)) {
           // Action: Answer (or vision without image = fallback to answer)
+          
+          // Deep Think: Check confidence before answering
+          if (decision.needsMoreWork && steps < maxSteps - 2) {
+            // Confidence too low - force a reflection before answering
+            debugPrint('Confidence ${decision.confidence} too low, forcing reflection');
+            setState(() => _loadingStatus = '🤔 置信度不足，正在深入思考...');
+            
+            // Add a note that we're forcing more thought
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 置信度检查',
+              url: 'internal://confidence-check/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '系统检测到回答置信度为 ${((decision.confidence ?? 0.5) * 100).toInt()}%，低于阈值70%。\n已触发深度思考模式，将重新评估策略。\n【不确定性】${decision.uncertainties?.join(", ") ?? "未明确"}',
+              sourceName: 'DeepThink',
+              sourceType: 'system',
+            ));
+            
+            // Continue loop to let Agent reconsider
+            steps++;
+            continue;
+          }
+          
           setState(() => _loadingStatus = '正在撰写回复...');
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           break; // Answer is a terminal action
@@ -1999,6 +3119,32 @@ $userText
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  void _showSuccessSnackBar(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.check_circle, color: Colors.white, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(msg, style: const TextStyle(fontWeight: FontWeight.w500))),
+          ],
+        ),
+        backgroundColor: Colors.green[600],
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(seconds: 3),
+      ),
     );
   }
 
@@ -2401,6 +3547,12 @@ $userText
                     icon: Icons.add_photo_alternate_rounded,
                     onPressed: _sending ? null : _pickImage,
                     tooltip: '发送图片',
+                  ),
+                  // 文件按钮
+                  _buildInputActionButton(
+                    icon: Icons.attach_file_rounded,
+                    onPressed: _sending ? null : _pickAndIngestFile,
+                    tooltip: '上传文件',
                   ),
                   // 生图按钮
                   _buildInputActionButton(
