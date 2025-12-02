@@ -107,9 +107,9 @@ class KnowledgeService {
           final groupSummary = await summarizer('Briefly summarize:\n$groupText');
           intermediateSummaries.add(groupSummary);
         }
-        globalSummary = await summarizer('Provide a high-level overview:\n${intermediateSummaries.join("\n")}');
+        globalSummary = await summarizer('Provide a HIGH-LEVEL overview in about 100-150 characters (one sentence). Be concise:\n${intermediateSummaries.join("\n")}');
       } else {
-        globalSummary = await summarizer('Please provide a high-level overview of the following document summaries:\n$allSummaries');
+        globalSummary = await summarizer('Summarize in ONE concise sentence (100-150 chars max). What is this file about?\n$allSummaries');
       }
     } else if (chunks.isNotEmpty) {
       globalSummary = chunks.first.summary;
@@ -268,5 +268,143 @@ class KnowledgeService {
       'totalChars': totalChars,
       'filenames': _files.map((f) => f.filename).toList(),
     };
+  }
+
+  /// Check if knowledge base has any content
+  bool get hasKnowledge => _files.isNotEmpty;
+
+  /// Search chunks by keywords, return matching chunk IDs with their summaries
+  /// Returns results in batches of [batchSize] for progressive disclosure
+  /// 
+  /// [keywords]: Comma-separated search terms
+  /// [batchIndex]: Which batch to return (0-indexed)
+  /// [batchSize]: Number of results per batch (default 5)
+  /// 
+  /// Returns a map with:
+  /// - 'results': List of matching chunks with id, filename, summary
+  /// - 'totalMatches': Total number of matches found
+  /// - 'hasMore': Whether there are more results to fetch
+  /// - 'nextBatchIndex': The next batch index to request
+  Map<String, dynamic> searchChunks({
+    required String keywords,
+    int batchIndex = 0,
+    int batchSize = 5,
+  }) {
+    if (_files.isEmpty) {
+      return {
+        'results': <Map<String, dynamic>>[],
+        'totalMatches': 0,
+        'hasMore': false,
+        'nextBatchIndex': 0,
+        'message': 'Knowledge base is empty. No files have been uploaded.',
+      };
+    }
+
+    // Parse keywords (comma or space separated, lowercase for matching)
+    final keywordList = keywords
+        .toLowerCase()
+        .split(RegExp(r'[,\s]+'))
+        .where((k) => k.isNotEmpty && k.length > 1) // Skip single chars
+        .toList();
+
+    if (keywordList.isEmpty) {
+      return {
+        'results': <Map<String, dynamic>>[],
+        'totalMatches': 0,
+        'hasMore': false,
+        'nextBatchIndex': 0,
+        'message': 'No valid keywords provided. Use comma-separated search terms.',
+      };
+    }
+
+    // Collect all matching chunks with their scores
+    final matches = <Map<String, dynamic>>[];
+    
+    for (var file in _files) {
+      for (var chunk in file.chunks) {
+        final summaryLower = chunk.summary.toLowerCase();
+        final filenameLower = file.filename.toLowerCase();
+        
+        // Calculate match score (how many keywords match)
+        int matchScore = 0;
+        final matchedKeywords = <String>[];
+        
+        for (var keyword in keywordList) {
+          if (summaryLower.contains(keyword) || filenameLower.contains(keyword)) {
+            matchScore++;
+            matchedKeywords.add(keyword);
+          }
+        }
+        
+        if (matchScore > 0) {
+          matches.add({
+            'id': chunk.id,
+            'filename': file.filename,
+            'fileId': file.id,
+            'chunkIndex': chunk.index,
+            'summary': chunk.summary,
+            'score': matchScore,
+            'matchedKeywords': matchedKeywords,
+          });
+        }
+      }
+    }
+
+    // Sort by score (most matches first), then by chunk index
+    matches.sort((a, b) {
+      final scoreCompare = (b['score'] as int).compareTo(a['score'] as int);
+      if (scoreCompare != 0) return scoreCompare;
+      return (a['chunkIndex'] as int).compareTo(b['chunkIndex'] as int);
+    });
+
+    // Calculate pagination
+    final totalMatches = matches.length;
+    final startIndex = batchIndex * batchSize;
+    final endIndex = (startIndex + batchSize).clamp(0, totalMatches);
+    
+    if (startIndex >= totalMatches) {
+      return {
+        'results': <Map<String, dynamic>>[],
+        'totalMatches': totalMatches,
+        'hasMore': false,
+        'nextBatchIndex': batchIndex,
+        'message': 'No more results. All $totalMatches matches have been shown.',
+      };
+    }
+
+    final batchResults = matches.sublist(startIndex, endIndex);
+    final hasMore = endIndex < totalMatches;
+
+    return {
+      'results': batchResults,
+      'totalMatches': totalMatches,
+      'currentBatch': batchIndex,
+      'hasMore': hasMore,
+      'nextBatchIndex': hasMore ? batchIndex + 1 : batchIndex,
+      'remainingCount': totalMatches - endIndex,
+    };
+  }
+
+  /// Get a brief overview of what's in the knowledge base (for Agent awareness)
+  /// This is a lightweight summary, not the full index
+  String getKnowledgeOverview() {
+    if (_files.isEmpty) {
+      return 'Knowledge base is empty.';
+    }
+    
+    final buffer = StringBuffer();
+    buffer.writeln('📚 Knowledge Base Overview:');
+    buffer.writeln('Total: ${_files.length} file(s)');
+    
+    for (var file in _files) {
+      buffer.writeln('  • ${file.filename} (${file.chunks.length} chunks)');
+      // Add global summary if available (helps Agent decide when to search)
+      if (file.globalSummary != null && file.globalSummary!.isNotEmpty) {
+        buffer.writeln('    └─ ${file.globalSummary!.replaceAll('\n', ' ')}');
+      }
+    }
+    
+    buffer.writeln('\n💡 Use search_knowledge with relevant keywords to find specific content.');
+    return buffer.toString();
   }
 }

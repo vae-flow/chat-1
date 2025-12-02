@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -111,6 +112,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   // 动画控制器
   late AnimationController _pulseController;
   late AnimationController _floatController;
+  late AnimationController _loadingDotsController;
   late Animation<double> _pulseAnimation;
   late Animation<double> _floatAnimation;
   final ScrollController _scrollCtrl = ScrollController();
@@ -209,12 +211,19 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _floatAnimation = Tween<double>(begin: -8, end: 8).animate(
       CurvedAnimation(parent: _floatController, curve: Curves.easeInOut),
     );
+    
+    // 加载动画控制器
+    _loadingDotsController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat();
   }
   
   @override
   void dispose() {
     _pulseController.dispose();
     _floatController.dispose();
+    _loadingDotsController.dispose();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -1902,11 +1911,36 @@ $refsContext
     final now = DateTime.now();
     final timeString = "${now.year}年${now.month}月${now.day}日 ${now.hour}:${now.minute} (星期${['','一','二','三','四','五','六','日'][now.weekday]})";
     
-    // Knowledge Index
-    final knowledgeIndex = _knowledgeService.getKnowledgeIndex();
-    
     // User Profile (No truncation - critical context)
     String memoryContent = _globalMemoryCache.isNotEmpty ? _globalMemoryCache : "暂无";
+    
+    // Get historical activity summary (cross-session context)
+    String historicalSummary = '';
+    try {
+      final historicalRefs = await _refManager.getExternalReferences();
+      if (historicalRefs.isNotEmpty) {
+        final visionHistory = historicalRefs.where((r) => r.sourceType == 'vision').take(5).toList();
+        final searchHistory = historicalRefs.where((r) => r.sourceType != 'vision' && r.sourceType != 'generated').take(5).toList();
+        
+        final summaryBuffer = StringBuffer();
+        if (visionHistory.isNotEmpty) {
+          summaryBuffer.writeln('📷 最近分析的图片 (${visionHistory.length}):');
+          for (var r in visionHistory) {
+            final shortSnippet = r.snippet.length > 80 ? '${r.snippet.substring(0, 80)}...' : r.snippet;
+            summaryBuffer.writeln('  • $shortSnippet');
+          }
+        }
+        if (searchHistory.isNotEmpty) {
+          summaryBuffer.writeln('🔍 最近的搜索/浏览 (${searchHistory.length}):');
+          for (var r in searchHistory) {
+            summaryBuffer.writeln('  • ${r.title}');
+          }
+        }
+        historicalSummary = summaryBuffer.toString();
+      }
+    } catch (e) {
+      debugPrint('Failed to get historical refs: $e');
+    }
     
     // Format References (Observations) with rich metadata AND strict limits
     final refsBuffer = StringBuffer();
@@ -1915,15 +1949,21 @@ $refsContext
       final synthesisRefs = sessionRefs.where((r) => r.sourceType == 'synthesis').toList();
       final visionRefs = sessionRefs.where((r) => r.sourceType == 'vision').toList();
       final generatedRefs = sessionRefs.where((r) => r.sourceType == 'generated').toList();
+      final knowledgeRefs = sessionRefs.where((r) => r.sourceType == 'knowledge').toList();
+      final knowledgeSearchRefs = sessionRefs.where((r) => r.sourceType == 'knowledge_search').toList();
       final thinkingRefs = sessionRefs.where((r) => 
         r.sourceType == 'reflection' || r.sourceType == 'hypothesis' || r.sourceType == 'system' || r.sourceType == 'system_note'
       ).toList();
       
-      // Filter web refs
+      // URL content (deep read results)
+      final urlContentRefs = sessionRefs.where((r) => r.sourceType == 'url_content').toList();
+      
+      // Filter web refs (exclude knowledge refs and url_content now)
       var webRefs = sessionRefs.where((r) => 
         r.sourceType != 'vision' && r.sourceType != 'generated' && 
         r.sourceType != 'reflection' && r.sourceType != 'hypothesis' && 
-        r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis'
+        r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis' &&
+        r.sourceType != 'knowledge' && r.sourceType != 'knowledge_search' && r.sourceType != 'url_content'
       ).toList();
       
       // LIMIT CONTEXT: Keep only recent/relevant references to prevent context explosion
@@ -1944,6 +1984,44 @@ $refsContext
         // Keep only last 2 synthesis results
         for (var r in synthesisRefs.reversed.take(2).toList().reversed) {
           refsBuffer.writeln('${r.snippet}');
+          idx++;
+        }
+        refsBuffer.writeln('');
+      }
+      
+      // Knowledge Base search results (summaries for selection)
+      if (knowledgeSearchRefs.isNotEmpty) {
+        refsBuffer.writeln('🔍 [知识库搜索结果 - 摘要列表]');
+        // Only keep latest search result (previous ones are superseded)
+        final latestSearch = knowledgeSearchRefs.last;
+        refsBuffer.writeln('  $idx. ${latestSearch.title}');
+        refsBuffer.writeln('${latestSearch.snippet}');
+        idx++;
+        refsBuffer.writeln('');
+      }
+      
+      // Knowledge Base content (actual content from read_knowledge)
+      if (knowledgeRefs.isNotEmpty) {
+        refsBuffer.writeln('📖 [知识库内容 - 实际文本]');
+        for (var r in knowledgeRefs) {
+          refsBuffer.writeln('  $idx. ${r.title}');
+          refsBuffer.writeln('${r.snippet}');
+          idx++;
+        }
+        refsBuffer.writeln('');
+      }
+      
+      // URL Content (deep read results from read_url action)
+      if (urlContentRefs.isNotEmpty) {
+        refsBuffer.writeln('📄 [网页深度阅读内容]');
+        // Keep last 3 URL reads to prevent context explosion
+        for (var r in urlContentRefs.skip(urlContentRefs.length > 3 ? urlContentRefs.length - 3 : 0)) {
+          String snippet = r.snippet;
+          // Stricter truncation for URL content (it can be very long)
+          if (snippet.length > 3000) snippet = '${snippet.substring(0, 3000)}...[截断]';
+          refsBuffer.writeln('  $idx. ${r.title}');
+          refsBuffer.writeln('     来源: ${r.url}');
+          refsBuffer.writeln('     内容: $snippet');
           idx++;
         }
         refsBuffer.writeln('');
@@ -2173,6 +2251,10 @@ $refsContext
     // Check if we have an active image in this session
     final hasSessionImage = sessionRefs.any((r) => r.sourceType == 'vision');
 
+    // Check if knowledge base has content
+    final hasKnowledge = _knowledgeService.hasKnowledge;
+    final knowledgeOverview = hasKnowledge ? _knowledgeService.getKnowledgeOverview() : '';
+
     final toolbelt = '''
 ### TOOLBELT (what you can call)
 
@@ -2180,14 +2262,49 @@ $refsContext
 - search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider (web search returns short references)" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
 - draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content; set continue=true if you want to comment on the result)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
 - vision: ${visionAvailable ? "AVAILABLE (analyze an image; put custom analysis prompt in content; if user uploaded image, analysis result is in <current_observations>)" : "UNAVAILABLE (vision API not configured)"}
-- read_knowledge: AVAILABLE - Read content from the local knowledge base.
-  * USE WHEN: User asks about uploaded files or specific topics in the <knowledge_index>.
-  * content: The "chunk_id" from the <knowledge_index>.
-  * NOTE: You must first check <knowledge_index> to find the relevant chunk_id.
-- delete_knowledge: AVAILABLE - Delete content from the knowledge base.
-  * USE WHEN: User asks to remove, delete, or clean up files/chunks from knowledge base.
-  * content: Either a "file_id" to delete entire file, OR a "chunk_id" to delete specific chunk.
-  * NOTE: This action is irreversible. Confirm with user if ambiguous.
+- read_url: ${searchAvailable ? "AVAILABLE - Deep read a specific webpage to get full content. Use when search results snippets are insufficient and you need the complete article/page." : "UNAVAILABLE (no network access)"}
+  * content: The full URL to read, e.g., "https://example.com/article"
+  * Returns: Title + extracted main content (up to 8000 chars)
+  * USE WHEN: Search gave you a relevant URL but snippet is too short to answer the question
+  * WORKFLOW: search → review results → read_url on promising link → answer
+
+**📚 KNOWLEDGE BASE TOOLS (3-Step Retrieval Flow):**
+${hasKnowledge ? '''
+- search_knowledge: AVAILABLE - Search the knowledge base by keywords.
+  * STEP 1: Use this FIRST to find relevant chunks.
+  * content: Comma-separated keywords, e.g., "authentication, login, token"
+  * Returns: Up to 5 chunk summaries per batch, with chunk IDs
+  * If more results exist, use same keywords again to get next batch
+  
+- take_note: AVAILABLE - Save notes to temporary memory.
+  * STEP 2 (Optional): After reviewing search results, note which chunks are relevant.
+  * content: Your notes, e.g., "Chunk 123_0 covers login flow, 123_3000 covers token refresh"
+  * Notes persist for this conversation only.
+  * Use this when processing large result sets across multiple batches.
+
+- read_knowledge: AVAILABLE - Read full content of specific chunks.
+  * STEP 3: Read the chunks you identified as relevant.
+  * content: Comma-separated chunk IDs, e.g., "123_0, 123_3000"
+  * Returns: Full text content of the chunks (up to 15000 chars total)
+
+- delete_knowledge: AVAILABLE - Delete content from knowledge base.
+  * content: file_id or chunk_id to delete
+  * NOTE: Irreversible. Confirm with user first.
+
+**Knowledge Retrieval Workflow Example:**
+1. User asks: "How does authentication work?"
+2. You: search_knowledge with content="authentication, login, token"
+3. System returns: 5 chunk summaries with IDs
+4. You: take_note with content="123_0 has login, 123_3000 has token refresh - both relevant"
+5. If more batches exist, repeat search_knowledge to see them
+6. You: read_knowledge with content="123_0, 123_3000"
+7. You: answer based on the content
+''' : '''
+- search_knowledge: UNAVAILABLE (knowledge base is empty - no files uploaded)
+- read_knowledge: UNAVAILABLE (knowledge base is empty)
+- delete_knowledge: UNAVAILABLE (knowledge base is empty)
+'''}
+
 - save_file: ALWAYS AVAILABLE - Save text or code to a local file. Use when user asks to "save", "download", "create file", or "export". Put filename in "filename" and content in "content".
 - system_control: AVAILABLE - Control device global actions.
   * content: "home", "back", "recents", "notifications", "lock", "screenshot"
@@ -2336,6 +2453,53 @@ After executing a hypothesized approach:
 3. If match: Increase confidence and proceed toward answer
 4. Never blindly trust a hypothesis - always verify with evidence
 
+### META-COGNITION: SELF-AWARENESS (关键!)
+You have limitations. You MUST be aware of them and communicate proactively:
+
+**🔍 TASK COMPLEXITY ASSESSMENT (First Step for ANY Request):**
+Before acting, classify the task:
+- **Simple**: Can be answered in one response (e.g., "What's 2+2?", "Explain X concept")
+- **Medium**: Requires 1-3 tool calls (e.g., "Search for latest news on X", "Analyze this image")  
+- **Complex**: Requires multiple steps, iterations, or produces large output (e.g., "Write a tutorial", "Create a comprehensive guide", "Build a knowledge base")
+- **Beyond Single Session**: Too large for one session (e.g., "Write 100k words", "Analyze 50 documents")
+
+**📊 YOUR CAPABILITY LIMITS (Be Honest About These):**
+- Single response: ~4000-8000 characters of quality content
+- Per session: Up to 20 tool calls / reasoning steps
+- Context window: Limited, older info may be compressed
+- No background execution: Cannot work while user is away
+- No cross-session memory: Each conversation starts fresh (except user profile)
+
+**🚨 WHEN TASK EXCEEDS CAPABILITIES:**
+If the task is Complex or Beyond Single Session, you MUST:
+1. **Acknowledge the scope**: "这是一个大型任务，需要分阶段完成"
+2. **Propose a plan**: Break it into concrete, manageable phases
+3. **Start with structure**: First deliver an outline/framework, get user confirmation
+4. **Iterate with saves**: After each major section, use save_file to persist progress
+5. **Provide progress markers**: "已完成第2章/共8章" or "Phase 1 of 3 complete"
+
+**📋 PROACTIVE PLANNING TEMPLATE (Use for Complex Tasks):**
+When you identify a complex task, your FIRST response should include:
+```
+📌 任务分析：
+- 类型：[教程/分析/创作/研究/...]
+- 预估规模：[X章/X部分/X阶段]
+- 每阶段产出：[约X字/X个要点]
+- 建议方式：[逐章生成+保存 / 先大纲后展开 / ...]
+
+📋 执行计划：
+1. [第一阶段内容]
+2. [第二阶段内容]
+...
+
+是否按此计划开始？或者您想调整？
+```
+
+**🔄 CONTINUATION AWARENESS:**
+- If <action_history> shows you're mid-task, continue from where you left off
+- If user says "继续" or "下一章", check context for what to continue
+- Always remind user of overall progress: "这是第X部分，共Y部分"
+
 ### DECISION LOGIC
 
 **🔧 ACTION TOOLS:**
@@ -2361,26 +2525,17 @@ After executing a hypothesized approach:
    - FIELDS: "filename" (e.g., "report.md", "code.py") and "content" (the full text/code).
    - NOTE: This triggers a system file picker for the user to choose the save location.
 
-5. **READ_KNOWLEDGE (read_knowledge)** - 📚 IMPORTANT FOR UPLOADED FILES:
-   - USE WHEN: User asks about content from uploaded files, or you see relevant entries in <knowledge_index>.
-   - HOW TO USE:
-     1. First, scan <knowledge_index> for files and chunk summaries
-     2. Match user's question keywords against chunk summaries
-     3. Identify ALL chunks whose summary might be relevant (don't miss any!)
-     4. Put ALL relevant chunk_ids in "content", separated by commas
-   - BATCH READING: You can read multiple chunks at once!
-     * content: "id1, id2, id3" → reads all three in one call
-     * Maximum ~15000 chars total will be returned
-   - EXAMPLE: If user asks "explain the authentication flow" and you see:
-     ```
-     📄 File: auth_service.dart
-       - Chunk 0 (ID: 123_0): AuthService class, login(), logout()...
-       - Chunk 1 (ID: 123_3000): TokenManager, refreshToken()...
-       - Chunk 2 (ID: 123_6000): PasswordValidator, hashPassword()...
-     ```
-     → You should read chunks 0 AND 1 together: content="123_0, 123_3000"
-     → Don't read one by one! That wastes steps.
-   - ALWAYS set "continue": true - you need to process the content after reading
+5. **KNOWLEDGE BASE (3-Step Retrieval)** - 📚 FOR UPLOADED FILES:
+   - USE WHEN: User asks about content from uploaded files, or <knowledge_overview> shows relevant files.
+   - STEP 1: **search_knowledge** - Find relevant chunks
+     * content: keywords like "authentication, login, token"
+     * Returns 5 chunk summaries per batch with IDs
+   - STEP 2: **take_note** (optional) - Record findings
+     * content: "Chunk 123_0 has login, 123_3000 has token refresh"
+     * Use when processing multiple batches
+   - STEP 3: **read_knowledge** - Read selected chunks
+     * content: "123_0, 123_3000" (comma-separated IDs)
+   - ALWAYS set "continue": true after search/take_note/read
 
 6. **DELETE_KNOWLEDGE (delete_knowledge)**:
    - USE WHEN: User asks to remove files/chunks from knowledge base.
@@ -2438,7 +2593,7 @@ After executing a hypothesized approach:
 ### OUTPUT FORMAT
 Return a JSON object (no markdown):
 {
-  "type": "search" | "draw" | "vision" | "save_file" | "system_control" | "reflect" | "hypothesize" | "clarify" | "answer",
+  "type": "search" | "read_url" | "draw" | "vision" | "save_file" | "system_control" | "search_knowledge" | "read_knowledge" | "delete_knowledge" | "take_note" | "reflect" | "hypothesize" | "clarify" | "answer",
   "reason": "[Intent: ...] [Gap: ...] [Strategy: ...]",
   "confidence": 0.0-1.0,
   "uncertainties": ["specific unknown 1", "specific unknown 2"],
@@ -2449,18 +2604,26 @@ Return a JSON object (no markdown):
     "suggested_action": "search" | "ask_user" | "verify" | "proceed_with_caveats",
     "clarify_question": "question for user if ask_user"
   },
+  "task_assessment": {
+    "complexity": "simple" | "medium" | "complex" | "beyond_session",
+    "estimated_phases": 1-N,
+    "current_phase": 1-N,
+    "phase_description": "当前阶段描述",
+    "needs_user_confirmation": true/false
+  },
   "source_caveats": ["caveat 1 about source reliability", "caveat 2"],
   "hypotheses": ["approach A", "approach B", "approach C"],
   "selected_hypothesis": "approach A because...",
   "query": "Search query (for search only)",
   "filename": "filename.ext (for save_file only)",
-  "content": "Reflection text / Answer text / Image prompt / Vision prompt / Clarify question / File content",
+  "content": "Keywords/ChunkIDs/Notes/Reflection/Answer/Prompt/Question/FileContent",
   "continue": true/false,
   "reminders": []
 }
 
 **REQUIRED FIELDS:**
 - type, reason, confidence: ALWAYS required
+- task_assessment: Required for first response to a new user request
 - info_sufficiency: Required before answer/clarify
 - uncertainties: Required when confidence < 0.9
 - source_caveats: Required when answering with low-reliability sources
@@ -2479,10 +2642,14 @@ $timeString
 <user_profile>
 $memoryContent
 </user_profile>
-
-<knowledge_index>
-$knowledgeIndex
-</knowledge_index>
+${historicalSummary.isNotEmpty ? '''
+<historical_activity>
+$historicalSummary
+</historical_activity>
+''' : ''}
+<knowledge_overview>
+$knowledgeOverview
+</knowledge_overview>
 
 <chat_history>
 $contextBuffer
@@ -2557,6 +2724,10 @@ $userText
 
     String? currentSessionImagePath;
     List<ReferenceItem> sessionRefs = [];
+    
+    // Knowledge search state: track pagination for batch processing
+    int knowledgeSearchBatchIndex = 0;
+    String lastKnowledgeSearchKeywords = '';
 
     // 1. Handle Image Input (Analyze & Prepare)
     if (_selectedImage != null) {
@@ -2572,6 +2743,15 @@ $userText
         _loadingStatus = '正在分析图片...';
       });
       _scrollToBottom();
+
+      // Check if we have historical analysis for this image
+      final historicalRefs = await _refManager.getReferencesByImageId(currentSessionImagePath);
+      if (historicalRefs.isNotEmpty) {
+        // Found historical analysis - use it as context
+        debugPrint('Found ${historicalRefs.length} historical analysis for image');
+        sessionRefs.addAll(historicalRefs);
+        // Still do a fresh analysis to capture any new aspects the user might ask about
+      }
 
       // Analyze the image to produce vision references
       try {
@@ -2819,6 +2999,60 @@ $userText
             await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
             break;
           }
+        }
+        else if (decision.type == AgentActionType.read_url && decision.content != null) {
+          // Action: Read URL content - deep read a specific webpage
+          final url = decision.content!.trim();
+          setState(() => _loadingStatus = '正在阅读网页内容...');
+          debugPrint('Agent reading URL: $url');
+          
+          try {
+            final urlRef = await _refManager.fetchUrlContent(url);
+            
+            // Check if fetch was successful
+            if (urlRef.reliability > 0.0) {
+              // Success - add to session refs
+              sessionRefs.add(urlRef);
+              
+              final contentLength = urlRef.snippet.length;
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.read_url,
+                content: url,
+                reason: '${decision.reason} [RESULT: Successfully read $contentLength chars from ${urlRef.sourceName}. Title: "${urlRef.title}"]',
+                continueAfter: decision.continueAfter,
+              );
+              debugPrint('URL read success: $contentLength chars');
+            } else {
+              // Failed to fetch
+              sessionRefs.add(urlRef); // Still add error ref for Agent awareness
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.read_url,
+                content: url,
+                reason: '${decision.reason} [RESULT: FAILED to read URL. Error: ${urlRef.snippet}]',
+              );
+            }
+            
+            if (!decision.continueAfter) {
+              // No continue flag, trigger answer
+              setState(() => _loadingStatus = '正在生成回答...');
+              await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+              break;
+            }
+            // Continue looping if continue flag is set
+            steps++;
+            continue;
+          } catch (e) {
+            debugPrint('read_url error: $e');
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.read_url,
+              content: url,
+              reason: '${decision.reason} [RESULT: Exception - $e]',
+            );
+            // Fallback to answer
+            setState(() => _loadingStatus = '网页读取失败，正在回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
         } 
         else if (decision.type == AgentActionType.draw && decision.content != null) {
           // Action: Draw
@@ -2875,6 +3109,8 @@ $userText
             if (!decision.continueAfter) {
               break;
             }
+            steps++;
+            continue;
           } else {
             // Generation returned null (failed)
             debugPrint('Draw returned null');
@@ -2928,17 +3164,7 @@ $userText
               combinedContent.writeln(displayContent);
               combinedContent.writeln('');
               totalChars += displayContent.length;
-              
-              // Also add as individual reference for tracking
-              sessionRefs.add(ReferenceItem(
-                title: '📖 知识库内容 [$chunkId]',
-                url: 'internal://knowledge/$chunkId',
-                snippet: displayContent.length > 500 
-                    ? '${displayContent.substring(0, 500)}...' 
-                    : displayContent,
-                sourceName: 'KnowledgeBase',
-                sourceType: 'knowledge',
-              ));
+              // Don't add individual refs here - we'll add a combined one later
             } else {
               failedReads.add(chunkId);
             }
@@ -2969,10 +3195,10 @@ $userText
           }
           
           // Add combined content as a single comprehensive reference
-          if (successfulReads.length > 1) {
+          if (successfulReads.isNotEmpty) {
             sessionRefs.add(ReferenceItem(
-              title: '📚 知识库批量读取 [${successfulReads.length} chunks]',
-              url: 'internal://knowledge/batch',
+              title: '📖 知识库内容 [${successfulReads.join(", ")}]',
+              url: 'internal://knowledge/read',
               snippet: combinedContent.toString(),
               sourceName: 'KnowledgeBase',
               sourceType: 'knowledge',
@@ -3031,11 +3257,109 @@ $userText
             sessionRefs.add(ReferenceItem(
               title: '⚠️ 删除失败',
               url: 'internal://knowledge/delete-error',
-              snippet: 'ID "$targetId" 在知识库中未找到。请检查 <knowledge_index> 确认正确的 ID。',
+              snippet: 'ID "$targetId" 在知识库中未找到。',
               sourceName: 'KnowledgeBase',
               sourceType: 'system_note',
             ));
           }
+          steps++;
+          continue;
+        }
+        else if (decision.type == AgentActionType.search_knowledge && decision.content != null) {
+          // Action: Search Knowledge Base
+          setState(() => _loadingStatus = '正在搜索知识库...');
+          final keywords = decision.content!;
+          
+          // Check if this is a continuation of previous search (for pagination)
+          if (keywords == lastKnowledgeSearchKeywords) {
+            knowledgeSearchBatchIndex++; // Next batch
+          } else {
+            knowledgeSearchBatchIndex = 0; // New search, reset
+            lastKnowledgeSearchKeywords = keywords;
+          }
+          
+          final searchResult = _knowledgeService.searchChunks(
+            keywords: keywords,
+            batchIndex: knowledgeSearchBatchIndex,
+            batchSize: 5,
+          );
+          
+          final results = searchResult['results'] as List<Map<String, dynamic>>;
+          final totalMatches = searchResult['totalMatches'] as int;
+          final hasMore = searchResult['hasMore'] as bool;
+          final remainingCount = searchResult['remainingCount'] ?? 0;
+          
+          // Build result message for Agent
+          final resultBuffer = StringBuffer();
+          if (results.isEmpty) {
+            resultBuffer.writeln('No matches found for keywords: "$keywords"');
+            if (searchResult['message'] != null) {
+              resultBuffer.writeln(searchResult['message']);
+            }
+          } else {
+            resultBuffer.writeln('📚 Search Results (Batch ${knowledgeSearchBatchIndex + 1}, showing ${results.length} of $totalMatches matches):');
+            resultBuffer.writeln('Keywords: $keywords\n');
+            
+            for (var result in results) {
+              resultBuffer.writeln('━━━━━━━━━━━━━━━━━━━━');
+              resultBuffer.writeln('📄 File: ${result['filename']}');
+              resultBuffer.writeln('🔖 Chunk ID: ${result['id']} (Chunk #${result['chunkIndex']})');
+              resultBuffer.writeln('🎯 Match Score: ${result['score']} keyword(s)');
+              resultBuffer.writeln('📝 Summary: ${result['summary']}');
+            }
+            
+            if (hasMore) {
+              resultBuffer.writeln('\n⏳ More results available: $remainingCount remaining');
+              resultBuffer.writeln('💡 Use search_knowledge with same keywords to see next batch.');
+              resultBuffer.writeln('💡 Or use take_note to record findings, then read_knowledge to get content.');
+            } else {
+              resultBuffer.writeln('\n✅ All $totalMatches results shown.');
+            }
+          }
+          
+          // Add to session refs for context (use different sourceType for search vs read)
+          sessionRefs.add(ReferenceItem(
+            title: '🔍 知识库搜索: "$keywords"',
+            url: 'internal://knowledge/search',
+            snippet: resultBuffer.toString(),
+            sourceName: 'KnowledgeBase',
+            sourceType: 'knowledge_search',
+          ));
+          
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.search_knowledge,
+            content: keywords,
+            reason: '${decision.reason} [RESULT: Found $totalMatches matches, showing batch ${knowledgeSearchBatchIndex + 1}]',
+            continueAfter: true,
+          );
+          
+          steps++;
+          continue;
+        }
+        else if (decision.type == AgentActionType.take_note && decision.content != null) {
+          // Action: Take Note (Agent's temporary memory)
+          setState(() => _loadingStatus = '正在记录笔记...');
+          final noteContent = decision.content!;
+          
+          // Count existing notes
+          final noteCount = sessionRefs.where((r) => r.sourceName == 'AgentNotes').length + 1;
+          
+          // Also add as reference so Agent sees it in context
+          sessionRefs.add(ReferenceItem(
+            title: '📝 Agent 笔记 #$noteCount',
+            url: 'internal://notes/session/$noteCount',
+            snippet: noteContent,
+            sourceName: 'AgentNotes',
+            sourceType: 'system_note',
+          ));
+          
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.take_note,
+            content: noteContent,
+            reason: '${decision.reason} [NOTE #$noteCount SAVED]',
+            continueAfter: true,
+          );
+          
           steps++;
           continue;
         }
@@ -3077,6 +3401,8 @@ $userText
           if (!decision.continueAfter) {
              break;
           }
+          steps++;
+          continue;
         }
         else if (decision.type == AgentActionType.system_control && decision.content != null) {
           // Action: System Control
@@ -3144,6 +3470,8 @@ $userText
           }
           
           if (!decision.continueAfter) break;
+          steps++;
+          continue;
         }
         else if (decision.type == AgentActionType.vision && currentSessionImagePath != null) {
           // Action: Additional Vision Analysis (with custom prompt)
@@ -3207,6 +3535,8 @@ $userText
             );
             // Continue loop - Agent will decide next action based on failure
           }
+          steps++;
+          continue; // Always continue after vision to let Agent decide next action
         }
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)
@@ -3234,6 +3564,8 @@ $userText
           
           // Reflect always continues to next action
           // (Agent will decide what to do based on reflection)
+          steps++;
+          continue; // Continue loop to let Agent decide next action
         }
         else if (decision.type == AgentActionType.hypothesize) {
           // Action: Multi-Hypothesis Generation (Deep Think)
@@ -3271,6 +3603,8 @@ $userText
           ));
           
           // Hypothesize always continues to execute the selected hypothesis
+          steps++;
+          continue; // Continue loop to let Agent execute the selected hypothesis
         }
         else if (decision.type == AgentActionType.clarify) {
           // Action: Request Clarification from User
@@ -3498,7 +3832,7 @@ $userText
             if (totalChars > 0)
               _buildMemoryStatusBar(totalChars, isMemoryFull),
             
-            // 消息列表
+            // 消息列表 - 带动画效果
             Expanded(
               child: _messages.isEmpty
                   ? _buildEmptyState()
@@ -3506,7 +3840,31 @@ $userText
                       controller: _scrollCtrl,
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
                       itemCount: _messages.length,
-                      itemBuilder: (context, index) => _buildMessageItem(_messages[index]),
+                      itemBuilder: (context, index) {
+                        // 为最新的消息添加弹入动画
+                        final isRecent = index >= _messages.length - 2;
+                        if (isRecent) {
+                          return TweenAnimationBuilder<double>(
+                            duration: const Duration(milliseconds: 400),
+                            curve: Curves.easeOutBack,
+                            tween: Tween(begin: 0.0, end: 1.0),
+                            builder: (context, value, child) {
+                              return Transform.translate(
+                                offset: Offset(0, 20 * (1 - value)),
+                                child: Opacity(
+                                  opacity: value.clamp(0.0, 1.0),
+                                  child: Transform.scale(
+                                    scale: 0.95 + 0.05 * value,
+                                    child: child,
+                                  ),
+                                ),
+                              );
+                            },
+                            child: _buildMessageItem(_messages[index]),
+                          );
+                        }
+                        return _buildMessageItem(_messages[index]);
+                      },
                     ),
             ),
           
@@ -3743,52 +4101,65 @@ $userText
     );
   }
 
-  // 华丽输入区域
+  // 华丽输入区域 - 玻璃质感
   Widget _buildFancyInputArea(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.shadowMedium,
-            blurRadius: 20,
-            offset: const Offset(0, -8),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // 加载状态
-            if (_sending)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor: AlwaysStoppedAnimation<Color>(AppColors.primaryStart),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        _loadingStatus.isEmpty ? '正在思考...' : _loadingStatus,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: AppColors.primaryStart,
-                          fontWeight: FontWeight.w500,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.white.withOpacity(0.85),
+                Colors.white.withOpacity(0.95),
+              ],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+            border: Border(
+              top: BorderSide(
+                color: Colors.white.withOpacity(0.8),
+                width: 1.5,
               ),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.shadowMedium,
+                blurRadius: 20,
+                offset: const Offset(0, -8),
+              ),
+            ],
+          ),
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 加载状态 - 使用跳动动画
+                if (_sending)
+                  _loadingStatus.contains('搜索知识库') || _loadingStatus.contains('读取知识库')
+                      ? _buildScanningIndicator(_loadingStatus.isEmpty ? '正在思考...' : _loadingStatus)
+                      : Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                          child: Row(
+                            children: [
+                              _buildBouncingDots(),
+                              const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            _loadingStatus.isEmpty ? '正在思考...' : _loadingStatus,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: AppColors.primaryStart,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
             // 已选图片预览
             if (_selectedImage != null)
               Container(
@@ -3877,43 +4248,67 @@ $userText
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // 发送按钮
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: _sending ? null : AppColors.primaryGradient,
-                      color: _sending ? Colors.grey[300] : null,
-                      shape: BoxShape.circle,
-                      boxShadow: _sending ? null : [
-                        BoxShadow(
-                          color: AppColors.primaryStart.withOpacity(0.4),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        onTap: _sending ? null : _send,
-                        borderRadius: BorderRadius.circular(24),
+                  // 发送按钮 - 带脉冲动画
+                  AnimatedBuilder(
+                    animation: _pulseController,
+                    builder: (context, child) {
+                      final canSend = !_sending && (_inputCtrl.text.trim().isNotEmpty || _selectedImage != null);
+                      return Transform.scale(
+                        scale: canSend ? 1.0 + (_pulseAnimation.value - 1.0) * 0.3 : 1.0,
                         child: Container(
-                          width: 48,
-                          height: 48,
-                          alignment: Alignment.center,
-                          child: Icon(
-                            Icons.arrow_upward_rounded,
-                            color: _sending ? Colors.grey[500] : Colors.white,
-                            size: 24,
+                          decoration: BoxDecoration(
+                            gradient: _sending ? null : AppColors.primaryGradient,
+                            color: _sending ? Colors.grey[300] : null,
+                            shape: BoxShape.circle,
+                            boxShadow: _sending ? null : [
+                              BoxShadow(
+                                color: AppColors.primaryStart.withOpacity(0.3 + _pulseAnimation.value * 0.2),
+                                blurRadius: 12 + _pulseAnimation.value * 8,
+                                offset: const Offset(0, 4),
+                                spreadRadius: _pulseAnimation.value * 2,
+                              ),
+                            ],
+                          ),
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: _sending ? null : _send,
+                              borderRadius: BorderRadius.circular(24),
+                              child: Container(
+                                width: 48,
+                                height: 48,
+                                alignment: Alignment.center,
+                                child: AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 200),
+                                  child: _sending
+                                      ? SizedBox(
+                                          width: 20,
+                                          height: 20,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor: AlwaysStoppedAnimation(Colors.grey[500]),
+                                          ),
+                                        )
+                                      : Icon(
+                                          Icons.arrow_upward_rounded,
+                                          key: const ValueKey('send'),
+                                          color: Colors.white,
+                                          size: 24,
+                                        ),
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
                 ],
               ),
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -3942,65 +4337,77 @@ $userText
 
   // 华丽玻璃效果 AppBar
   Widget _buildGlassAppBar(BuildContext context, int totalChars, bool isMemoryFull) {
-    return Container(
-      padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [AppColors.primaryStart, AppColors.primaryEnd],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primaryStart.withOpacity(0.3),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
+    return ClipRRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: Container(
+          padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                AppColors.primaryStart.withOpacity(0.9),
+                AppColors.primaryEnd.withOpacity(0.85),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+            border: Border(
+              bottom: BorderSide(
+                color: Colors.white.withOpacity(0.2),
+                width: 1,
+              ),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: AppColors.primaryStart.withOpacity(0.3),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // 主 AppBar 区域
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            child: Row(
-              children: [
-                const SizedBox(width: 8),
-                // 标题区域
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'One-API 助手',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Row(
+          child: Column(
+            children: [
+              // 主 AppBar 区域
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    // 标题区域
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: Colors.greenAccent,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.greenAccent.withOpacity(0.5),
-                                  blurRadius: 4,
-                                ),
-                              ],
+                          const Text(
+                            'One-API 助手',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                              letterSpacing: 0.5,
                             ),
                           ),
-                          const SizedBox(width: 6),
-                          Text(
-                            _chatModel,
-                            style: TextStyle(
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: Colors.greenAccent,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.greenAccent.withOpacity(0.5),
+                                      blurRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _chatModel,
+                                style: TextStyle(
                               fontSize: 11,
                               color: Colors.white.withOpacity(0.8),
                             ),
@@ -4032,6 +4439,7 @@ $userText
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -4297,21 +4705,38 @@ $userText
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
-                    gradient: isUser ? AppColors.userMessageGradient : null,
-                    color: isUser ? null : Colors.white,
+                    gradient: isUser 
+                        ? AppColors.userMessageGradient 
+                        : LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.white,
+                              Colors.grey[50]!,
+                            ],
+                          ),
                     borderRadius: BorderRadius.only(
                       topLeft: const Radius.circular(20),
                       topRight: const Radius.circular(20),
                       bottomLeft: Radius.circular(isUser ? 20 : 4),
                       bottomRight: Radius.circular(isUser ? 4 : 20),
                     ),
+                    border: isUser ? null : Border.all(
+                      color: Colors.white.withOpacity(0.8),
+                      width: 1.5,
+                    ),
                     boxShadow: [
                       BoxShadow(
                         color: isUser 
                             ? AppColors.primaryStart.withOpacity(0.3)
-                            : Colors.black.withOpacity(0.06),
-                        blurRadius: isUser ? 12 : 8,
+                            : Colors.black.withOpacity(0.08),
+                        blurRadius: isUser ? 12 : 10,
                         offset: const Offset(0, 4),
+                      ),
+                      if (!isUser) BoxShadow(
+                        color: Colors.white.withOpacity(0.8),
+                        blurRadius: 1,
+                        offset: const Offset(0, -1),
                       ),
                     ],
                   ),
@@ -4526,5 +4951,135 @@ $userText
             : null,
       );
     }
+  }
+  
+  /// 跳动的加载点点指示器
+  Widget _buildBouncingDots() {
+    return AnimatedBuilder(
+      animation: _loadingDotsController,
+      builder: (context, child) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: List.generate(3, (index) {
+            // 每个点的动画延迟
+            final delay = index * 0.2;
+            final value = (_loadingDotsController.value + delay) % 1.0;
+            // 使用正弦曲线创建弹跳效果
+            final bounce = math.sin(value * math.pi);
+            
+            return Transform.translate(
+              offset: Offset(0, -bounce * 6),
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      AppColors.primaryStart.withOpacity(0.6 + bounce * 0.4),
+                      AppColors.primaryEnd.withOpacity(0.6 + bounce * 0.4),
+                    ],
+                  ),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primaryStart.withOpacity(bounce * 0.5),
+                      blurRadius: 4 + bounce * 4,
+                      spreadRadius: bounce * 2,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+        );
+      },
+    );
+  }
+  
+  /// 知识库搜索时的扫描动画组件
+  Widget _buildScanningIndicator(String text) {
+    return AnimatedBuilder(
+      animation: _loadingDotsController,
+      builder: (context, child) {
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              // 扫描动画图标
+              Stack(
+                alignment: Alignment.center,
+                children: [
+                  // 外圈旋转
+                  Transform.rotate(
+                    angle: _loadingDotsController.value * 2 * math.pi,
+                    child: Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: AppColors.primaryStart.withOpacity(0.3),
+                          width: 2,
+                        ),
+                      ),
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: AppColors.primaryStart,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // 中心点
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      gradient: AppColors.primaryGradient,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ShaderMask(
+                  shaderCallback: (bounds) {
+                    final progress = _loadingDotsController.value;
+                    return LinearGradient(
+                      colors: [
+                        AppColors.primaryStart,
+                        AppColors.primaryEnd,
+                        AppColors.primaryStart,
+                      ],
+                      stops: [
+                        (progress - 0.3).clamp(0.0, 1.0),
+                        progress,
+                        (progress + 0.3).clamp(0.0, 1.0),
+                      ],
+                    ).createShader(bounds);
+                  },
+                  child: Text(
+                    text,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }

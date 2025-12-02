@@ -1,4 +1,4 @@
-enum AgentActionType { answer, search, draw, vision, reflect, hypothesize, clarify, save_file, system_control, read_knowledge, delete_knowledge }
+enum AgentActionType { answer, search, read_url, draw, vision, reflect, hypothesize, clarify, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note }
 
 /// Information sufficiency assessment
 class InfoSufficiency {
@@ -31,6 +31,52 @@ class InfoSufficiency {
   }
 }
 
+/// Task complexity assessment for meta-cognition
+class TaskAssessment {
+  final String complexity; // 'simple', 'medium', 'complex', 'beyond_session'
+  final int estimatedPhases; // Total number of phases needed
+  final int currentPhase; // Current phase (1-indexed)
+  final String? phaseDescription; // Description of current phase
+  final bool needsUserConfirmation; // Whether to ask user before proceeding
+
+  TaskAssessment({
+    required this.complexity,
+    this.estimatedPhases = 1,
+    this.currentPhase = 1,
+    this.phaseDescription,
+    this.needsUserConfirmation = false,
+  });
+
+  factory TaskAssessment.fromJson(Map<String, dynamic> json) {
+    return TaskAssessment(
+      complexity: json['complexity'] ?? 'simple',
+      estimatedPhases: json['estimated_phases'] ?? 1,
+      currentPhase: json['current_phase'] ?? 1,
+      phaseDescription: json['phase_description'],
+      needsUserConfirmation: json['needs_user_confirmation'] ?? false,
+    );
+  }
+  
+  Map<String, dynamic> toJson() {
+    return {
+      'complexity': complexity,
+      'estimated_phases': estimatedPhases,
+      'current_phase': currentPhase,
+      'phase_description': phaseDescription,
+      'needs_user_confirmation': needsUserConfirmation,
+    };
+  }
+  
+  /// Check if this is a complex multi-phase task
+  bool get isMultiPhase => estimatedPhases > 1;
+  
+  /// Check if task exceeds single session capability
+  bool get exceedsSession => complexity == 'beyond_session';
+  
+  /// Get progress string
+  String get progressString => isMultiPhase ? '第$currentPhase阶段/共$estimatedPhases阶段' : '';
+}
+
 class AgentDecision {
   final AgentActionType type;
   final String? content; // For answer text or draw prompt or vision analysis prompt or file content
@@ -49,6 +95,9 @@ class AgentDecision {
   // Information Sufficiency (Source Reliability)
   final InfoSufficiency? infoSufficiency; // Assessment of whether we have enough reliable info
   final List<String>? sourceCaveats; // Warnings about source reliability to include in answer
+  
+  // Task Assessment (Meta-cognition)
+  final TaskAssessment? taskAssessment; // Assessment of task complexity and progress
 
   AgentDecision({
     required this.type,
@@ -64,6 +113,7 @@ class AgentDecision {
     this.selectedHypothesis,
     this.infoSufficiency,
     this.sourceCaveats,
+    this.taskAssessment,
   });
 
   factory AgentDecision.fromJson(Map<String, dynamic> json) {
@@ -71,6 +121,7 @@ class AgentDecision {
     AgentActionType type;
     switch (typeStr) {
       case 'search': type = AgentActionType.search; break;
+      case 'read_url': type = AgentActionType.read_url; break;
       case 'draw': type = AgentActionType.draw; break;
       case 'vision': type = AgentActionType.vision; break;
       case 'reflect': type = AgentActionType.reflect; break;
@@ -78,8 +129,10 @@ class AgentDecision {
       case 'clarify': type = AgentActionType.clarify; break;
       case 'save_file': type = AgentActionType.save_file; break;
       case 'system_control': type = AgentActionType.system_control; break;
+      case 'search_knowledge': type = AgentActionType.search_knowledge; break;
       case 'read_knowledge': type = AgentActionType.read_knowledge; break;
       case 'delete_knowledge': type = AgentActionType.delete_knowledge; break;
+      case 'take_note': type = AgentActionType.take_note; break;
       default: type = AgentActionType.answer;
     }
 
@@ -107,6 +160,9 @@ class AgentDecision {
       sourceCaveats: json['source_caveats'] != null
         ? List<String>.from(json['source_caveats'])
         : null,
+      taskAssessment: json['task_assessment'] != null
+        ? TaskAssessment.fromJson(json['task_assessment'])
+        : null,
     );
   }
   
@@ -125,6 +181,20 @@ class AgentDecision {
   /// Check if sources are unreliable
   bool get hasUnreliableSources =>
     infoSufficiency?.unreliableSources.isNotEmpty == true;
+    
+  /// Check if task needs user confirmation
+  bool get needsUserConfirmation =>
+    taskAssessment?.needsUserConfirmation == true;
+  
+  /// Check if task is complex (medium or higher)
+  bool get isComplexTask =>
+    taskAssessment?.complexity == 'medium' ||
+    taskAssessment?.complexity == 'complex' ||
+    taskAssessment?.complexity == 'beyond_session';
+  
+  /// Check if this is a multi-phase task
+  bool get isMultiPhaseTask =>
+    taskAssessment?.isMultiPhase == true;
   
   /// Convert to JSON for persistence
   Map<String, dynamic> toJson() {
@@ -148,6 +218,7 @@ class AgentDecision {
         'clarify_question': infoSufficiency!.clarifyQuestion,
       } : null,
       'source_caveats': sourceCaveats,
+      'task_assessment': taskAssessment?.toJson(),
     };
   }
 }

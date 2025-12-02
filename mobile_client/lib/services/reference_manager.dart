@@ -66,7 +66,7 @@ class ReferenceManager {
         'useAutoprompt': true,
         'contents': {'text': true} 
       }),
-    ).timeout(const Duration(seconds: 15));
+    ).timeout(const Duration(seconds: 60));
     
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -100,7 +100,7 @@ class ReferenceManager {
     final resp = await http.get(
       uri,
       headers: {'X-API-Key': key},
-    ).timeout(const Duration(seconds: 15));
+    ).timeout(const Duration(seconds: 60));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -157,7 +157,7 @@ class ReferenceManager {
         'X-Subscription-Token': key,
         'Accept': 'application/json',
       },
-    ).timeout(const Duration(seconds: 15));
+    ).timeout(const Duration(seconds: 60));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -461,7 +461,7 @@ ${sourceData.toString()}
           'Content-Type': 'application/json',
         },
         body: requestBody,
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200) {
         final data = json.decode(utf8.decode(response.bodyBytes));
@@ -563,6 +563,150 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
       debugPrint('Synthesis error: $e');
       return {'synthesis': null, 'refs': refs};
     }
+  }
+
+  /// Fetch and extract readable content from a URL
+  /// Uses basic HTML parsing to extract main content
+  Future<ReferenceItem> fetchUrlContent(String url) async {
+    try {
+      final uri = Uri.parse(url);
+      final response = await http.get(
+        uri,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+      ).timeout(const Duration(seconds: 60));
+
+      if (response.statusCode == 200) {
+        final html = utf8.decode(response.bodyBytes, allowMalformed: true);
+        
+        // Extract title
+        String title = url;
+        final titleMatch = RegExp(r'<title[^>]*>([^<]+)</title>', caseSensitive: false).firstMatch(html);
+        if (titleMatch != null) {
+          title = _decodeHtmlEntities(titleMatch.group(1)?.trim() ?? url);
+        }
+        
+        // Remove script, style, nav, footer, header, aside tags
+        String cleaned = html
+          .replaceAll(RegExp(r'<script[^>]*>[\s\S]*?</script>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<style[^>]*>[\s\S]*?</style>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<nav[^>]*>[\s\S]*?</nav>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<footer[^>]*>[\s\S]*?</footer>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<header[^>]*>[\s\S]*?</header>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<aside[^>]*>[\s\S]*?</aside>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<noscript[^>]*>[\s\S]*?</noscript>', caseSensitive: false), '')
+          .replaceAll(RegExp(r'<!--[\s\S]*?-->', caseSensitive: false), '');
+        
+        // Try to find main content areas
+        String mainContent = '';
+        
+        // Priority 1: article tag
+        final articleMatch = RegExp(r'<article[^>]*>([\s\S]*?)</article>', caseSensitive: false).firstMatch(cleaned);
+        if (articleMatch != null) {
+          mainContent = articleMatch.group(1) ?? '';
+        }
+        
+        // Priority 2: main tag
+        if (mainContent.isEmpty) {
+          final mainMatch = RegExp(r'<main[^>]*>([\s\S]*?)</main>', caseSensitive: false).firstMatch(cleaned);
+          if (mainMatch != null) {
+            mainContent = mainMatch.group(1) ?? '';
+          }
+        }
+        
+        // Priority 3: div with content-related class/id
+        if (mainContent.isEmpty) {
+          final contentDivMatch = RegExp(
+            r'<div[^>]*(?:class|id)=["\'][^"\']*(?:content|article|post|entry|main)[^"\']*["\'][^>]*>([\s\S]*?)</div>',
+            caseSensitive: false
+          ).firstMatch(cleaned);
+          if (contentDivMatch != null) {
+            mainContent = contentDivMatch.group(1) ?? '';
+          }
+        }
+        
+        // Priority 4: body content
+        if (mainContent.isEmpty) {
+          final bodyMatch = RegExp(r'<body[^>]*>([\s\S]*?)</body>', caseSensitive: false).firstMatch(cleaned);
+          if (bodyMatch != null) {
+            mainContent = bodyMatch.group(1) ?? '';
+          }
+        }
+        
+        // Fallback to cleaned HTML
+        if (mainContent.isEmpty) {
+          mainContent = cleaned;
+        }
+        
+        // Extract text from HTML
+        String text = mainContent
+          .replaceAll(RegExp(r'<br\s*/?>|<p[^>]*>|</p>|<div[^>]*>|</div>', caseSensitive: false), '\n')
+          .replaceAll(RegExp(r'<[^>]+>'), '') // Remove all HTML tags
+          .replaceAll(RegExp(r'\n\s*\n+'), '\n\n') // Normalize line breaks
+          .replaceAll(RegExp(r'[ \t]+'), ' ') // Normalize spaces
+          .trim();
+        
+        // Decode HTML entities
+        text = _decodeHtmlEntities(text);
+        
+        // Limit content length (keep first 8000 chars for context)
+        if (text.length > 8000) {
+          text = '${text.substring(0, 8000)}\n\n[...内容已截断，共${text.length}字符]';
+        }
+        
+        return ReferenceItem(
+          title: '📄 $title',
+          url: url,
+          snippet: text.isNotEmpty ? text : '无法提取网页内容',
+          sourceName: uri.host,
+          sourceType: 'url_content',
+          reliability: _estimateReliability(url),
+          authorityLevel: _detectAuthorityLevel(url),
+        );
+      } else {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('fetchUrlContent error for $url: $e');
+      return ReferenceItem(
+        title: '⚠️ 无法获取网页',
+        url: url,
+        snippet: '获取网页内容失败: $e',
+        sourceName: 'error',
+        sourceType: 'url_content',
+        reliability: 0.0,
+        authorityLevel: 'unknown',
+      );
+    }
+  }
+  
+  /// Decode common HTML entities
+  String _decodeHtmlEntities(String text) {
+    return text
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'")
+      .replaceAll('&#x27;', "'")
+      .replaceAll('&mdash;', '—')
+      .replaceAll('&ndash;', '–')
+      .replaceAll('&hellip;', '...')
+      .replaceAll('&copy;', '©')
+      .replaceAll('&reg;', '®')
+      .replaceAll('&trade;', '™')
+      .replaceAll(RegExp(r'&#(\d+);'), (m) {
+        final code = int.tryParse(m.group(1) ?? '');
+        return code != null ? String.fromCharCode(code) : m.group(0)!;
+      })
+      .replaceAll(RegExp(r'&#x([0-9a-fA-F]+);'), (m) {
+        final code = int.tryParse(m.group(1) ?? '', radix: 16);
+        return code != null ? String.fromCharCode(code) : m.group(0)!;
+      });
   }
 
   // Format references for LLM context (if needed)
