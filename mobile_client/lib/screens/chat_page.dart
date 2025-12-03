@@ -3025,6 +3025,19 @@ Output your decision as JSON:
               _currentPlan = plan;
               _currentPlanStep = 0;
               
+              // 更新推理链面板
+              if (mounted) {
+                setState(() {
+                  _reasoningSteps = [
+                    '📋 生成执行计划 (${plan.steps.length} 步)',
+                    '🎯 意图: ${plan.userIntent}',
+                    '🔧 能力: ${plan.capabilityReview}',
+                    '✨ 预期: ${plan.expectedOutcome}',
+                  ];
+                  _currentReasoning = '准备执行第 1 步: ${plan.steps.first.action.name}';
+                });
+              }
+              
               // Log the plan
               debugPrint('📋 Plan P1 (Intent): ${plan.userIntent}');
               debugPrint('📋 Plan P2 (Capability): ${plan.capabilityReview}');
@@ -3871,7 +3884,10 @@ Output your decision as JSON:
             continue;
           }
           
-          setState(() => _loadingStatus = '正在阅读网页内容...');
+          setState(() {
+            _loadingStatus = '正在阅读网页内容...';
+            _currentReasoning = '读取: $url';
+          });
           debugPrint('Agent reading URL: $url');
           
           try {
@@ -3883,6 +3899,13 @@ Output your decision as JSON:
               sessionRefs.add(urlRef);
               stepSucceeded = true;
               stepResult = 'Read ${urlRef.snippet.length} chars from ${urlRef.sourceName}';
+              
+              // 更新推理链
+              if (mounted) {
+                setState(() {
+                  _reasoningSteps.add('✅ 读取网页 "${urlRef.title}" (${urlRef.snippet.length} 字符)');
+                });
+              }
               
               final contentLength = urlRef.snippet.length;
               sessionDecisions.last = AgentDecision(
@@ -3896,6 +3919,13 @@ Output your decision as JSON:
               // Failed to fetch
               stepSucceeded = false;
               stepResult = 'Failed to read URL: ${urlRef.snippet}';
+              
+              // 更新推理链
+              if (mounted) {
+                setState(() {
+                  _reasoningSteps.add('❌ 读取网页失败: $url');
+                });
+              }
               
               sessionRefs.add(urlRef); // Still add error ref for Agent awareness
               sessionDecisions.last = AgentDecision(
@@ -3969,6 +3999,11 @@ Output your decision as JSON:
           // 🔒 Pre-check: Is Draw API configured?
           if (_imgBase.contains('your-oneapi-host') || _imgKey.isEmpty) {
             debugPrint('⚠️ draw requested but Draw API not configured');
+            if (mounted) {
+              setState(() {
+                _reasoningSteps.add('❌ 生图API未配置');
+              });
+            }
             sessionRefs.add(ReferenceItem(
               title: '⚠️ 图片生成失败',
               url: 'internal://error/draw-no-api/${DateTime.now().millisecondsSinceEpoch}',
@@ -3985,9 +4020,19 @@ Output your decision as JSON:
             continue;
           }
           
-          setState(() => _loadingStatus = '正在生成图片...');
+          setState(() {
+            _loadingStatus = '正在生成图片...';
+            _currentReasoning = '绘制: ${decision.content!.length > 30 ? decision.content!.substring(0, 30) + "..." : decision.content}';
+          });
           final generatedPath = await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
           if (generatedPath != null) {
+            // 更新推理链
+            if (mounted) {
+              setState(() {
+                _reasoningSteps.add('✅ 图片生成成功');
+              });
+            }
+            
             // Auto-analyze the generated image to get rich semantic info
             setState(() => _loadingStatus = '正在分析生成的图片...');
             String imageDescription = '图片已根据提示词生成: ${decision.content}';
@@ -4233,7 +4278,10 @@ Output your decision as JSON:
         }
         else if (decision.type == AgentActionType.search_knowledge && decision.content != null) {
           // Action: Search Knowledge Base
-          setState(() => _loadingStatus = '正在搜索知识库...');
+          setState(() {
+            _loadingStatus = '正在搜索知识库...';
+            _currentReasoning = '搜索知识库: ${decision.content}';
+          });
           final keywords = decision.content!;
           
           // Check if this is a continuation of previous search (for pagination)
@@ -4298,6 +4346,13 @@ Output your decision as JSON:
             sourceType: 'knowledge_search',
           ));
           
+          // 更新推理链
+          if (mounted) {
+            setState(() {
+              _reasoningSteps.add('📚 知识库搜索 "$keywords": 找到 $totalMatches 条结果');
+            });
+          }
+          
           sessionDecisions.last = AgentDecision(
             type: AgentActionType.search_knowledge,
             content: keywords,
@@ -4310,7 +4365,10 @@ Output your decision as JSON:
         }
         else if (decision.type == AgentActionType.take_note && decision.content != null) {
           // Action: Take Note (Agent's temporary memory)
-          setState(() => _loadingStatus = '正在记录笔记...');
+          setState(() {
+            _loadingStatus = '正在记录笔记...';
+            _currentReasoning = '记录笔记...';
+          });
           final noteContent = decision.content!;
           
           // Count existing notes
@@ -4325,6 +4383,13 @@ Output your decision as JSON:
             sourceType: 'system_note',
           ));
           
+          // 更新推理链
+          if (mounted) {
+            setState(() {
+              _reasoningSteps.add('📝 记录笔记 #$noteCount');
+            });
+          }
+          
           sessionDecisions.last = AgentDecision(
             type: AgentActionType.take_note,
             content: noteContent,
@@ -4337,7 +4402,10 @@ Output your decision as JSON:
         }
         else if (decision.type == AgentActionType.save_file && decision.filename != null && decision.content != null) {
           // Action: Save File
-          setState(() => _loadingStatus = '正在保存文件: ${decision.filename}...');
+          setState(() {
+            _loadingStatus = '正在保存文件: ${decision.filename}...';
+            _currentReasoning = '保存文件: ${decision.filename}';
+          });
           debugPrint('Agent saving file: ${decision.filename}');
           
           final savedPath = await FileSaver.saveTextFile(decision.filename!, decision.content!);
@@ -4641,6 +4709,13 @@ Output your decision as JSON:
             sourceType: 'reflection',
           ));
           
+          // 更新推理链
+          if (mounted) {
+            setState(() {
+              _reasoningSteps.add('🤔 深度反思');
+            });
+          }
+          
           // Reflect always continues to next action
           // (Agent will decide what to do based on reflection)
           steps++;
@@ -4651,11 +4726,21 @@ Output your decision as JSON:
           final hypothesesList = decision.hypotheses ?? ['默认方案'];
           final selected = decision.selectedHypothesis ?? hypothesesList.first;
           
-          setState(() => _loadingStatus = '💡 假设: ${selected.length > 15 ? selected.substring(0, 15) + "..." : selected}');
+          setState(() {
+            _loadingStatus = '💡 假设: ${selected.length > 15 ? selected.substring(0, 15) + "..." : selected}';
+            _currentReasoning = '生成假设方案...';
+          });
           debugPrint('Agent hypothesizing: ${decision.hypotheses}');
           
           // Artificial delay
           await Future.delayed(const Duration(milliseconds: 1200));
+          
+          // 更新推理链
+          if (mounted) {
+            setState(() {
+              _reasoningSteps.add('💡 假设分析: 生成 ${hypothesesList.length} 个方案');
+            });
+          }
           
           // Record hypotheses in action history
           sessionDecisions.last = AgentDecision(
@@ -4787,6 +4872,13 @@ Output your decision as JSON:
         else if (decision.type == AgentActionType.answer) {
           // Action: Answer
           
+          // 更新推理链
+          if (mounted) {
+            setState(() {
+              _currentReasoning = '准备生成最终回答...';
+            });
+          }
+          
           // 🧠 SMART FEEDBACK: Instead of forcing, provide feedback and let Agent decide
           final isSimpleGreeting = content.length < 10 && 
             (content.contains('你好') || content.contains('hi') || content.contains('hello') ||
@@ -4895,7 +4987,11 @@ Output your decision as JSON:
           }
           
           // Agent decided to answer - execute it
-          setState(() => _loadingStatus = '正在撰写回复...');
+          setState(() {
+            _loadingStatus = '正在撰写回复...';
+            _reasoningSteps.add('✅ 生成最终回答');
+            _currentReasoning = '正在撰写回复...';
+          });
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           
           // Clean up plan state after answer
