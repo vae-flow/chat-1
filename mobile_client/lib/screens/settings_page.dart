@@ -141,7 +141,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       
       _exaBaseCtrl.text = prefs.getString('exa_base') ?? 'https://api.exa.ai';
       _exaKeyCtrl.text = prefs.getString('exa_key') ?? '';
-      _youBaseCtrl.text = prefs.getString('you_base') ?? 'https://ydc-index.io/v1';
+      _youBaseCtrl.text = prefs.getString('you_base') ?? 'https://api.ydc-index.io';
       _youKeyCtrl.text = prefs.getString('you_key') ?? '';
       _braveBaseCtrl.text = prefs.getString('brave_base') ?? 'https://api.search.brave.com';
       _braveKeyCtrl.text = prefs.getString('brave_key') ?? '';
@@ -230,7 +230,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     }
     setState(() => _loading = true);
     try {
-      final uri = Uri.parse('${baseCtrl.text.replaceAll(RegExp(r"/\$"), "")}/models');
+      final uri = Uri.parse('${baseCtrl.text.replaceAll(RegExp(r"/+$"), "")}/models');
       final resp = await http.get(uri, headers: {
         'Authorization': 'Bearer ${keyCtrl.text}',
       });

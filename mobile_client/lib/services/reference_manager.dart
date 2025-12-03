@@ -47,7 +47,7 @@ class ReferenceManager {
     } catch (e) {
       debugPrint('Search error ($provider): $e');
       // Re-throw to let the UI handle it or show error
-      throw e; 
+      rethrow; 
     }
   }
 

@@ -3171,6 +3171,8 @@ $userText
                 }
               }
               // Continue loop to re-evaluate with new info
+              steps++;
+              continue;
             } else {
               // Search returned nothing - let planner decide next action (may rewrite query)
               debugPrint('Search returned no results. Continuing to let planner rewrite query.');
@@ -3202,6 +3204,8 @@ $userText
                 break;
               }
               // Otherwise continue loop - planner will see empty result in action history
+              steps++;
+              continue;
             }
           } catch (searchError) {
             // Search failed - record in action history for planner visibility
