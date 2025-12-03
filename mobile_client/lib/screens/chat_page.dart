@@ -1925,26 +1925,50 @@ $refsContext
     // Super simple prompt for intent extraction
     const systemPrompt = '''You are an intent parser. Given text that describes an action, output ONLY a JSON object.
 
-Available types: search, draw, save_file, system_control, reflect, answer, search_knowledge, clarify
+Available types: search, read_url, draw, vision, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note, reflect, hypothesize, clarify, answer
 
 Examples:
 Input: "我觉得需要去网上查一下最新价格"
 Output: {"type":"search","query":"最新价格","continue":true}
 
+Input: "让我仔细看看这个网页的内容"
+Output: {"type":"read_url","content":"https://example.com","continue":true}
+
 Input: "帮用户画一张日落的图"
 Output: {"type":"draw","content":"beautiful sunset, warm colors","continue":false}
+
+Input: "分析一下这张图片里有什么"
+Output: {"type":"vision","content":"请详细描述图片内容","continue":true}
+
+Input: "把这段代码保存下来"
+Output: {"type":"save_file","filename":"code.txt","content":"代码内容","continue":false}
 
 Input: "回到主屏幕"
 Output: {"type":"system_control","content":"home","continue":false}
 
+Input: "在知识库里搜索关于Python的内容"
+Output: {"type":"search_knowledge","content":"Python","continue":true}
+
+Input: "读取知识块chunk_001的内容"
+Output: {"type":"read_knowledge","content":"chunk_001","continue":true}
+
+Input: "删除这个知识文件"
+Output: {"type":"delete_knowledge","content":"file_id","continue":false}
+
+Input: "记下来这个重要信息"
+Output: {"type":"take_note","content":"重要信息内容","continue":true}
+
 Input: "需要仔细想想这个问题"
 Output: {"type":"reflect","content":"分析问题的多个角度","continue":true}
 
+Input: "想想有哪些可能的方案"
+Output: {"type":"hypothesize","hypotheses":["方案1","方案2"],"selectedHypothesis":"方案1","continue":true}
+
+Input: "需要问用户更多信息"
+Output: {"type":"clarify","content":"请问您具体指的是什么？","continue":false}
+
 Input: "直接告诉用户答案就行"
 Output: {"type":"answer","content":"","continue":false}
-
-Input: "把这段代码保存下来"
-Output: {"type":"save_file","filename":"code.txt","continue":false}
 
 ONLY output JSON. No explanation.''';
 
@@ -2724,6 +2748,87 @@ $userText
             type: AgentActionType.search_knowledge,
             content: keywords,
             reason: '[AUTO-INFERRED] Detected knowledge base search intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== READ URL INTENT ======
+        final urlMatch = RegExp(r'https?://[^\s<>"]+').firstMatch(content);
+        if (urlMatch != null && (lowerContent.contains('读') || lowerContent.contains('看看') || 
+            lowerContent.contains('打开') || lowerContent.contains('访问') ||
+            lowerContent.contains('read') || lowerContent.contains('open') || lowerContent.contains('fetch'))) {
+          final url = urlMatch.group(0)!;
+          debugPrint('🌐 Inferred READ_URL: $url');
+          return AgentDecision(
+            type: AgentActionType.read_url,
+            content: url,
+            reason: '[AUTO-INFERRED] Detected URL reading intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== VISION INTENT ======
+        if (lowerContent.contains('看图') || lowerContent.contains('分析图') || 
+            lowerContent.contains('图片里') || lowerContent.contains('图中') ||
+            lowerContent.contains('analyze image') || lowerContent.contains('看看图')) {
+          debugPrint('👁️ Inferred VISION');
+          return AgentDecision(
+            type: AgentActionType.vision,
+            content: content,
+            reason: '[AUTO-INFERRED] Detected image analysis intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== READ KNOWLEDGE INTENT ======
+        final chunkIdMatch = RegExp(r'(chunk_\w+|读取\s*[\w_]+)').firstMatch(content);
+        if (chunkIdMatch != null || lowerContent.contains('读取知识') || lowerContent.contains('获取块')) {
+          final chunkId = chunkIdMatch?.group(0)?.replaceAll('读取', '').trim() ?? '';
+          debugPrint('📖 Inferred READ_KNOWLEDGE: $chunkId');
+          return AgentDecision(
+            type: AgentActionType.read_knowledge,
+            content: chunkId.isNotEmpty ? chunkId : content,
+            reason: '[AUTO-INFERRED] Detected knowledge reading intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== DELETE KNOWLEDGE INTENT ======
+        if (lowerContent.contains('删除知识') || lowerContent.contains('移除') ||
+            lowerContent.contains('delete knowledge') || lowerContent.contains('remove file')) {
+          final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|doc)').firstMatch(content);
+          debugPrint('🗑️ Inferred DELETE_KNOWLEDGE');
+          return AgentDecision(
+            type: AgentActionType.delete_knowledge,
+            content: idMatch?.group(0) ?? content,
+            reason: '[AUTO-INFERRED] Detected knowledge deletion intent.',
+            continueAfter: false,
+          );
+        }
+        
+        // ====== TAKE NOTE INTENT ======
+        if (lowerContent.contains('记下') || lowerContent.contains('记录') || 
+            lowerContent.contains('note') || lowerContent.contains('记住')) {
+          debugPrint('📝 Inferred TAKE_NOTE');
+          return AgentDecision(
+            type: AgentActionType.take_note,
+            content: content,
+            reason: '[AUTO-INFERRED] Detected note-taking intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== HYPOTHESIZE INTENT ======
+        if (lowerContent.contains('假设') || lowerContent.contains('可能的方案') || 
+            lowerContent.contains('几种方法') || lowerContent.contains('hypothes') ||
+            lowerContent.contains('alternatives') || lowerContent.contains('options')) {
+          debugPrint('💡 Inferred HYPOTHESIZE');
+          return AgentDecision(
+            type: AgentActionType.hypothesize,
+            content: content,
+            hypotheses: ['方案1', '方案2'], // Placeholder
+            selectedHypothesis: '方案1',
+            reason: '[AUTO-INFERRED] Detected hypothesis generation intent.',
             continueAfter: true,
           );
         }
