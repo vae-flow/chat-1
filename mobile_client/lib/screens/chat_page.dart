@@ -2632,30 +2632,68 @@ $userText
       // Build messages array with REAL multi-turn conversation
       // This is CRITICAL: the model needs to see its previous decisions as assistant messages
       // 
-      // Message flow:
-      // 1. System prompt (defines agent behavior)
-      // 2. Initial user context (user question + observations so far)
-      // 3. For each previous decision:
-      //    - Assistant message (the decision JSON it made)
-      //    - User message (the result from executing that decision)
-      // 4. Final prompt asking for next decision
+      // CUMULATIVE LEARNING: Each step must include ALL necessary context:
+      // 1. System prompt (agent behavior + three-pass decision framework)
+      // 2. Full user context (profile, knowledge, chat history, time, etc.)
+      // 3. ALL previous decisions with their results (cumulative chain)
+      // 4. Current observations (accumulated from all previous actions)
+      // 5. Prompt for next decision
+      //
+      // The model gets SMARTER with each step because it sees:
+      // - What it tried before
+      // - What worked/failed
+      // - All accumulated information
+      // - The complete context to make better decisions
       //
       final List<Map<String, dynamic>> messages = [
         {'role': 'system', 'content': systemPrompt},
       ];
       
-      // If this is NOT the first step, we need to show the conversation history
-      if (previousDecisions.isNotEmpty) {
-        // Add initial context as first user message
-        messages.add({'role': 'user', 'content': '''<user_input>
+      // ALWAYS include full context - this is the "memory" that makes the agent smarter
+      // Build comprehensive context that includes EVERYTHING the model needs
+      final fullContextPrompt = '''
+<current_time>
+$timeString
+</current_time>
+
+<user_profile>
+$memoryContent
+</user_profile>
+${historicalSummary.isNotEmpty ? '''
+<historical_activity>
+$historicalSummary
+</historical_activity>
+''' : ''}
+<knowledge_overview>
+$knowledgeOverview
+</knowledge_overview>
+
+<chat_history>
+$contextBuffer
+</chat_history>
+
+<user_input>
 $userText
 </user_input>
+''';
 
-<initial_context>
-This is step ${previousDecisions.length + 1}. Review your previous actions and their results below, then decide your next move.
-</initial_context>'''});
+      if (previousDecisions.isNotEmpty) {
+        // ===== CUMULATIVE MULTI-STEP MODE =====
+        // Each step builds on all previous knowledge
+        
+        // First message: Complete context + step indicator
+        messages.add({'role': 'user', 'content': '''$fullContextPrompt
+
+═══════════════════════════════════════════════════════════════
+📊 DECISION CHAIN STATUS: Step ${previousDecisions.length + 1}
+═══════════════════════════════════════════════════════════════
+You have made ${previousDecisions.length} decision(s) so far. 
+Review the complete chain below to understand what you've learned.
+Each step adds to your knowledge - USE IT to make SMARTER decisions.
+'''});
         
         // Add each decision-result pair as assistant-user turn
+        // This creates the "learning chain" - model sees its own reasoning evolve
         for (int i = 0; i < previousDecisions.length; i++) {
           final d = previousDecisions[i];
           
@@ -2665,16 +2703,16 @@ This is step ${previousDecisions.length + 1}. Review your previous actions and t
             'query': d.query,
             'content': d.content,
             'filename': d.filename,
-            'reason': d.reason?.replaceAll(RegExp(r'\[RESULT:[^\]]+\]'), '').trim(), // Remove result from reason
+            'reason': d.reason?.replaceAll(RegExp(r'\[RESULT:[^\]]+\]'), '').trim(),
             'confidence': d.confidence,
             'continue': d.continueAfter,
           });
           
-          // Add as assistant message
+          // Add as assistant message (model's own past decision)
           messages.add({'role': 'assistant', 'content': decisionJson});
           
-          // Extract and add result as user message
-          String resultInfo = 'Action executed.';
+          // Extract result from the decision
+          String resultInfo = 'Action completed.';
           if (d.reason != null && d.reason!.contains('[RESULT:')) {
             final resultMatch = RegExp(r'\[RESULT:([^\]]+)\]').firstMatch(d.reason!);
             if (resultMatch != null) {
@@ -2682,23 +2720,66 @@ This is step ${previousDecisions.length + 1}. Review your previous actions and t
             }
           }
           
-          // Add result message
-          messages.add({
-            'role': 'user', 
-            'content': '''[STEP ${i + 1} RESULT]
+          // Build result message with learning cues
+          final isLastStep = i == previousDecisions.length - 1;
+          String resultMessage = '''
+═══ STEP ${i + 1} EXECUTION RESULT ═══
 $resultInfo
+''';
 
-${i == previousDecisions.length - 1 ? '''
-<current_observations>
+          if (isLastStep) {
+            // Final step gets full current observations and decision prompt
+            resultMessage += '''
+
+═══════════════════════════════════════════════════════════════
+📚 ACCUMULATED OBSERVATIONS (from all ${previousDecisions.length} actions)
+═══════════════════════════════════════════════════════════════
 ${refsBuffer.toString()}
-</current_observations>
 
-Based on all the information gathered, decide your next action. If you have enough info to answer the user's question, use type "answer".''' : 'Continue to next step.'}'''
-          });
+═══════════════════════════════════════════════════════════════
+🎯 DECISION REQUIRED: Step ${previousDecisions.length + 1}
+═══════════════════════════════════════════════════════════════
+Review everything above. Apply THREE-PASS thinking:
+- P1: What action naturally follows from gathered info?
+- P2: Is there a better/more efficient approach?
+- P3: Does this action truly serve the user's goal?
+
+If you have SUFFICIENT info to answer → type: "answer"
+If you need MORE info → use appropriate tool
+If previous approach FAILED → try a DIFFERENT strategy
+
+Output your decision as JSON:
+''';
+          } else {
+            resultMessage += '\n[Proceeding to next step...]';
+          }
+          
+          messages.add({'role': 'user', 'content': resultMessage});
         }
       } else {
-        // First step - just the initial user prompt with full context
-        messages.add({'role': 'user', 'content': userPrompt});
+        // ===== FIRST STEP MODE =====
+        // Complete context + current observations (if any from image upload etc.)
+        messages.add({'role': 'user', 'content': '''$fullContextPrompt
+
+<current_observations>
+${refsBuffer.toString().isEmpty ? 'None yet - this is the FIRST planning step.' : refsBuffer.toString()}
+</current_observations>
+
+<action_history>
+${prevActionsBuffer.toString()}
+</action_history>
+
+═══════════════════════════════════════════════════════════════
+🎯 FIRST DECISION REQUIRED
+═══════════════════════════════════════════════════════════════
+This is Step 1. Analyze the user's request and context above.
+Apply THREE-PASS thinking:
+- P1: What is the most direct action for this request?
+- P2: Is there a better tool or more precise query?
+- P3: Will this action advance toward the user's goal?
+
+Output your decision as JSON:
+'''});
       }
       
       final body = json.encode({
