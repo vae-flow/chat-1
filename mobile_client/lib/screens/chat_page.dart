@@ -113,9 +113,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   late AnimationController _pulseController;
   late AnimationController _floatController;
   late AnimationController _loadingDotsController;
+  late AnimationController _backgroundController; // 背景动效
+  late AnimationController _sendButtonController; // 发送按钮特效
   late Animation<double> _pulseAnimation;
   late Animation<double> _floatAnimation;
+  late Animation<double> _backgroundAnimation;
   final ScrollController _scrollCtrl = ScrollController();
+  
+  // 推理链/Plan 显示
+  bool _showReasoningPanel = false;
+  String _currentReasoning = ''; // 当前推理过程
+  List<String> _reasoningSteps = []; // 推理步骤列表
   final ImagePicker _picker = ImagePicker();
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
   final ReferenceManager _refManager = ReferenceManager();
@@ -221,6 +229,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       duration: const Duration(milliseconds: 1500),
       vsync: this,
     )..repeat();
+    
+    // 背景动效控制器 - 渐变流动
+    _backgroundController = AnimationController(
+      duration: const Duration(seconds: 8),
+      vsync: this,
+    )..repeat();
+    _backgroundAnimation = Tween<double>(begin: 0, end: 2 * math.pi).animate(
+      CurvedAnimation(parent: _backgroundController, curve: Curves.linear),
+    );
+    
+    // 发送按钮特效控制器
+    _sendButtonController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
   }
   
   @override
@@ -228,6 +251,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _pulseController.dispose();
     _floatController.dispose();
     _loadingDotsController.dispose();
+    _backgroundController.dispose();
+    _sendButtonController.dispose();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -3367,8 +3392,16 @@ Output your decision as JSON:
     // Knowledge search state: track pagination for batch processing
     int knowledgeSearchBatchIndex = 0;
     String lastKnowledgeSearchKeywords = '';
+    
+    // 初始化推理链显示
+    setState(() {
+      _showReasoningPanel = true;
+      _reasoningSteps = ['接收用户请求...'];
+      _currentReasoning = '正在分析意图...';
+    });
 
     // 1. Handle Image Input (Analyze & Prepare)
+    if (_selectedImage != null) {
     if (_selectedImage != null) {
       // Persist the picked image
       currentSessionImagePath = await savePickedImage(_selectedImage!);
@@ -3499,7 +3532,13 @@ Output your decision as JSON:
           final step = _currentPlan!.steps[planStepIndex];
           isFromPlan = true;
           
-          setState(() => _loadingStatus = '执行计划 [${planStepIndex + 1}/${_currentPlan!.steps.length}]: ${step.action.name}...');
+          setState(() {
+            _loadingStatus = '执行计划 [${planStepIndex + 1}/${_currentPlan!.steps.length}]: ${step.action.name}...';
+            _currentReasoning = step.purpose;
+            if (!_reasoningSteps.contains('执行: ${step.action.name}')) {
+              _reasoningSteps.add('执行: ${step.action.name}');
+            }
+          });
           debugPrint('📋 Executing plan step ${planStepIndex + 1}: ${step.action.name}');
           
           // Check dependencies - verify that dependent steps succeeded
@@ -3618,6 +3657,11 @@ Output your decision as JSON:
               if (uniqueNewRefs.isNotEmpty) {
                 stepSucceeded = true;
                 stepResult = 'Found ${uniqueNewRefs.length} results';
+                
+                // 更新推理链
+                setState(() {
+                  _reasoningSteps.add('✅ 搜索 "${decision.query}" 返回 ${uniqueNewRefs.length} 条结果');
+                });
                 
                 // Check if synthesis is enabled
                 final prefs = await SharedPreferences.getInstance();
@@ -4945,6 +4989,16 @@ Output your decision as JSON:
         setState(() {
           _sending = false;
           _loadingStatus = '';
+          // 延迟隐藏推理链面板
+          Future.delayed(const Duration(seconds: 2), () {
+            if (mounted && !_sending) {
+              setState(() {
+                _showReasoningPanel = false;
+                _reasoningSteps = [];
+                _currentReasoning = '';
+              });
+            }
+          });
         });
       }
     }
@@ -5075,60 +5129,378 @@ Output your decision as JSON:
     return Scaffold(
       extendBodyBehindAppBar: true,
       backgroundColor: Colors.transparent,
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: AppColors.backgroundGradient,
-        ),
-        child: Column(
-          children: [
-            // 华丽渐变 AppBar
-            _buildGlassAppBar(context, totalChars, isMemoryFull),
-            
-            // 记忆状态栏 - 玻璃效果
-            if (totalChars > 0)
-              _buildMemoryStatusBar(totalChars, isMemoryFull),
-            
-            // 消息列表 - 带动画效果
-            Expanded(
-              child: _messages.isEmpty
-                  ? _buildEmptyState()
-                  : ListView.builder(
-                      controller: _scrollCtrl,
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
-                      itemCount: _messages.length,
-                      itemBuilder: (context, index) {
-                        // 为最新的消息添加弹入动画
-                        final isRecent = index >= _messages.length - 2;
-                        if (isRecent) {
-                          return TweenAnimationBuilder<double>(
-                            duration: const Duration(milliseconds: 400),
-                            curve: Curves.easeOutBack,
-                            tween: Tween(begin: 0.0, end: 1.0),
-                            builder: (context, value, child) {
-                              return Transform.translate(
-                                offset: Offset(0, 20 * (1 - value)),
-                                child: Opacity(
-                                  opacity: value.clamp(0.0, 1.0),
-                                  child: Transform.scale(
-                                    scale: 0.95 + 0.05 * value,
-                                    child: child,
-                                  ),
-                                ),
-                              );
-                            },
-                            child: _buildMessageItem(_messages[index]),
-                          );
-                        }
-                        return _buildMessageItem(_messages[index]);
-                      },
-                    ),
-            ),
+      body: Stack(
+        children: [
+          // 动态背景
+          _buildAnimatedBackground(),
           
-            // 华丽输入区域
-            _buildFancyInputArea(context),
+          // 主内容
+          Column(
+            children: [
+              // 华丽渐变 AppBar
+              _buildGlassAppBar(context, totalChars, isMemoryFull),
+              
+              // 记忆状态栏 - 玻璃效果
+              if (totalChars > 0)
+                _buildMemoryStatusBar(totalChars, isMemoryFull),
+              
+              // 推理链/Plan 显示面板
+              if (_showReasoningPanel && _sending)
+                _buildReasoningPanel(),
+              
+              // 消息列表 - 带动画效果
+              Expanded(
+                child: _messages.isEmpty
+                    ? _buildEmptyState()
+                    : ListView.builder(
+                        controller: _scrollCtrl,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                        itemCount: _messages.length,
+                        itemBuilder: (context, index) {
+                          // 为最新的消息添加弹入动画
+                          final isRecent = index >= _messages.length - 2;
+                          if (isRecent) {
+                            return TweenAnimationBuilder<double>(
+                              duration: const Duration(milliseconds: 400),
+                              curve: Curves.easeOutBack,
+                              tween: Tween(begin: 0.0, end: 1.0),
+                              builder: (context, value, child) {
+                                return Transform.translate(
+                                  offset: Offset(0, 20 * (1 - value)),
+                                  child: Opacity(
+                                    opacity: value.clamp(0.0, 1.0),
+                                    child: Transform.scale(
+                                      scale: 0.95 + 0.05 * value,
+                                      child: child,
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: _buildMessageItem(_messages[index]),
+                            );
+                          }
+                          return _buildMessageItem(_messages[index]);
+                        },
+                      ),
+              ),
+            
+              // 华丽输入区域
+              _buildFancyInputArea(context),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+  
+  /// 动态渐变背景
+  Widget _buildAnimatedBackground() {
+    return AnimatedBuilder(
+      animation: _backgroundAnimation,
+      builder: (context, child) {
+        final value = _backgroundAnimation.value;
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(
+                math.cos(value) * 0.5,
+                math.sin(value) * 0.5,
+              ),
+              end: Alignment(
+                math.cos(value + math.pi) * 0.5,
+                math.sin(value + math.pi) * 0.5,
+              ),
+              colors: [
+                AppColors.bgStart,
+                Color.lerp(AppColors.bgEnd, AppColors.primaryStart.withOpacity(0.05), 
+                    (math.sin(value) + 1) / 2)!,
+                AppColors.bgEnd,
+              ],
+              stops: const [0.0, 0.5, 1.0],
+            ),
+          ),
+          child: CustomPaint(
+            painter: _ParticlePainter(value),
+            size: Size.infinite,
+          ),
+        );
+      },
+    );
+  }
+  
+  /// 推理链/Plan 显示面板
+  Widget _buildReasoningPanel() {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.95),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.primaryStart.withOpacity(0.2)),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primaryStart.withOpacity(0.1),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 标题栏
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  gradient: AppColors.primaryGradient,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.psychology_rounded, size: 16, color: Colors.white),
+              ),
+              const SizedBox(width: 10),
+              const Text(
+                'Agent 推理过程',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF333333),
+                ),
+              ),
+              const Spacer(),
+              if (_currentPlan != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryStart.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    'Step ${_currentPlanStep + 1}/${_currentPlan!.steps.length}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primaryStart,
+                    ),
+                  ),
+                ),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () => setState(() => _showReasoningPanel = false),
+                child: Icon(Icons.close_rounded, size: 18, color: Colors.grey[400]),
+              ),
+            ],
+          ),
+          
+          // Plan 信息
+          if (_currentPlan != null) ...[
+            const SizedBox(height: 12),
+            _buildPlanInfo(_currentPlan!),
+          ],
+          
+          // 推理步骤
+          if (_reasoningSteps.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 120),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: _reasoningSteps.asMap().entries.map((entry) {
+                    final index = entry.key;
+                    final step = entry.value;
+                    final isActive = index == _reasoningSteps.length - 1;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            width: 20,
+                            height: 20,
+                            decoration: BoxDecoration(
+                              color: isActive 
+                                  ? AppColors.primaryStart 
+                                  : Colors.green.withOpacity(0.8),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Center(
+                              child: isActive
+                                  ? SizedBox(
+                                      width: 10,
+                                      height: 10,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        valueColor: const AlwaysStoppedAnimation(Colors.white),
+                                      ),
+                                    )
+                                  : const Icon(Icons.check, size: 12, color: Colors.white),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              step,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: isActive ? AppColors.primaryStart : Colors.grey[600],
+                                fontWeight: isActive ? FontWeight.w500 : FontWeight.normal,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+          ],
+          
+          // 当前推理
+          if (_currentReasoning.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.primaryStart.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildBouncingDots(),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _currentReasoning,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[700],
+                        fontStyle: FontStyle.italic,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+  
+  /// Plan 信息展示
+  Widget _buildPlanInfo(AgentPlan plan) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppColors.primaryStart.withOpacity(0.08),
+            AppColors.primaryEnd.withOpacity(0.04),
           ],
         ),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.primaryStart.withOpacity(0.1)),
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 三轮思考
+          _buildThinkingRow('🎯 意图', plan.userIntent),
+          const SizedBox(height: 6),
+          _buildThinkingRow('🔧 能力', plan.capabilityReview),
+          const SizedBox(height: 6),
+          _buildThinkingRow('✨ 预期', plan.expectedOutcome),
+          const SizedBox(height: 10),
+          
+          // 执行步骤
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: plan.steps.asMap().entries.map((entry) {
+              final index = entry.key;
+              final step = entry.value;
+              final isCompleted = index < _currentPlanStep;
+              final isActive = index == _currentPlanStep;
+              
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: isCompleted 
+                      ? Colors.green.withOpacity(0.15)
+                      : isActive 
+                          ? AppColors.primaryStart.withOpacity(0.2)
+                          : Colors.grey.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: isCompleted 
+                        ? Colors.green.withOpacity(0.3)
+                        : isActive 
+                            ? AppColors.primaryStart.withOpacity(0.4)
+                            : Colors.grey.withOpacity(0.2),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (isCompleted)
+                      const Icon(Icons.check_circle, size: 14, color: Colors.green)
+                    else if (isActive)
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(AppColors.primaryStart),
+                        ),
+                      )
+                    else
+                      Icon(Icons.circle_outlined, size: 14, color: Colors.grey[400]),
+                    const SizedBox(width: 6),
+                    Text(
+                      '${index + 1}. ${step.action.name}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                        color: isCompleted 
+                            ? Colors.green[700]
+                            : isActive 
+                                ? AppColors.primaryStart
+                                : Colors.grey[600],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildThinkingRow(String label, String content) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            content,
+            style: TextStyle(fontSize: 11, color: Colors.grey[700]),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
     );
   }
 
@@ -5504,60 +5876,105 @@ Output your decision as JSON:
                         ),
                       ),
                       const SizedBox(width: 8),
-                      // 发送按钮 - 带脉冲动画
-                      AnimatedBuilder(
-                        animation: _pulseController,
-                        builder: (context, child) {
-                          final canSend = !_sending && (_inputCtrl.text.trim().isNotEmpty || _selectedImage != null);
-                          return Transform.scale(
-                            scale: canSend ? 1.0 + (_pulseAnimation.value - 1.0) * 0.3 : 1.0,
-                            child: Container(
-                              decoration: BoxDecoration(
-                                gradient: _sending ? null : AppColors.primaryGradient,
-                                color: _sending ? Colors.grey[300] : null,
-                                shape: BoxShape.circle,
-                                boxShadow: _sending ? null : [
-                                  BoxShadow(
-                                    color: AppColors.primaryStart.withOpacity(0.3 + _pulseAnimation.value * 0.2),
-                                    blurRadius: 12 + _pulseAnimation.value * 8,
-                                    offset: const Offset(0, 4),
-                                    spreadRadius: _pulseAnimation.value * 2,
+                      // 发送按钮 - 带脉冲动画和点击波纹
+                      GestureDetector(
+                        onTapDown: (_) {
+                          if (!_sending) {
+                            _sendButtonController.forward();
+                          }
+                        },
+                        onTapUp: (_) {
+                          _sendButtonController.reverse();
+                        },
+                        onTapCancel: () {
+                          _sendButtonController.reverse();
+                        },
+                        child: AnimatedBuilder(
+                          animation: Listenable.merge([_pulseController, _sendButtonController]),
+                          builder: (context, child) {
+                            final canSend = !_sending && (_inputCtrl.text.trim().isNotEmpty || _selectedImage != null);
+                            final pressScale = 1.0 - _sendButtonController.value * 0.1;
+                            return Transform.scale(
+                              scale: (canSend ? 1.0 + (_pulseAnimation.value - 1.0) * 0.3 : 1.0) * pressScale,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  // 外圈光环动效
+                                  if (canSend)
+                                    ...List.generate(2, (i) {
+                                      final delay = i * 0.5;
+                                      final ringValue = (_pulseController.value + delay) % 1.0;
+                                      return Container(
+                                        width: 48 + ringValue * 20,
+                                        height: 48 + ringValue * 20,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: AppColors.primaryStart.withOpacity((1 - ringValue) * 0.3),
+                                            width: 2,
+                                          ),
+                                        ),
+                                      );
+                                    }),
+                                  // 主按钮
+                                  Container(
+                                    decoration: BoxDecoration(
+                                      gradient: _sending ? null : AppColors.primaryGradient,
+                                      color: _sending ? Colors.grey[300] : null,
+                                      shape: BoxShape.circle,
+                                      boxShadow: _sending ? null : [
+                                        BoxShadow(
+                                          color: AppColors.primaryStart.withOpacity(0.3 + _pulseAnimation.value * 0.2),
+                                          blurRadius: 12 + _pulseAnimation.value * 8,
+                                          offset: const Offset(0, 4),
+                                          spreadRadius: _pulseAnimation.value * 2,
+                                        ),
+                                      ],
+                                    ),
+                                    child: Material(
+                                      color: Colors.transparent,
+                                      child: InkWell(
+                                        onTap: _sending ? null : _send,
+                                        borderRadius: BorderRadius.circular(24),
+                                        splashColor: Colors.white.withOpacity(0.3),
+                                        highlightColor: Colors.white.withOpacity(0.1),
+                                        child: Container(
+                                          width: 48,
+                                          height: 48,
+                                          alignment: Alignment.center,
+                                          child: AnimatedSwitcher(
+                                            duration: const Duration(milliseconds: 200),
+                                            transitionBuilder: (child, animation) {
+                                              return RotationTransition(
+                                                turns: Tween(begin: 0.5, end: 1.0).animate(animation),
+                                                child: ScaleTransition(scale: animation, child: child),
+                                              );
+                                            },
+                                            child: _sending
+                                                ? SizedBox(
+                                                    width: 20,
+                                                    height: 20,
+                                                    child: CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      valueColor: AlwaysStoppedAnimation(Colors.grey[500]),
+                                                    ),
+                                                  )
+                                                : Icon(
+                                                    Icons.arrow_upward_rounded,
+                                                    key: const ValueKey('send'),
+                                                    color: Colors.white,
+                                                    size: 24,
+                                                  ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
-                              child: Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  onTap: _sending ? null : _send,
-                                  borderRadius: BorderRadius.circular(24),
-                                  child: Container(
-                                    width: 48,
-                                    height: 48,
-                                    alignment: Alignment.center,
-                                    child: AnimatedSwitcher(
-                                      duration: const Duration(milliseconds: 200),
-                                      child: _sending
-                                          ? SizedBox(
-                                              width: 20,
-                                              height: 20,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                valueColor: AlwaysStoppedAnimation(Colors.grey[500]),
-                                              ),
-                                            )
-                                          : Icon(
-                                              Icons.arrow_upward_rounded,
-                                              key: const ValueKey('send'),
-                                              color: Colors.white,
-                                              size: 24,
-                                            ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          );
-                        },
+                            );
+                          },
+                        ),
                       ),
                     ],
                   ),
@@ -5685,6 +6102,14 @@ Output your decision as JSON:
                     });
                   },
                   tooltip: '清空对话',
+                ),
+                // 推理链显示切换按钮
+                _buildAppBarButton(
+                  icon: _showReasoningPanel ? Icons.psychology : Icons.psychology_outlined,
+                  onPressed: () {
+                    setState(() => _showReasoningPanel = !_showReasoningPanel);
+                  },
+                  tooltip: '显示/隐藏推理过程',
                 ),
                 _buildPersonaSwitcher(context),
                 _buildAppBarButton(
@@ -6339,5 +6764,58 @@ Output your decision as JSON:
         );
       },
     );
+  }
+}
+
+/// 粒子背景画笔 - 优雅的流动粒子效果
+class _ParticlePainter extends CustomPainter {
+  final double animationValue;
+  
+  _ParticlePainter(this.animationValue);
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..style = PaintingStyle.fill;
+    
+    // 绘制多个流动的粒子/光点
+    for (int i = 0; i < 15; i++) {
+      final seed = i * 137.5; // 黄金角度间隔
+      final x = (math.sin(animationValue + seed) * 0.4 + 0.5) * size.width;
+      final y = (math.cos(animationValue * 0.7 + seed) * 0.4 + 0.5) * size.height;
+      final radius = 2 + math.sin(animationValue * 2 + seed) * 1.5;
+      final opacity = 0.1 + math.sin(animationValue + seed) * 0.05;
+      
+      paint.color = AppColors.primaryStart.withOpacity(opacity.clamp(0.02, 0.15));
+      canvas.drawCircle(Offset(x, y), radius, paint);
+      
+      // 光晕效果
+      paint.color = AppColors.primaryStart.withOpacity(opacity * 0.3);
+      canvas.drawCircle(Offset(x, y), radius * 2.5, paint);
+    }
+    
+    // 绘制几条优雅的流动曲线
+    for (int i = 0; i < 3; i++) {
+      final path = Path();
+      final startY = size.height * (0.3 + i * 0.2);
+      
+      path.moveTo(0, startY);
+      for (double x = 0; x <= size.width; x += 10) {
+        final wave = math.sin(x * 0.01 + animationValue + i) * 30;
+        path.lineTo(x, startY + wave);
+      }
+      
+      paint
+        ..color = AppColors.primaryStart.withOpacity(0.03)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+      
+      canvas.drawPath(path, paint);
+    }
+  }
+  
+  @override
+  bool shouldRepaint(covariant _ParticlePainter oldDelegate) {
+    return oldDelegate.animationValue != animationValue;
   }
 }
