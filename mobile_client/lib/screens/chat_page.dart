@@ -1901,6 +1901,95 @@ $refsContext
     }
   }
 
+  /// Use Worker API to semantically parse natural language into a structured AgentDecision
+  /// This is smarter than regex because it understands meaning, not just keywords
+  Future<AgentDecision?> _parseIntentWithWorker(String rawResponse) async {
+    // Get Worker API config
+    final prefs = await SharedPreferences.getInstance();
+    String workerBase = prefs.getString('worker_base') ?? '';
+    String workerKeys = prefs.getString('worker_keys') ?? '';
+    String workerModel = prefs.getString('worker_model') ?? 'gpt-3.5-turbo';
+    
+    // Fallback to chat API if worker not configured
+    if (workerBase.isEmpty || workerKeys.isEmpty) {
+      workerBase = _chatBase;
+      workerKeys = _chatKey;
+      workerModel = _chatModel;
+    }
+    
+    // Pick a random key if multiple
+    final keyList = workerKeys.split(',').map((k) => k.trim()).where((k) => k.isNotEmpty).toList();
+    if (keyList.isEmpty) return null;
+    final selectedKey = keyList[DateTime.now().millisecond % keyList.length];
+    
+    // Super simple prompt for intent extraction
+    const systemPrompt = '''You are an intent parser. Given text that describes an action, output ONLY a JSON object.
+
+Available types: search, draw, save_file, system_control, reflect, answer, search_knowledge, clarify
+
+Examples:
+Input: "我觉得需要去网上查一下最新价格"
+Output: {"type":"search","query":"最新价格","continue":true}
+
+Input: "帮用户画一张日落的图"
+Output: {"type":"draw","content":"beautiful sunset, warm colors","continue":false}
+
+Input: "回到主屏幕"
+Output: {"type":"system_control","content":"home","continue":false}
+
+Input: "需要仔细想想这个问题"
+Output: {"type":"reflect","content":"分析问题的多个角度","continue":true}
+
+Input: "直接告诉用户答案就行"
+Output: {"type":"answer","content":"","continue":false}
+
+Input: "把这段代码保存下来"
+Output: {"type":"save_file","filename":"code.txt","continue":false}
+
+ONLY output JSON. No explanation.''';
+
+    try {
+      final cleanBase = workerBase.replaceAll(RegExp(r'/+\$'), '');
+      final uri = Uri.parse('$cleanBase/chat/completions');
+      
+      final resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $selectedKey',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'model': workerModel,
+          'messages': [
+            {'role': 'system', 'content': systemPrompt},
+            {'role': 'user', 'content': 'Parse this: $rawResponse'}
+          ],
+          'temperature': 0,
+          'max_tokens': 150,
+        }),
+      ).timeout(const Duration(seconds: 10));
+      
+      if (resp.statusCode == 200) {
+        final data = json.decode(utf8.decode(resp.bodyBytes));
+        final workerOutput = data['choices'][0]['message']['content'] ?? '';
+        
+        // Extract JSON from worker output
+        final jsonStart = workerOutput.indexOf('{');
+        final jsonEnd = workerOutput.lastIndexOf('}');
+        if (jsonStart != -1 && jsonEnd > jsonStart) {
+          final jsonStr = workerOutput.substring(jsonStart, jsonEnd + 1);
+          final parsed = json.decode(jsonStr);
+          debugPrint('🤖 Worker parsed intent: $parsed');
+          return AgentDecision.fromJson(parsed);
+        }
+      }
+    } catch (e) {
+      debugPrint('Worker intent parse error: $e');
+    }
+    
+    return null;
+  }
+
   Future<AgentDecision> _planAgentStep(String userText, List<ReferenceItem> sessionRefs, List<AgentDecision> previousDecisions) async {
     // Use Router config for planning
     final effectiveBase = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerBase : _chatBase;
@@ -2310,328 +2399,95 @@ ${hasKnowledge ? '''
   * content: "home", "back", "recents", "notifications", "lock", "screenshot"
   * NOTE: Requires Accessibility Service. If action fails, ask user to enable it.
 
-**🧠 THINKING TOOLS (Deep Think Mode):**
-- reflect: ALWAYS AVAILABLE - Stop and critically examine your reasoning. Use when:
-  * You're about to answer but confidence < 0.8
-  * You've made 2+ searches without clear progress
-  * The problem seems complex or multi-faceted
-  * You detect potential logical flaws in your approach
-- hypothesize: ALWAYS AVAILABLE - Generate multiple solution paths before committing. Use when:
-  * The problem has multiple valid approaches
-  * Initial approach failed, need alternatives
-  * User request is ambiguous, need to explore interpretations
-- clarify: ALWAYS AVAILABLE - Ask user for more information. Use when:
-  * Critical information is missing that only user can provide
-  * User's request is ambiguous and guessing would be risky
-  * Need confirmation before taking irreversible action
-  * Observations contain unreliable sources and user verification needed
+**🧠 THINKING TOOLS:**
+- reflect: Pause and self-critique. Use when confused or stuck.
+- hypothesize: Generate 2-3 alternative approaches. Use when one path fails.
+- clarify: Ask user for missing info. Use when you can't proceed without it.
 
-**📝 OUTPUT TOOL:**
-- answer: ALWAYS AVAILABLE for final response to user.
-
-### SOURCE RELIABILITY PROTOCOL (关键!)
-Every piece of information has a reliability level. You MUST assess source quality:
-
-**Source Authority Levels:**
-- 🏛️ official: Government (.gov), Educational (.edu), Official docs → Reliability 0.9+
-- 📚 authoritative: Wikipedia, StackOverflow, arXiv, GitHub → Reliability 0.8+
-- 📰 news: Reuters, BBC, major newspapers → Reliability 0.7+
-- 💬 social: Twitter/X, Weibo, Instagram → Reliability 0.4-0.5
-- 🗣️ forum: Reddit, Zhihu, Quora, BBS → Reliability 0.4-0.6
-- ❓ unknown: Other sources → Reliability 0.5-0.6
-
-**Information Sufficiency Check (Before Answering):**
-You MUST evaluate in `info_sufficiency`:
-```json
-"info_sufficiency": {
-  "is_sufficient": true/false,
-  "missing_info": ["specific info 1", "specific info 2"],
-  "unreliable_sources": ["source that needs verification"],
-  "suggested_action": "search" | "ask_user" | "verify" | "proceed_with_caveats",
-  "clarify_question": "如果是ask_user，这里写要问用户的具体问题"
-}
-```
-
-**When to use CLARIFY:**
-1. User asks for personal preferences/choices without giving criteria
-2. Request requires private info (account numbers, passwords, personal data)
-3. All available sources are low-reliability (<0.5) and topic is important
-4. Detected contradiction between sources, need user to confirm which is correct
-5. Time-sensitive info (prices, stocks, events) where freshness is critical
-
-### DEEP THINK PROTOCOL (重要!)
-You are equipped with advanced reasoning capabilities. Use them:
-
-1. **CONFIDENCE TRACKING**: Always assess your confidence (0.0-1.0) in the current approach.
-   - confidence >= 0.8: Proceed to answer
-   - confidence 0.5-0.8: Consider one more search or reflect
-   - confidence < 0.5: Must hypothesize alternatives or reflect on approach
-
-2. **UNCERTAINTY AWARENESS**: List known gaps in your knowledge for this task.
-   - Be specific: "不确定2024年的最新价格" not just "信息可能过时"
-
-3. **MULTI-HYPOTHESIS REASONING**: For complex problems:
-   - Generate 2-3 hypotheses before acting
-   - Evaluate each hypothesis's likelihood and effort
-   - Select the best one and explain why
-
-4. **SELF-REFLECTION TRIGGERS**: Automatically reflect when:
-   - 3+ actions taken without reaching answer
-   - Search returned irrelevant results
-   - Detected contradiction in observations
-   - About to give up or say "I don't know"
-
-### TOOL CHAINING (Important!)
-You can chain tools by setting "continue": true in your output. This tells the system NOT to end after this action.
-Examples:
-- hypothesize -> search (best hypothesis) -> reflect -> answer
-- search -> reflect (check if enough) -> search again -> answer
-- reflect -> hypothesize (new approach) -> search -> answer
-- clarify -> (user responds) -> search with new info -> answer
-
-If a tool is marked UNAVAILABLE, fall back to answer and clearly state the missing capability.
+**📝 OUTPUT:**
+- answer: Final response. Use ONLY after tools or for simple greetings.
 ${hasSessionImage ? """
-⚠️ **IMAGE IN SESSION**: User uploaded an image. Check <current_observations> for the analysis.
-The vision result starts with【类型：XXX】indicating the image type. Use this to decide:
-- 【表格】but data incomplete? → vision with "请完整提取表格所有行列"
-- 【票据】but missing details? → vision with "请提取所有商品明细和金额"  
-- 【代码】and user asks to fix? → search for the error message
-- 【商品】and user asks price? → search for product info online
-- 【地图】and user asks directions? → use the extracted location info
+
+⚠️ **IMAGE UPLOADED**: Check <current_observations> for vision analysis.
 """ : ""}
 ''';
 
     // 2. Construct System Prompt with XML Tags for strict separation
     final systemPrompt = '''
-You are the "Brain" of an advanced autonomous agent. 
-Your goal is to satisfy the User's Request through iterative reasoning and tool usage.
+You are NOT a chatbot. You are an autonomous AGENT with tools.
+
+## ⚠️ OUTPUT REQUIREMENT: JSON ONLY ⚠️
+**YOU MUST OUTPUT ONLY A JSON OBJECT. NO EXPLANATIONS. NO MARKDOWN.**
+If you write anything other than JSON, THE SYSTEM CANNOT UNDERSTAND YOU.
+Your "hands" and "feet" (tools) are controlled by JSON. Natural language = paralysis.
+
+WRONG OUTPUT (system ignores this):
+"我认为需要先搜索一下关于这个话题的最新信息..."
+
+CORRECT OUTPUT (system executes this):
+{"type":"search","query":"topic name 2024","reason":"Need latest info","confidence":0.7,"continue":true}
+
+## ⚠️ CRITICAL RULE: TOOL-FIRST PRINCIPLE ⚠️
+**BEFORE using "answer", you MUST check if ANY tool can help.**
+- If you jump to "answer" without trying tools, you are WRONG.
+- The user installed this app FOR THE TOOLS. Direct answers are lazy.
 
 $toolbelt
 
-### INPUT STRUCTURE
-The user message is strictly structured. You must distinguish between:
-- <current_time>: The precise current time. Use this for relative time queries (e.g. "today", "last week").
-- <user_profile>: Deep psychological and factual profile of the user. Use this to infer intent and tailor your strategy.
-- <chat_history>: Recent conversation context.
-- <current_observations>: Information gathered from tools (search results, vision analysis) in THIS session. **If image was uploaded, look for【类型：XXX】to understand the image type.**
-  * **🌐 全局视角综合分析**: If present, this is an AI Worker's synthesis of all search results, providing:
-    - Cross-source consensus (what multiple sources agree on)
-    - Divergences (where sources disagree)
-    - Reliability assessment (overall trustworthiness)
-    - Blind spots (what information is missing)
-    - Key facts and confidence level
-  * Use this synthesis to get a quick understanding before diving into individual sources.
-- <action_history>: Actions you have already performed in THIS session.
-- <user_input>: The actual request from the user.
+## ⚠️ OUTPUT MUST BE PURE JSON ⚠️
+Do NOT write natural language. Do NOT explain. Just output a JSON object like:
+{"type":"search","query":"xxx","reason":"...","confidence":0.8,"continue":true}
 
-### PERSONA DEFINITION (CRITICAL)
-You are NOT a generic AI. You must act according to:
+If you write anything other than JSON, the system cannot understand you!
+
+## ✅ EXAMPLE OUTPUTS (copy these patterns!)
+
+**User: "今天有什么新闻"**
+→ {"type":"search","query":"今日新闻 2025年12月","reason":"用户问今天新闻，必须搜索","confidence":0.9,"continue":true}
+
+**User: "画一只猫"**
+→ {"type":"draw","content":"a cute cat, digital art style, warm colors","reason":"用户要画猫","confidence":0.95,"continue":false}
+
+**User: "帮我保存这段代码"**
+→ {"type":"save_file","filename":"code.py","content":"print('hello')","reason":"用户要保存","confidence":1.0,"continue":false}
+
+**User: "回桌面"**
+→ {"type":"system_control","content":"home","reason":"控制手机回桌面","confidence":1.0,"continue":false}
+
+**User: "锁屏"**
+→ {"type":"system_control","content":"lock","reason":"锁屏","confidence":1.0,"continue":false}
+
+**User: "截个图"**
+→ {"type":"system_control","content":"screenshot","reason":"截图","confidence":1.0,"continue":false}
+
+**User: "分析一下这个问题"**
+→ {"type":"reflect","content":"这是一个复杂问题，需要从多角度思考...","reason":"复杂问题先反思","confidence":0.6,"continue":true}
+
+**User: "你好"**
+→ {"type":"answer","content":"你好呀！有什么可以帮你的？","reason":"简单问候","confidence":1.0,"continue":false}
+
+## 🚫 FORBIDDEN (These will FAIL!)
+❌ "我认为需要搜索一下..." ← 这不是 JSON！
+❌ "让我帮你查找..." ← 这不是 JSON！
+❌ "好的，我来画一张..." ← 这不是 JSON！
+❌ 任何不以 { 开头的回复！
+
+## 📋 DECISION RULES
+1. "最新/今天/天气/新闻/股价" → type: search
+2. "画/生成图/设计图" → type: draw  
+3. "保存/导出/下载" → type: save_file
+4. "回桌面/返回/锁屏/截图/通知" → type: system_control
+5. "你好/谢谢/再见" → type: answer
+6. 其他复杂问题 → type: reflect (先思考)
+
+## 🎭 PERSONA
 <persona>
 ${_activePersona.prompt}
 </persona>
+回答时用这个人格语气，但工具调用不变。
 
-### STRATEGIC THINKING (Chain of Thought)
-Your objective is to complete the user's goal with iterative steps until done or truly blocked. Before deciding, perform a "Strategic Analysis" in the `reason` field:
-1. **Time Awareness**: Check <current_time>. If the user asks for "latest news", "weather", or "stock price", you MUST use the current date in your search query.
-2. **Intent Classification**: Is the user asking for a Fact, an Opinion, a Creative Work, or just Chatting?
-3. **Gap Analysis**: Compare <user_input> with <current_observations>. What specific information is missing?
-4. **Iteration Check**: Look at <action_history>. 
-   - If previous searches failed, CHANGE your keywords or strategy.
-   - If you have searched 2+ times and have partial info, consider if it's "good enough" to answer.
-   - **META-COGNITION ALERTS**: Check <action_history> for alerts. If you see warnings about consecutive failures or repeated patterns, you MUST change your approach.
-5. **Cross-Tool Feedback**: Verify consistency between different sources:
-   - Does Vision result contradict Search results? → Use REFLECT to reconcile
-   - Does Synthesis global_summary align with your understanding? → If not, dig deeper
-   - Did previous hypothesis fail after execution? → Use REFLECT to analyze why, then HYPOTHESIZE new approach
-6. **Feasibility**: If the request needs unavailable tools or user-specific data, explicitly ask for that data or explain the blocker in the answer.
-7. **Goal-first Loop**: Think in small loops toward the end-goal, not a static todo list. Consider multiple hypotheses/paths; pick the highest-leverage next action; if it fails, adapt and try another angle (e.g., narrower query, different search term, pure reasoning). Stop only when the goal is met or clearly impossible with current tools/info.
-
-### HYPOTHESIS VERIFICATION PROTOCOL
-After executing a hypothesized approach:
-1. Check if the result matches the hypothesis expectation
-2. If mismatch: REFLECT on why, update mental model, then HYPOTHESIZE again
-3. If match: Increase confidence and proceed toward answer
-4. Never blindly trust a hypothesis - always verify with evidence
-
-### META-COGNITION: SELF-AWARENESS (关键!)
-You have limitations. You MUST be aware of them and communicate proactively:
-
-**🔍 TASK COMPLEXITY ASSESSMENT (First Step for ANY Request):**
-Before acting, classify the task:
-- **Simple**: Can be answered in one response (e.g., "What's 2+2?", "Explain X concept")
-- **Medium**: Requires 1-3 tool calls (e.g., "Search for latest news on X", "Analyze this image")  
-- **Complex**: Requires multiple steps, iterations, or produces large output (e.g., "Write a tutorial", "Create a comprehensive guide", "Build a knowledge base")
-- **Beyond Single Session**: Too large for one session (e.g., "Write 100k words", "Analyze 50 documents")
-
-**📊 YOUR CAPABILITY LIMITS (Be Honest About These):**
-- Single response: ~4000-8000 characters of quality content
-- Per session: Up to 20 tool calls / reasoning steps
-- Context window: Limited, older info may be compressed
-- No background execution: Cannot work while user is away
-- No cross-session memory: Each conversation starts fresh (except user profile)
-
-**🚨 WHEN TASK EXCEEDS CAPABILITIES:**
-If the task is Complex or Beyond Single Session, you MUST:
-1. **Acknowledge the scope**: "这是一个大型任务，需要分阶段完成"
-2. **Propose a plan**: Break it into concrete, manageable phases
-3. **Start with structure**: First deliver an outline/framework, get user confirmation
-4. **Iterate with saves**: After each major section, use save_file to persist progress
-5. **Provide progress markers**: "已完成第2章/共8章" or "Phase 1 of 3 complete"
-
-**📋 PROACTIVE PLANNING TEMPLATE (Use for Complex Tasks):**
-When you identify a complex task, your FIRST response should include:
-```
-📌 任务分析：
-- 类型：[教程/分析/创作/研究/...]
-- 预估规模：[X章/X部分/X阶段]
-- 每阶段产出：[约X字/X个要点]
-- 建议方式：[逐章生成+保存 / 先大纲后展开 / ...]
-
-📋 执行计划：
-1. [第一阶段内容]
-2. [第二阶段内容]
-...
-
-是否按此计划开始？或者您想调整？
-```
-
-**🔄 CONTINUATION AWARENESS:**
-- If <action_history> shows you're mid-task, continue from where you left off
-- If user says "继续" or "下一章", check context for what to continue
-- Always remind user of overall progress: "这是第X部分，共Y部分"
-
-### DECISION LOGIC
-
-**🔧 ACTION TOOLS:**
-
-1. **SEARCH (search)**: 
-   - USE WHEN: Information is missing, outdated, or needs verification.
-   - STRATEGY: Use specific, targeted queries. If "Python tutorial" failed, try "Python for beginners 2024".
-   - SINGLE TARGET: Focus on ONE specific information target per search step.
-   - If search is unavailable, choose ANSWER and ask for the missing key.
-
-2. **DRAW (draw)**:
-   - USE WHEN: User explicitly asks for an image/drawing/painting/illustration.
-   - STRATEGY: Craft a detailed, descriptive prompt. Include style, mood, colors, composition.
-   - CHAINING: Set "continue": true if you want to comment on the result afterward.
-
-3. **VISION (vision)**:
-   - USE WHEN: You need ADDITIONAL or SPECIALIZED analysis of the user's uploaded image.
-   - NOTE: Initial analysis is in <current_observations>. Use vision again for specialized extraction.
-   - If no image was uploaded in this session, DO NOT use vision.
-
-4. **SAVE_FILE (save_file)**:
-   - USE WHEN: User wants to save content (code, text, report) to a file.
-   - FIELDS: "filename" (e.g., "report.md", "code.py") and "content" (the full text/code).
-   - NOTE: This triggers a system file picker for the user to choose the save location.
-
-5. **KNOWLEDGE BASE (3-Step Retrieval)** - 📚 FOR UPLOADED FILES:
-   - USE WHEN: User asks about content from uploaded files, or <knowledge_overview> shows relevant files.
-   - STEP 1: **search_knowledge** - Find relevant chunks
-     * content: keywords like "authentication, login, token"
-     * Returns 5 chunk summaries per batch with IDs
-   - STEP 2: **take_note** (optional) - Record findings
-     * content: "Chunk 123_0 has login, 123_3000 has token refresh"
-     * Use when processing multiple batches
-   - STEP 3: **read_knowledge** - Read selected chunks
-     * content: "123_0, 123_3000" (comma-separated IDs)
-   - ALWAYS set "continue": true after search/take_note/read
-
-6. **DELETE_KNOWLEDGE (delete_knowledge)**:
-   - USE WHEN: User asks to remove files/chunks from knowledge base.
-   - Use file_id to delete entire file, or chunk_id for specific chunk.
-
-**🧠 THINKING TOOLS (Deep Think):**
-
-7. **REFLECT (reflect)**:
-   - USE WHEN: Need to critically examine current approach before proceeding.
-   - TRIGGERS:
-     * About to answer but confidence < 0.8
-     * 3+ actions taken without clear progress
-     * Detected contradiction or confusion
-     * Search results seem irrelevant or low-reliability
-     * **After HYPOTHESIZE execution to verify if hypothesis was correct**
-   - Put your self-critique in the "content" field.
-   - ALWAYS set "continue": true after reflect.
-
-8. **HYPOTHESIZE (hypothesize)**:
-   - USE WHEN: Problem has multiple valid approaches or current approach failed.
-   - Generate 2-4 hypotheses in the "hypotheses" array.
-   - Select best one in "selected_hypothesis" with justification.
-   - **IMPORTANT**: After executing the selected hypothesis, use REFLECT to verify success.
-   - ALWAYS set "continue": true after hypothesize.
-
-9. **CLARIFY (clarify)**:
-   - USE WHEN: Cannot proceed without user input.
-   - Put your question in "content" field - be specific about what you need.
-   - TRIGGERS:
-     * Missing critical info only user knows (personal preferences, private data)
-     * All sources are unreliable (<0.5) for important decisions
-     * Contradictory info requires user judgment
-     * Ambiguous request with multiple valid interpretations
-   - This is a TERMINAL action - waits for user response.
-   - Include "info_sufficiency" explaining why clarification is needed.
-
-**📝 OUTPUT TOOL:**
-
-10. **ANSWER (answer)**:
-   - USE WHEN: <current_observations> are sufficient AND confidence >= 0.7.
-   - OR: Pure logical/creative/conversational request.
-   - OR: Exhausted all approaches (fail gracefully with explanation).
-   - This is the TERMINAL action - produces user-visible output.
-   - IMPORTANT: Before answering, if confidence < 0.7, use reflect first!
-   - If sources are low-reliability, include "source_caveats" in your answer.
-
-### OBSERVATION QUALITY & SOURCE METADATA
-- Each reference in <current_observations> may include reliability indicators:
-  * 🟢 高可信 (0.8+): Official/authoritative sources
-  * 🟡 中等 (0.5-0.8): News/blogs
-  * 🔴 低可信 (<0.5): Social/forums
-- If you receive vision-derived observations, assume they may be sparse.
-- If most sources are 🔴, consider using CLARIFY to verify with user.
-
-### OUTPUT FORMAT
-Return a JSON object (no markdown):
-{
-  "type": "search" | "read_url" | "draw" | "vision" | "save_file" | "system_control" | "search_knowledge" | "read_knowledge" | "delete_knowledge" | "take_note" | "reflect" | "hypothesize" | "clarify" | "answer",
-  "reason": "[Intent: ...] [Gap: ...] [Strategy: ...]",
-  "confidence": 0.0-1.0,
-  "uncertainties": ["specific unknown 1", "specific unknown 2"],
-  "info_sufficiency": {
-    "is_sufficient": true/false,
-    "missing_info": ["what's missing"],
-    "unreliable_sources": ["sources that need verification"],
-    "suggested_action": "search" | "ask_user" | "verify" | "proceed_with_caveats",
-    "clarify_question": "question for user if ask_user"
-  },
-  "task_assessment": {
-    "complexity": "simple" | "medium" | "complex" | "beyond_session",
-    "estimated_phases": 1-N,
-    "current_phase": 1-N,
-    "phase_description": "当前阶段描述",
-    "needs_user_confirmation": true/false
-  },
-  "source_caveats": ["caveat 1 about source reliability", "caveat 2"],
-  "hypotheses": ["approach A", "approach B", "approach C"],
-  "selected_hypothesis": "approach A because...",
-  "query": "Search query (for search only)",
-  "filename": "filename.ext (for save_file only)",
-  "content": "Keywords/ChunkIDs/Notes/Reflection/Answer/Prompt/Question/FileContent",
-  "continue": true/false,
-  "reminders": []
-}
-
-**REQUIRED FIELDS:**
-- type, reason, confidence: ALWAYS required
-- task_assessment: Required for first response to a new user request
-- info_sufficiency: Required before answer/clarify
-- uncertainties: Required when confidence < 0.9
-- source_caveats: Required when answering with low-reliability sources
-- hypotheses, selected_hypothesis: Required for hypothesize action
-- query: Required for search action
-- filename: Required for save_file action
-- content: Required for answer, draw, vision, save_file, reflect, clarify
-- continue: Set true for all actions except final answer/clarify
+## 📤 JSON SCHEMA
+{"type":"search|draw|save_file|system_control|reflect|hypothesize|clarify|answer|search_knowledge|read_knowledge","query":"搜索词(search用)","content":"内容/提示词/回答","filename":"文件名(save_file用)","reason":"为什么选这个","confidence":0.0-1.0,"continue":true/false}
 ''';
 
     final userPrompt = '''
@@ -2697,20 +2553,287 @@ $userText
         final data = json.decode(decodedBody);
         String content = data['choices'][0]['message']['content'] ?? '';
         
-        // Extract JSON
+        // DEBUG: Log the raw response to see what model actually returned
+        debugPrint('=== AGENT RAW RESPONSE ===');
+        debugPrint(content.length > 500 ? '${content.substring(0, 500)}...' : content);
+        debugPrint('=== END RAW RESPONSE ===');
+        
+        // Strategy 1: Try to extract JSON directly
         final jsonStart = content.indexOf('{');
         final jsonEnd = content.lastIndexOf('}');
+        
         if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
           final jsonStr = content.substring(jsonStart, jsonEnd + 1);
-          return AgentDecision.fromJson(json.decode(jsonStr));
+          try {
+            final parsed = json.decode(jsonStr);
+            debugPrint('✅ Successfully parsed JSON, type: ${parsed['type']}');
+            return AgentDecision.fromJson(parsed);
+          } catch (jsonError) {
+            debugPrint('❌ JSON parse failed: $jsonError');
+            // Continue to Strategy 2
+          }
         }
+        
+        // Strategy 2: Use Worker API to semantically parse natural language into structured intent
+        debugPrint('🔄 JSON parse failed, using Worker API for semantic intent extraction...');
+        
+        try {
+          final workerDecision = await _parseIntentWithWorker(content);
+          if (workerDecision != null) {
+            debugPrint('✅ Worker successfully parsed intent: ${workerDecision.type}');
+            return workerDecision;
+          }
+        } catch (workerError) {
+          debugPrint('⚠️ Worker intent parsing failed: $workerError, falling back to regex');
+        }
+        
+        // Strategy 3: Fallback to regex-based extraction (less reliable but works offline)
+        debugPrint('🔄 Falling back to regex-based intent extraction...');
+        final lowerContent = content.toLowerCase();
+        
+        // ====== SEARCH INTENT ======
+        final searchPatterns = [
+          RegExp(r'(搜索|查找|查询|搜一下|查一下|search|look up|find|去.*?找|网上.*?查|了解|获取信息)', caseSensitive: false),
+        ];
+        for (var pattern in searchPatterns) {
+          if (pattern.hasMatch(content)) {
+            // Extract any quoted text as query, or use first line
+            final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
+            String query = quoteMatch?.group(1) ?? '';
+            if (query.isEmpty) {
+              query = content.split('\n').first.replaceAll(RegExp(r'[^\w\s\u4e00-\u9fff]'), '').trim();
+            }
+            if (query.length > 80) query = query.substring(0, 80);
+            debugPrint('🔍 Regex inferred SEARCH: "$query"');
+            return AgentDecision(
+              type: AgentActionType.search,
+              query: query.isNotEmpty ? query : '用户问题',
+              reason: '[REGEX-FALLBACK] Detected search-like words.',
+              continueAfter: true,
+            );
+          }
+        }
+            if (query.isNotEmpty && query.length < 100) {
+              debugPrint('🔍 Inferred SEARCH: "$query"');
+              return AgentDecision(
+                type: AgentActionType.search,
+                query: query,
+                reason: '[AUTO-INFERRED] Detected search intent in natural language.',
+                continueAfter: true,
+              );
+            }
+          }
+        }
+        
+        // ====== DRAW INTENT ======
+        final drawPatterns = [
+          RegExp(r'(画|绘制|生成图片|draw|generate image|create image)\s*[：:「"\']?([^」"\'。\n]+)', caseSensitive: false),
+          RegExp(r'(应该|需要|可以)\s*(画|绘制|生成)', caseSensitive: false),
+        ];
+        for (var pattern in drawPatterns) {
+          final match = pattern.firstMatch(content);
+          if (match != null) {
+            String? prompt = match.groupCount >= 2 ? match.group(2)?.trim() : null;
+            if (prompt == null || prompt.isEmpty) {
+              final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
+              prompt = quoteMatch?.group(1) ?? '用户要求的图片';
+            }
+            debugPrint('🎨 Inferred DRAW: "$prompt"');
+            return AgentDecision(
+              type: AgentActionType.draw,
+              content: prompt,
+              reason: '[AUTO-INFERRED] Detected draw intent.',
+              continueAfter: false,
+            );
+          }
+        }
+        
+        // ====== SAVE FILE INTENT ======
+        if (lowerContent.contains('保存') || lowerContent.contains('save') || 
+            lowerContent.contains('导出') || lowerContent.contains('export') ||
+            lowerContent.contains('下载') || lowerContent.contains('download')) {
+          // Try to find filename
+          final filenameMatch = RegExp(r'[\w\-]+\.(txt|md|py|js|json|html|css|csv)').firstMatch(content);
+          final filename = filenameMatch?.group(0) ?? 'output.txt';
+          // Content is everything after "保存" or the whole thing
+          debugPrint('💾 Inferred SAVE_FILE: $filename');
+          return AgentDecision(
+            type: AgentActionType.save_file,
+            filename: filename,
+            content: content,
+            reason: '[AUTO-INFERRED] Detected save intent.',
+            continueAfter: false,
+          );
+        }
+        
+        // ====== SYSTEM CONTROL INTENT ======
+        final controlMap = {
+          'home': ['回桌面', '回主页', 'go home', 'home'],
+          'back': ['返回', '后退', 'go back', 'back'],
+          'lock': ['锁屏', 'lock'],
+          'screenshot': ['截图', '截屏', 'screenshot'],
+          'notifications': ['通知', '通知栏', 'notifications'],
+          'recents': ['最近任务', '多任务', 'recents', 'recent apps'],
+        };
+        for (var entry in controlMap.entries) {
+          for (var keyword in entry.value) {
+            if (lowerContent.contains(keyword.toLowerCase())) {
+              debugPrint('📱 Inferred SYSTEM_CONTROL: ${entry.key}');
+              return AgentDecision(
+                type: AgentActionType.system_control,
+                content: entry.key,
+                reason: '[AUTO-INFERRED] Detected system control intent.',
+                continueAfter: false,
+              );
+            }
+          }
+        }
+        
+        // ====== REFLECT INTENT ======
+        if (lowerContent.contains('反思') || lowerContent.contains('思考') || 
+            lowerContent.contains('分析') || lowerContent.contains('reflect') ||
+            lowerContent.contains('think') || lowerContent.contains('consider')) {
+          debugPrint('🤔 Inferred REFLECT');
+          return AgentDecision(
+            type: AgentActionType.reflect,
+            content: content.length > 300 ? content.substring(0, 300) : content,
+            reason: '[AUTO-INFERRED] Detected reflection/thinking intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== CLARIFY INTENT ======
+        if (content.contains('?') || content.contains('？') ||
+            lowerContent.contains('请问') || lowerContent.contains('能否告诉') ||
+            lowerContent.contains('需要更多信息') || lowerContent.contains('clarify')) {
+          debugPrint('❓ Inferred CLARIFY');
+          return AgentDecision(
+            type: AgentActionType.clarify,
+            content: content,
+            reason: '[AUTO-INFERRED] Detected question/clarification intent.',
+          );
+        }
+        
+        // ====== KNOWLEDGE BASE INTENT ======
+        if (lowerContent.contains('知识库') || lowerContent.contains('上传的文件') ||
+            lowerContent.contains('knowledge') || lowerContent.contains('uploaded file')) {
+          final keywordMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
+          final keywords = keywordMatch?.group(1) ?? content.split('\n').first;
+          debugPrint('📚 Inferred SEARCH_KNOWLEDGE: $keywords');
+          return AgentDecision(
+            type: AgentActionType.search_knowledge,
+            content: keywords,
+            reason: '[AUTO-INFERRED] Detected knowledge base search intent.',
+            continueAfter: true,
+          );
+        }
+        
+        // ====== MULTI-STEP PLAN DETECTION ======
+        // Detect "先...再...然后..." or "1. ... 2. ... 3. ..." patterns
+        final multiStepPatterns = [
+          RegExp(r'(先|首先|第一步)[：:,，]?\s*(.+?)(再|然后|接着|第二步|之后)', caseSensitive: false),
+          RegExp(r'1[\.、]\s*(.+?)\s*2[\.、]', caseSensitive: false),
+          RegExp(r'(step\s*1|first)[：:,]?\s*(.+?)(step\s*2|then|next)', caseSensitive: false),
+        ];
+        
+        for (var pattern in multiStepPatterns) {
+          final match = pattern.firstMatch(content);
+          if (match != null) {
+            debugPrint('📋 Detected MULTI-STEP PLAN in response');
+            // Extract the FIRST step only, let the loop handle the rest
+            String firstStep = match.group(2)?.trim() ?? match.group(1)?.trim() ?? '';
+            
+            // Now determine what the first step wants to do
+            final firstStepLower = firstStep.toLowerCase();
+            
+            if (firstStepLower.contains('搜索') || firstStepLower.contains('search') || firstStepLower.contains('查找')) {
+              final queryMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(firstStep);
+              final query = queryMatch?.group(1) ?? firstStep.replaceAll(RegExp(r'(搜索|查找|search)'), '').trim();
+              debugPrint('📋 Multi-step: First action is SEARCH: $query');
+              return AgentDecision(
+                type: AgentActionType.search,
+                query: query.isNotEmpty ? query : '用户问题相关信息',
+                reason: '[MULTI-STEP PLAN] Step 1: Search. More steps will follow.',
+                continueAfter: true, // Important: continue to next step
+              );
+            }
+            
+            if (firstStepLower.contains('分析') || firstStepLower.contains('思考') || firstStepLower.contains('理解')) {
+              debugPrint('📋 Multi-step: First action is REFLECT');
+              return AgentDecision(
+                type: AgentActionType.reflect,
+                content: '执行多步计划的第一步：$firstStep',
+                reason: '[MULTI-STEP PLAN] Step 1: Reflect/Analyze.',
+                continueAfter: true,
+              );
+            }
+            
+            if (firstStepLower.contains('画') || firstStepLower.contains('生成图')) {
+              debugPrint('📋 Multi-step: First action is DRAW');
+              return AgentDecision(
+                type: AgentActionType.draw,
+                content: firstStep,
+                reason: '[MULTI-STEP PLAN] Step 1: Draw.',
+                continueAfter: true, // Might want to comment on result
+              );
+            }
+            
+            // Default: treat first step as reflection to understand the plan
+            debugPrint('📋 Multi-step: Converting plan to REFLECT');
+            return AgentDecision(
+              type: AgentActionType.reflect,
+              content: '用户需要多步操作，计划是：$content',
+              reason: '[MULTI-STEP PLAN] Converting complex plan to reflection first.',
+              continueAfter: true,
+            );
+          }
+        }
+        
+        // ====== SEQUENTIAL ACTIONS IN LIST FORMAT ======
+        // Detect numbered or bulleted lists that might be action sequences
+        final listItems = RegExp(r'[\d\-\*•]\s*[\.、]?\s*(.+)').allMatches(content).toList();
+        if (listItems.length >= 2) {
+          debugPrint('📋 Detected ${listItems.length} list items, treating as plan');
+          final firstItem = listItems.first.group(1)?.trim() ?? '';
+          final firstItemLower = firstItem.toLowerCase();
+          
+          // Analyze the first item
+          if (firstItemLower.contains('搜索') || firstItemLower.contains('查')) {
+            return AgentDecision(
+              type: AgentActionType.search,
+              query: firstItem.replaceAll(RegExp(r'(搜索|查找|查询|search)'), '').trim(),
+              reason: '[LIST PLAN] Executing item 1 of ${listItems.length}.',
+              continueAfter: true,
+            );
+          }
+          
+          // Default: reflect on the list
+          return AgentDecision(
+            type: AgentActionType.reflect,
+            content: '发现多步计划，共${listItems.length}步：${listItems.map((m) => m.group(1)).join(" → ")}',
+            reason: '[LIST PLAN] Reflecting on multi-step plan.',
+            continueAfter: true,
+          );
+        }
+        
+        // Strategy 3: If nothing matched, treat as answer (but log it)
+        debugPrint('⚠️ No intent pattern matched, treating as direct answer');
+        return AgentDecision(
+          type: AgentActionType.answer,
+          content: content,
+          reason: '[PASSTHROUGH] No structured intent detected, using raw response as answer.',
+        );
+        
+      } else {
+        debugPrint('❌ Agent API returned status ${resp.statusCode}: ${resp.body}');
       }
     } catch (e) {
-      debugPrint('Agent planning failed: $e');
+      debugPrint('❌ Agent planning exception: $e');
     }
     
-    // Fallback
-    return AgentDecision(type: AgentActionType.answer, reason: "Fallback due to error");
+    // Fallback - but now we know WHY
+    debugPrint('⚠️ Falling back to answer due to parsing failure');
+    return AgentDecision(type: AgentActionType.answer, reason: "Fallback: Model did not return valid JSON. Check debug logs.");
   }
 
   // _analyzeIntent removed as it is superseded by _planAgentStep and the Agent Loop.
@@ -3540,11 +3663,15 @@ $userText
         }
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)
-          setState(() => _loadingStatus = '🤔 正在反思当前策略...');
+          final reflectionSummary = decision.content ?? '自我审视当前方法';
+          // Show the actual thought process in UI
+          setState(() => _loadingStatus = '🤔 反思: ${reflectionSummary.length > 15 ? reflectionSummary.substring(0, 15) + "..." : reflectionSummary}');
           debugPrint('Agent reflecting: ${decision.content}');
           
+          // Artificial delay to let user see the thinking state
+          await Future.delayed(const Duration(milliseconds: 1200));
+          
           // Record reflection in action history with insights
-          final reflectionSummary = decision.content ?? '自我审视当前方法';
           sessionDecisions.last = AgentDecision(
             type: AgentActionType.reflect,
             content: reflectionSummary,
@@ -3569,11 +3696,14 @@ $userText
         }
         else if (decision.type == AgentActionType.hypothesize) {
           // Action: Multi-Hypothesis Generation (Deep Think)
-          setState(() => _loadingStatus = '💡 正在生成多个假设方案...');
-          debugPrint('Agent hypothesizing: ${decision.hypotheses}');
-          
           final hypothesesList = decision.hypotheses ?? ['默认方案'];
           final selected = decision.selectedHypothesis ?? hypothesesList.first;
+          
+          setState(() => _loadingStatus = '💡 假设: ${selected.length > 15 ? selected.substring(0, 15) + "..." : selected}');
+          debugPrint('Agent hypothesizing: ${decision.hypotheses}');
+          
+          // Artificial delay
+          await Future.delayed(const Duration(milliseconds: 1200));
           
           // Record hypotheses in action history
           sessionDecisions.last = AgentDecision(
