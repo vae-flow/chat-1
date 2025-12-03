@@ -450,7 +450,7 @@ ${sourceData.toString()}
           {'role': 'user', 'content': synthesisPrompt}
         ],
         'temperature': 0.3,
-        'max_tokens': 2000,
+        'max_tokens': 8000, // 用户API支持60K tokens
       });
 
       final uri = Uri.parse(apiEndpoint);
@@ -651,9 +651,9 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
         // Decode HTML entities
         text = _decodeHtmlEntities(text);
         
-        // Limit content length (keep first 8000 chars for context)
-        if (text.length > 8000) {
-          text = '${text.substring(0, 8000)}\n\n[...内容已截断，共${text.length}字符]';
+        // Limit content length (用户API支持60K tokens)
+        if (text.length > 20000) {
+          text = '${text.substring(0, 20000)}\n\n[...内容已截断，共${text.length}字符]';
         }
         
         return ReferenceItem(

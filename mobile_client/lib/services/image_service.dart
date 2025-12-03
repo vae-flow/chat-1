@@ -340,7 +340,7 @@ Future<List<ReferenceItem>?> _callVisionApi({
         ]
       }
     ],
-    'max_tokens': 2000,
+    'max_tokens': 4000, // 用户API支持60K tokens
     'stream': false,
   });
 

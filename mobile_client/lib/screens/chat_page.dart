@@ -1989,7 +1989,7 @@ ONLY output JSON. No explanation.''';
             {'role': 'user', 'content': 'Parse this: $rawResponse'}
           ],
           'temperature': 0,
-          'max_tokens': 150,
+          'max_tokens': 500,
         }),
       ).timeout(const Duration(seconds: 10));
       
@@ -2307,7 +2307,7 @@ ONLY output JSON. No explanation.''';
     var contextMsgs = List<ChatMessage>.from(_messages);
 
     // 计算总长，如超限则对旧消息分块摘要，保留最近几条原文
-    const int agentCharBudget = 10000;
+    const int agentCharBudget = 50000; // 用户API支持60K tokens
     final agentTotal = contextMsgs.fold(0, (p, c) => p + c.content.length);
     if (agentTotal > agentCharBudget) {
       contextMsgs = await _compressHistoryForTransport(
@@ -3506,7 +3506,7 @@ Based on all the information gathered, decide your next action. If you have enou
           final failedReads = <String>[];
           final combinedContent = StringBuffer();
           int totalChars = 0;
-          const maxTotalChars = 15000; // Limit total content to prevent context explosion
+          const maxTotalChars = 40000; // 用户API支持60K tokens
           
           for (final chunkId in chunkIds) {
             if (totalChars >= maxTotalChars) {
