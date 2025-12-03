@@ -3973,8 +3973,70 @@ $userText
           break; // Answer is a terminal action
         }
         else {
-          // Unknown action type - fallback to answer
-          setState(() => _loadingStatus = '正在撰写回复...');
+          // ⚠️ CRITICAL: Handle missing parameters for tool calls
+          // If we reach here, it means a tool was called but with missing parameters
+          // Instead of silently falling back to answer, we should:
+          // 1. Log the issue
+          // 2. Add a system note so Agent can see what went wrong
+          // 3. Continue the loop so Agent can retry
+          
+          final toolName = decision.type.name;
+          String missingParams = '';
+          
+          // Check what's missing for each tool type
+          switch (decision.type) {
+            case AgentActionType.search:
+              if (decision.query == null) missingParams = 'query';
+              break;
+            case AgentActionType.read_url:
+            case AgentActionType.draw:
+            case AgentActionType.vision:
+            case AgentActionType.search_knowledge:
+            case AgentActionType.read_knowledge:
+            case AgentActionType.delete_knowledge:
+            case AgentActionType.take_note:
+            case AgentActionType.system_control:
+              if (decision.content == null) missingParams = 'content';
+              break;
+            case AgentActionType.save_file:
+              final missing = <String>[];
+              if (decision.filename == null) missing.add('filename');
+              if (decision.content == null) missing.add('content');
+              missingParams = missing.join(', ');
+              break;
+            case AgentActionType.hypothesize:
+              if (decision.hypotheses == null) missingParams = 'hypotheses';
+              break;
+            default:
+              missingParams = 'unknown';
+          }
+          
+          debugPrint('⚠️ Tool $toolName called with missing params: $missingParams');
+          
+          // Add error note to session so Agent can see and fix
+          sessionRefs.add(ReferenceItem(
+            title: '⚠️ 工具调用失败: $toolName',
+            url: 'internal://error/missing-params/${DateTime.now().millisecondsSinceEpoch}',
+            snippet: '工具 "$toolName" 缺少必要参数: $missingParams\n请重新调用该工具并提供完整参数。\n\n正确格式示例:\n${_getToolExample(decision.type)}',
+            sourceName: 'System',
+            sourceType: 'system_note',
+          ));
+          
+          // Record in decision history
+          sessionDecisions.last = AgentDecision(
+            type: decision.type,
+            content: decision.content,
+            reason: '${decision.reason ?? ""} [ERROR: Missing params: $missingParams]',
+          );
+          
+          // Continue loop to let Agent retry with correct parameters
+          if (steps < maxSteps - 1) {
+            steps++;
+            continue;
+          }
+          
+          // If too many retries, fallback to answer
+          setState(() => _loadingStatus = '工具调用失败，正在撰写回复...');
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           break;
         }
@@ -3997,6 +4059,40 @@ $userText
           _loadingStatus = '';
         });
       }
+    }
+  }
+
+  /// Get example JSON for a tool type (used in error messages)
+  String _getToolExample(AgentActionType type) {
+    switch (type) {
+      case AgentActionType.search:
+        return '{"type":"search","query":"搜索关键词","continue":true}';
+      case AgentActionType.read_url:
+        return '{"type":"read_url","content":"https://example.com","continue":true}';
+      case AgentActionType.draw:
+        return '{"type":"draw","content":"a beautiful sunset","continue":false}';
+      case AgentActionType.vision:
+        return '{"type":"vision","content":"请分析这张图片","continue":true}';
+      case AgentActionType.save_file:
+        return '{"type":"save_file","filename":"report.md","content":"文件内容...","continue":false}';
+      case AgentActionType.system_control:
+        return '{"type":"system_control","content":"home","continue":false}';
+      case AgentActionType.search_knowledge:
+        return '{"type":"search_knowledge","content":"关键词","continue":true}';
+      case AgentActionType.read_knowledge:
+        return '{"type":"read_knowledge","content":"chunk_id","continue":true}';
+      case AgentActionType.delete_knowledge:
+        return '{"type":"delete_knowledge","content":"file_id","continue":false}';
+      case AgentActionType.take_note:
+        return '{"type":"take_note","content":"重要笔记内容","continue":true}';
+      case AgentActionType.reflect:
+        return '{"type":"reflect","content":"思考内容","continue":true}';
+      case AgentActionType.hypothesize:
+        return '{"type":"hypothesize","hypotheses":["方案1","方案2"],"selectedHypothesis":"方案1","continue":true}';
+      case AgentActionType.clarify:
+        return '{"type":"clarify","content":"请问您具体指...?","continue":false}';
+      case AgentActionType.answer:
+        return '{"type":"answer","content":"回答内容","continue":false}';
     }
   }
 
