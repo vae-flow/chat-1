@@ -2130,8 +2130,8 @@ ONLY output JSON. No explanation.''';
         // Keep last 3 URL reads to prevent context explosion
         for (var r in urlContentRefs.skip(urlContentRefs.length > 3 ? urlContentRefs.length - 3 : 0)) {
           String snippet = r.snippet;
-          // Stricter truncation for URL content (it can be very long)
-          if (snippet.length > 3000) snippet = '${snippet.substring(0, 3000)}...[截断]';
+          // 用户API支持60K tokens，允许更完整的内容
+          if (snippet.length > 8000) snippet = '${snippet.substring(0, 8000)}...[截断]';
           refsBuffer.writeln('  $idx. ${r.title}');
           refsBuffer.writeln('     来源: ${r.url}');
           refsBuffer.writeln('     内容: $snippet');
@@ -2156,7 +2156,7 @@ ONLY output JSON. No explanation.''';
         // Keep last 5 vision results
         for (var r in visionRefs.skip(visionRefs.length > 5 ? visionRefs.length - 5 : 0)) {
           String snippet = r.snippet;
-          if (snippet.length > 800) snippet = '${snippet.substring(0, 800)}...';
+          if (snippet.length > 2000) snippet = '${snippet.substring(0, 2000)}...';
           refsBuffer.writeln('  $idx. ${r.title}: $snippet');
           idx++;
         }
@@ -2174,8 +2174,8 @@ ONLY output JSON. No explanation.''';
         refsBuffer.writeln('🔍 [网络搜索结果 - 显示${webRefs.length}条]');
         for (var r in webRefs) {
           String snippet = r.snippet;
-          // Stricter truncation for web results
-          if (snippet.length > 500) snippet = '${snippet.substring(0, 500)}...';
+          // 用户API支持60K tokens
+          if (snippet.length > 1500) snippet = '${snippet.substring(0, 1500)}...';
           
           // Add reliability indicator
           String reliabilityIcon = '⚪';

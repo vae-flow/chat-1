@@ -79,7 +79,7 @@ class ReferenceManager {
         return ReferenceItem(
           title: r['title'] ?? 'No Title',
           url: url,
-          snippet: r['text'] != null ? (r['text'] as String).substring(0, (r['text'] as String).length.clamp(0, 3000)).replaceAll('\n', ' ') : '',
+          snippet: r['text'] != null ? (r['text'] as String).substring(0, (r['text'] as String).length.clamp(0, 6000)).replaceAll('\n', ' ') : '',
           sourceName: 'Exa.ai',
           reliability: _estimateReliability(url),
           authorityLevel: _detectAuthorityLevel(url),
@@ -543,7 +543,7 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
           final fallbackRef = ReferenceItem(
             title: '🌐 搜索结果综合分析',
             url: 'synthesis://global-perspective',
-            snippet: content.length > 1000 ? content.substring(0, 1000) : content,
+            snippet: content.length > 4000 ? content.substring(0, 4000) : content,
             sourceName: 'AI Synthesis',
             sourceType: 'synthesis',
             reliability: 0.7,
