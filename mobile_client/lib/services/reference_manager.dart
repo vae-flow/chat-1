@@ -7,6 +7,50 @@ import '../models/reference_item.dart';
 /// Manages search references and formatting
 class ReferenceManager {
   
+  /// 带重试机制的 HTTP 请求辅助方法
+  Future<http.Response> _httpWithRetry(
+    Future<http.Response> Function() request, {
+    int maxRetries = 2,
+    int baseDelayMs = 1000,
+  }) async {
+    int attempt = 0;
+    http.Response? lastResponse;
+    Object? lastError;
+    
+    while (attempt <= maxRetries) {
+      try {
+        final response = await request();
+        
+        // 成功或客户端错误不重试
+        if (response.statusCode == 200 || 
+            response.statusCode == 400 || 
+            response.statusCode == 401 ||
+            response.statusCode == 403) {
+          return response;
+        }
+        
+        // 服务器错误或限流可重试
+        if (response.statusCode >= 500 || response.statusCode == 429) {
+          lastResponse = response;
+          debugPrint('🔄 搜索 API 失败 (${response.statusCode})，重试 ${attempt + 1}/$maxRetries...');
+        } else {
+          return response;
+        }
+      } catch (e) {
+        lastError = e;
+        debugPrint('🔄 搜索 API 异常: $e，重试 ${attempt + 1}/$maxRetries...');
+      }
+      
+      attempt++;
+      if (attempt <= maxRetries) {
+        await Future.delayed(Duration(milliseconds: baseDelayMs * attempt));
+      }
+    }
+    
+    if (lastResponse != null) return lastResponse;
+    throw lastError ?? Exception('搜索 API 请求失败');
+  }
+  
   Future<List<ReferenceItem>> search(String query) async {
     final prefs = await SharedPreferences.getInstance();
     var provider = prefs.getString('search_provider') ?? 'auto';
@@ -54,7 +98,8 @@ class ReferenceManager {
   Future<List<ReferenceItem>> _searchExa(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Exa Key not configured');
     final uri = Uri.parse('$baseUrl/search');
-    final resp = await http.post(
+    
+    final resp = await _httpWithRetry(() => http.post(
       uri,
       headers: {
         'x-api-key': key,
@@ -66,7 +111,7 @@ class ReferenceManager {
         'useAutoprompt': true,
         'contents': {'text': true} 
       }),
-    ).timeout(const Duration(seconds: 60));
+    ).timeout(const Duration(seconds: 60)));
     
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -97,10 +142,11 @@ class ReferenceManager {
     // Ensure URL handles /v1 if not present in baseUrl, or assume user configures it.
     // We will use the baseUrl as provided, assuming it includes /v1 if needed (updated in Settings).
     final uri = Uri.parse('$baseUrl/search?query=${Uri.encodeComponent(query)}&count=8');
-    final resp = await http.get(
+    
+    final resp = await _httpWithRetry(() => http.get(
       uri,
       headers: {'X-API-Key': key},
-    ).timeout(const Duration(seconds: 60));
+    ).timeout(const Duration(seconds: 60)));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -151,13 +197,14 @@ class ReferenceManager {
   Future<List<ReferenceItem>> _searchBrave(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Brave Key not configured');
     final uri = Uri.parse('$baseUrl/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=8');
-    final resp = await http.get(
+    
+    final resp = await _httpWithRetry(() => http.get(
       uri,
       headers: {
         'X-Subscription-Token': key,
         'Accept': 'application/json',
       },
-    ).timeout(const Duration(seconds: 60));
+    ).timeout(const Duration(seconds: 60)));
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -454,14 +501,16 @@ ${sourceData.toString()}
       });
 
       final uri = Uri.parse(apiEndpoint);
-      final response = await http.post(
+      
+      // 使用带重试的请求
+      final response = await _httpWithRetry(() => http.post(
         uri,
         headers: {
           'Authorization': 'Bearer $workerApiKey',
           'Content-Type': 'application/json',
         },
         body: requestBody,
-      ).timeout(const Duration(seconds: 60));
+      ).timeout(const Duration(seconds: 60)));
 
       if (response.statusCode == 200) {
         final data = json.decode(utf8.decode(response.bodyBytes));
@@ -570,13 +619,15 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
   Future<ReferenceItem> fetchUrlContent(String url) async {
     try {
       final uri = Uri.parse(url);
-      final response = await http.get(
+      
+      // 使用带重试的请求获取网页内容
+      final response = await _httpWithRetry(() => http.get(
         uri,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
-      ).timeout(const Duration(seconds: 60));
+      ).timeout(const Duration(seconds: 60)));
 
       if (response.statusCode == 200) {
         final html = utf8.decode(response.bodyBytes, allowMalformed: true);

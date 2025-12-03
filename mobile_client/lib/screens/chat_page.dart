@@ -277,6 +277,60 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _scrollCtrl.dispose();
     super.dispose();
   }
+  
+  /// 带重试机制的 HTTP POST 请求
+  /// [maxRetries] 最大重试次数，[baseDelay] 初始退避延迟（毫秒）
+  Future<http.Response> _postWithRetry(
+    Uri uri, {
+    required Map<String, String> headers,
+    required String body,
+    Duration timeout = const Duration(minutes: 2),
+    int maxRetries = 2,
+    int baseDelay = 1000,
+  }) async {
+    int attempt = 0;
+    http.Response? lastResponse;
+    Object? lastError;
+    
+    while (attempt <= maxRetries) {
+      try {
+        final response = await http.post(
+          uri,
+          headers: headers,
+          body: body,
+        ).timeout(timeout);
+        
+        // 成功或非临时性错误直接返回
+        if (response.statusCode == 200 || 
+            response.statusCode == 400 || 
+            response.statusCode == 401 ||
+            response.statusCode == 403) {
+          return response;
+        }
+        
+        // 5xx 或 429 可重试
+        if (response.statusCode >= 500 || response.statusCode == 429) {
+          lastResponse = response;
+          debugPrint('🔄 API 请求失败 (${response.statusCode})，尝试 ${attempt + 1}/$maxRetries...');
+        } else {
+          return response; // 其他错误不重试
+        }
+      } catch (e) {
+        lastError = e;
+        debugPrint('🔄 API 请求异常: $e，尝试 ${attempt + 1}/$maxRetries...');
+      }
+      
+      attempt++;
+      if (attempt <= maxRetries) {
+        // 指数退避
+        await Future.delayed(Duration(milliseconds: baseDelay * attempt));
+      }
+    }
+    
+    // 返回最后一次响应或抛出最后一个错误
+    if (lastResponse != null) return lastResponse;
+    throw lastError ?? Exception('API 请求失败');
+  }
 
   Future<void> _initNotifications() async {
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
@@ -2025,7 +2079,8 @@ ONLY output JSON. No explanation.''';
       final cleanBase = workerBase.replaceAll(RegExp(r'/+$'), '');
       final uri = Uri.parse('$cleanBase/chat/completions');
       
-      final resp = await http.post(
+      // 使用带重试的请求（Worker 请求可以快速失败）
+      final resp = await _postWithRetry(
         uri,
         headers: {
           'Authorization': 'Bearer $selectedKey',
@@ -2040,7 +2095,9 @@ ONLY output JSON. No explanation.''';
           'temperature': 0,
           'max_tokens': 500,
         }),
-      ).timeout(const Duration(seconds: 10));
+        timeout: const Duration(seconds: 15),
+        maxRetries: 1, // Worker 快速重试一次即可
+      );
       
       if (resp.statusCode == 200) {
         final data = json.decode(utf8.decode(resp.bodyBytes));
@@ -3109,14 +3166,17 @@ Output your decision as JSON:
         'max_tokens': 4096, // Ensure response isn't truncated
       });
 
-      final resp = await http.post(
+      // 使用带重试的请求
+      final resp = await _postWithRetry(
         uri,
         headers: {
           'Authorization': 'Bearer $effectiveKey',
           'Content-Type': 'application/json',
         },
         body: body,
-      ).timeout(const Duration(minutes: 5));
+        timeout: const Duration(minutes: 3),
+        maxRetries: 2,
+      );
 
       if (resp.statusCode == 200) {
         final decodedBody = utf8.decode(resp.bodyBytes);
