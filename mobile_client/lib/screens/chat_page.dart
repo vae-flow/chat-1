@@ -2604,12 +2604,82 @@ $userText
       // Normalize URL - only remove trailing slashes, respect user's path
       String cleanBase = effectiveBase.replaceAll(RegExp(r'/+$'), '');
       final uri = Uri.parse('$cleanBase/chat/completions');
+      
+      // Build messages array with REAL multi-turn conversation
+      // This is CRITICAL: the model needs to see its previous decisions as assistant messages
+      // 
+      // Message flow:
+      // 1. System prompt (defines agent behavior)
+      // 2. Initial user context (user question + observations so far)
+      // 3. For each previous decision:
+      //    - Assistant message (the decision JSON it made)
+      //    - User message (the result from executing that decision)
+      // 4. Final prompt asking for next decision
+      //
+      final List<Map<String, dynamic>> messages = [
+        {'role': 'system', 'content': systemPrompt},
+      ];
+      
+      // If this is NOT the first step, we need to show the conversation history
+      if (previousDecisions.isNotEmpty) {
+        // Add initial context as first user message
+        messages.add({'role': 'user', 'content': '''<user_input>
+$userText
+</user_input>
+
+<initial_context>
+This is step ${previousDecisions.length + 1}. Review your previous actions and their results below, then decide your next move.
+</initial_context>'''});
+        
+        // Add each decision-result pair as assistant-user turn
+        for (int i = 0; i < previousDecisions.length; i++) {
+          final d = previousDecisions[i];
+          
+          // Reconstruct the decision JSON (what the model outputted)
+          final decisionJson = json.encode({
+            'type': d.type.name,
+            'query': d.query,
+            'content': d.content,
+            'filename': d.filename,
+            'reason': d.reason?.replaceAll(RegExp(r'\[RESULT:[^\]]+\]'), '').trim(), // Remove result from reason
+            'confidence': d.confidence,
+            'continue': d.continueAfter,
+          });
+          
+          // Add as assistant message
+          messages.add({'role': 'assistant', 'content': decisionJson});
+          
+          // Extract and add result as user message
+          String resultInfo = 'Action executed.';
+          if (d.reason != null && d.reason!.contains('[RESULT:')) {
+            final resultMatch = RegExp(r'\[RESULT:([^\]]+)\]').firstMatch(d.reason!);
+            if (resultMatch != null) {
+              resultInfo = resultMatch.group(1)!.trim();
+            }
+          }
+          
+          // Add result message
+          messages.add({
+            'role': 'user', 
+            'content': '''[STEP ${i + 1} RESULT]
+$resultInfo
+
+${i == previousDecisions.length - 1 ? '''
+<current_observations>
+${refsBuffer.toString()}
+</current_observations>
+
+Based on all the information gathered, decide your next action. If you have enough info to answer the user's question, use type "answer".''' : 'Continue to next step.'}'''
+          });
+        }
+      } else {
+        // First step - just the initial user prompt with full context
+        messages.add({'role': 'user', 'content': userPrompt});
+      }
+      
       final body = json.encode({
         'model': effectiveModel,
-        'messages': [
-          {'role': 'system', 'content': systemPrompt},
-          {'role': 'user', 'content': userPrompt}
-        ],
+        'messages': messages,
         'stream': false,
         'temperature': 0.1, // Low temp for precise decision
       });
