@@ -1145,7 +1145,7 @@ $refString
       // Phase 2: Merge very old short messages into summary blocks
       // This handles the case where many small messages accumulate
       currentTotal = _messages.fold(0, (sum, m) => sum + m.content.length);
-      if (currentTotal > 20000 && _messages.length > 15) {
+      if (currentTotal > 50000 && _messages.length > 15) { // 用户API支持60K tokens
         setState(() => _loadingStatus = '合并历史消息块...');
         
         // Find consecutive older messages (not in last 10) that can be merged
@@ -4329,7 +4329,7 @@ Based on all the information gathered, decide your next action. If you have enou
   @override
   Widget build(BuildContext context) {
     final totalChars = _calculateTotalChars();
-    final isMemoryFull = totalChars > 20000;
+    final isMemoryFull = totalChars > 50000; // 用户API支持60K tokens
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -4393,7 +4393,7 @@ Based on all the information gathered, decide your next action. If you have enou
 
   // 记忆状态栏
   Widget _buildMemoryStatusBar(int totalChars, bool isMemoryFull) {
-    final progress = (totalChars / 20000).clamp(0.0, 1.0);
+    final progress = (totalChars / 50000).clamp(0.0, 1.0); // 用户API支持60K tokens
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
