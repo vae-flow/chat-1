@@ -222,3 +222,153 @@ class AgentDecision {
     };
   }
 }
+
+/// A complete execution plan with multiple steps
+/// Generated after three-pass thinking, contains multiple API calls
+class AgentPlan {
+  final String userIntent;        // P1: What user really wants
+  final String capabilityReview;  // P2: Which tools/APIs will be used
+  final String expectedOutcome;   // P3: What we expect to achieve
+  final List<AgentStep> steps;    // Ordered list of steps to execute
+  final double overallConfidence; // Confidence in the entire plan
+  final String? fallbackStrategy; // What to do if plan fails
+
+  AgentPlan({
+    required this.userIntent,
+    required this.capabilityReview,
+    required this.expectedOutcome,
+    required this.steps,
+    this.overallConfidence = 0.8,
+    this.fallbackStrategy,
+  });
+
+  factory AgentPlan.fromJson(Map<String, dynamic> json) {
+    // Parse steps array
+    List<AgentStep> steps = [];
+    if (json['steps'] != null) {
+      steps = (json['steps'] as List).map((s) => AgentStep.fromJson(s)).toList();
+    } else if (json['plan'] != null) {
+      // Alternative format: plan array
+      steps = (json['plan'] as List).map((s) => AgentStep.fromJson(s)).toList();
+    }
+    
+    return AgentPlan(
+      userIntent: json['user_intent'] ?? json['P1'] ?? '',
+      capabilityReview: json['capability_review'] ?? json['P2'] ?? '',
+      expectedOutcome: json['expected_outcome'] ?? json['P3'] ?? '',
+      steps: steps,
+      overallConfidence: (json['confidence'] as num?)?.toDouble() ?? 0.8,
+      fallbackStrategy: json['fallback'] ?? json['fallback_strategy'],
+    );
+  }
+
+  /// Check if this is a multi-step plan
+  bool get isMultiStep => steps.length > 1;
+  
+  /// Get total estimated API calls
+  int get totalApiCalls => steps.where((s) => s.requiresApi).length;
+  
+  /// Convert single-step legacy format to plan
+  static AgentPlan fromSingleDecision(AgentDecision decision) {
+    return AgentPlan(
+      userIntent: 'Single action request',
+      capabilityReview: 'Using ${decision.type.name}',
+      expectedOutcome: decision.reason ?? 'Complete user request',
+      steps: [
+        AgentStep(
+          stepNumber: 1,
+          action: decision.type,
+          purpose: decision.reason ?? '',
+          query: decision.query,
+          content: decision.content,
+          filename: decision.filename,
+          dependsOn: [],
+          continueOnFail: false,
+        )
+      ],
+      overallConfidence: decision.confidence ?? 0.8,
+    );
+  }
+}
+
+/// A single step in an execution plan
+class AgentStep {
+  final int stepNumber;
+  final AgentActionType action;
+  final String purpose;           // Why this step
+  final String? query;            // For search
+  final String? content;          // For answer/draw/etc
+  final String? filename;         // For save_file
+  final String? url;              // For read_url
+  final List<int> dependsOn;      // Which steps must complete first
+  final bool continueOnFail;      // Continue plan even if this fails
+  final String? outputVariable;   // Name to store result for later steps
+
+  AgentStep({
+    required this.stepNumber,
+    required this.action,
+    required this.purpose,
+    this.query,
+    this.content,
+    this.filename,
+    this.url,
+    this.dependsOn = const [],
+    this.continueOnFail = false,
+    this.outputVariable,
+  });
+
+  factory AgentStep.fromJson(Map<String, dynamic> json) {
+    final typeStr = json['type'] ?? json['action'] ?? 'answer';
+    AgentActionType action;
+    switch (typeStr) {
+      case 'search': action = AgentActionType.search; break;
+      case 'read_url': action = AgentActionType.read_url; break;
+      case 'draw': action = AgentActionType.draw; break;
+      case 'vision': action = AgentActionType.vision; break;
+      case 'reflect': action = AgentActionType.reflect; break;
+      case 'hypothesize': action = AgentActionType.hypothesize; break;
+      case 'clarify': action = AgentActionType.clarify; break;
+      case 'save_file': action = AgentActionType.save_file; break;
+      case 'system_control': action = AgentActionType.system_control; break;
+      case 'search_knowledge': action = AgentActionType.search_knowledge; break;
+      case 'read_knowledge': action = AgentActionType.read_knowledge; break;
+      case 'delete_knowledge': action = AgentActionType.delete_knowledge; break;
+      case 'take_note': action = AgentActionType.take_note; break;
+      default: action = AgentActionType.answer;
+    }
+
+    return AgentStep(
+      stepNumber: json['step'] ?? json['step_number'] ?? 1,
+      action: action,
+      purpose: json['purpose'] ?? json['reason'] ?? '',
+      query: json['query'],
+      content: json['content'],
+      filename: json['filename'],
+      url: json['url'],
+      dependsOn: json['depends_on'] != null 
+        ? List<int>.from(json['depends_on']) 
+        : [],
+      continueOnFail: json['continue_on_fail'] ?? false,
+      outputVariable: json['output_as'] ?? json['output_variable'],
+    );
+  }
+
+  /// Convert to AgentDecision for execution
+  AgentDecision toDecision() {
+    return AgentDecision(
+      type: action,
+      query: query,
+      content: content,
+      filename: filename,
+      reason: purpose,
+      continueAfter: true, // Plan manages continuation
+    );
+  }
+  
+  /// Check if this step requires an API call
+  bool get requiresApi => 
+    action == AgentActionType.search ||
+    action == AgentActionType.draw ||
+    action == AgentActionType.read_url ||
+    action == AgentActionType.vision;
+}

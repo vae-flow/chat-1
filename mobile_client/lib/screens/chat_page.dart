@@ -128,6 +128,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   
   // Deep Think: Pending clarification state
   Map<String, dynamic>? _pendingClarification;
+  
+  // PLANNER: Current execution plan (if any)
+  AgentPlan? _currentPlan;
+  int _currentPlanStep = 0; // Which step of the plan we're on
 
   // Settings
   // Chat
@@ -2592,8 +2596,51 @@ ${_activePersona.prompt}
 </persona>
 回答时用这个人格语气，但工具调用不变。
 
-## 📤 JSON SCHEMA
-{"type":"search|draw|save_file|system_control|reflect|hypothesize|clarify|answer|search_knowledge|read_knowledge","query":"搜索词(search用)","content":"内容/提示词/回答","filename":"文件名(save_file用)","reason":"为什么选这个","confidence":0.0-1.0,"continue":true/false}
+## 📤 OUTPUT FORMAT: PLAN (Multi-Step) or SINGLE (One Action)
+
+**PLAN FORMAT (for complex tasks requiring multiple API calls):**
+```json
+{
+  "mode": "plan",
+  "P1": "用户真正想要的是...",
+  "P2": "将使用以下工具: search获取数据, reflect分析, answer综合回答",
+  "P3": "预期达成: 用户获得全面准确的信息",
+  "confidence": 0.85,
+  "steps": [
+    {"step": 1, "type": "search", "query": "关键词", "purpose": "获取最新数据", "output_as": "search_results"},
+    {"step": 2, "type": "reflect", "content": "基于搜索结果分析...", "purpose": "深入理解", "depends_on": [1]},
+    {"step": 3, "type": "answer", "content": "综合以上信息...", "purpose": "最终回答", "depends_on": [1,2]}
+  ],
+  "fallback": "如果搜索失败，使用知识库或直接基于已有信息回答"
+}
+```
+
+**SINGLE FORMAT (for simple one-step tasks):**
+```json
+{
+  "mode": "single",
+  "type": "search",
+  "query": "搜索词",
+  "reason": "P1:用户需要X | P2:search最适合 | P3:将获得所需信息",
+  "confidence": 0.9,
+  "continue": true
+}
+```
+
+**WHEN TO USE PLAN vs SINGLE:**
+- PLAN: Complex questions needing multiple tools (search→read_url→answer)
+- PLAN: Tasks requiring parallel API calls (search A + search B → combine)
+- PLAN: Multi-phase operations (reflect→search→hypothesize→answer)
+- SINGLE: Simple direct actions (greetings, system control, simple search)
+
+**PLAN STEP FIELDS:**
+- step: Step number (1, 2, 3...)
+- type: Tool to use (search/draw/read_url/reflect/answer/etc.)
+- query/content/filename/url: Parameters for the tool
+- purpose: Why this step (brief)
+- depends_on: Array of step numbers that must complete first (e.g., [1,2])
+- output_as: Variable name to store result for later steps (optional)
+- continue_on_fail: If true, continue plan even if this step fails
 ''';
 
     final userPrompt = '''
@@ -2823,7 +2870,45 @@ Output your decision as JSON:
           final jsonStr = content.substring(jsonStart, jsonEnd + 1);
           try {
             final parsed = json.decode(jsonStr);
-            debugPrint('✅ Successfully parsed JSON, type: ${parsed['type']}');
+            
+            // Check if this is a PLAN or SINGLE mode
+            final mode = parsed['mode'] as String?;
+            
+            if (mode == 'plan' && parsed['steps'] != null) {
+              // ===== PLAN MODE: Multi-step execution =====
+              debugPrint('📋 Detected PLAN mode with ${(parsed['steps'] as List).length} steps');
+              
+              final plan = AgentPlan.fromJson(parsed);
+              _currentPlan = plan;
+              _currentPlanStep = 0;
+              
+              // Log the plan
+              debugPrint('📋 Plan P1 (Intent): ${plan.userIntent}');
+              debugPrint('📋 Plan P2 (Capability): ${plan.capabilityReview}');
+              debugPrint('📋 Plan P3 (Outcome): ${plan.expectedOutcome}');
+              for (var step in plan.steps) {
+                debugPrint('   Step ${step.stepNumber}: ${step.action.name} - ${step.purpose}');
+              }
+              
+              // Return the first step as AgentDecision
+              if (plan.steps.isNotEmpty) {
+                final firstStep = plan.steps[0];
+                return AgentDecision(
+                  type: firstStep.action,
+                  query: firstStep.query,
+                  content: firstStep.content,
+                  filename: firstStep.filename,
+                  reason: '[PLAN Step 1/${plan.steps.length}] ${firstStep.purpose} | P1:${plan.userIntent} | P2:${plan.capabilityReview} | P3:${plan.expectedOutcome}',
+                  confidence: plan.overallConfidence,
+                  continueAfter: plan.steps.length > 1, // Continue if more steps
+                );
+              }
+            }
+            
+            // ===== SINGLE MODE or legacy format =====
+            debugPrint('✅ Successfully parsed JSON (single mode), type: ${parsed['type']}');
+            _currentPlan = null; // Clear any previous plan
+            _currentPlanStep = 0;
             return AgentDecision.fromJson(parsed);
           } catch (jsonError) {
             debugPrint('❌ JSON parse failed: $jsonError');
@@ -2838,6 +2923,7 @@ Output your decision as JSON:
           final workerDecision = await _parseIntentWithWorker(content);
           if (workerDecision != null) {
             debugPrint('✅ Worker successfully parsed intent: ${workerDecision.type}');
+            _currentPlan = null; // Clear plan for worker-parsed decisions
             return workerDecision;
           }
         } catch (workerError) {
@@ -2846,6 +2932,7 @@ Output your decision as JSON:
         
         // Strategy 3: Fallback to regex-based extraction (less reliable but works offline)
         debugPrint('🔄 Falling back to regex-based intent extraction...');
+        _currentPlan = null; // Clear plan for regex-parsed decisions
         final lowerContent = content.toLowerCase();
         
         // ====== SEARCH INTENT ======
@@ -3299,9 +3386,56 @@ Output your decision as JSON:
 
     try {
       while (steps < maxSteps) {
-        // A. Think (Plan Step)
-        setState(() => _loadingStatus = '正在规划下一步 (Step ${steps + 1})...');
-        final decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+        AgentDecision decision;
+        
+        // Check if we have an active plan with remaining steps
+        if (_currentPlan != null && _currentPlanStep < _currentPlan!.steps.length) {
+          // ===== PLAN MODE: Execute next step from existing plan =====
+          _currentPlanStep++;
+          final stepIndex = _currentPlanStep - 1;
+          final step = _currentPlan!.steps[stepIndex];
+          
+          setState(() => _loadingStatus = '执行计划步骤 ${_currentPlanStep}/${_currentPlan!.steps.length}: ${step.action.name}...');
+          debugPrint('📋 Executing plan step $_currentPlanStep: ${step.action.name}');
+          
+          // Check dependencies (skip if dependencies not met)
+          bool dependenciesMet = true;
+          for (var depIdx in step.dependsOn) {
+            if (depIdx > sessionDecisions.length) {
+              dependenciesMet = false;
+              debugPrint('⚠️ Step $_currentPlanStep dependency on step $depIdx not yet complete');
+              break;
+            }
+          }
+          
+          if (!dependenciesMet && !step.continueOnFail) {
+            // Skip this step, try next
+            debugPrint('⏭️ Skipping step $_currentPlanStep due to unmet dependencies');
+            continue;
+          }
+          
+          decision = AgentDecision(
+            type: step.action,
+            query: step.query,
+            content: step.content,
+            filename: step.filename,
+            reason: '[PLAN Step $_currentPlanStep/${_currentPlan!.steps.length}] ${step.purpose}',
+            confidence: _currentPlan!.overallConfidence,
+            continueAfter: _currentPlanStep < _currentPlan!.steps.length,
+          );
+          
+          // If this is the last step, clear the plan
+          if (_currentPlanStep >= _currentPlan!.steps.length) {
+            debugPrint('📋 Plan completed! All ${_currentPlan!.steps.length} steps executed.');
+            _currentPlan = null;
+            _currentPlanStep = 0;
+          }
+        } else {
+          // ===== NORMAL MODE: Get next decision from API =====
+          setState(() => _loadingStatus = '正在规划下一步 (Step ${steps + 1})...');
+          decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+        }
+        
         sessionDecisions.add(decision); // Record decision
         
         // Handle Reminders (Side Effect)
