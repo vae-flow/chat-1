@@ -1949,7 +1949,7 @@ Output: {"type":"save_file","filename":"code.txt","continue":false}
 ONLY output JSON. No explanation.''';
 
     try {
-      final cleanBase = workerBase.replaceAll(RegExp(r'/+\$'), '');
+      final cleanBase = workerBase.replaceAll(RegExp(r'/+$'), '');
       final uri = Uri.parse('$cleanBase/chat/completions');
       
       final resp = await http.post(
@@ -3805,6 +3805,43 @@ $userText
         else if (decision.type == AgentActionType.answer || 
                  (decision.type == AgentActionType.vision && currentSessionImagePath == null)) {
           // Action: Answer (or vision without image = fallback to answer)
+          
+          // 🔴 CRITICAL FIX: Prevent premature answering on first step
+          // If this is the FIRST step and Agent chose "answer" without using any tools,
+          // force it to think about whether tools could help.
+          // Exceptions: simple greetings, follow-up questions, or explicit user requests
+          final isSimpleGreeting = content.length < 10 && 
+            (content.contains('你好') || content.contains('hi') || content.contains('hello') ||
+             content.contains('谢谢') || content.contains('再见') || content.contains('好的'));
+          final hasToolsAlreadyUsed = sessionDecisions.any((d) => 
+            d.type != AgentActionType.answer && 
+            d.type != AgentActionType.reflect && 
+            d.type != AgentActionType.hypothesize);
+          
+          if (steps == 0 && !isSimpleGreeting && !hasToolsAlreadyUsed && sessionRefs.isEmpty) {
+            // First step, no tools used, no refs gathered - force reflection
+            debugPrint('⚠️ GUARD: Agent tried to answer on step 0 without using tools. Forcing tool consideration.');
+            setState(() => _loadingStatus = '🤔 正在分析是否需要搜索或其他工具...');
+            
+            // Inject a strong hint to use tools
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 系统提示：请优先使用工具',
+              url: 'internal://system/tool-first-reminder',
+              snippet: '您尝试在第一步直接回答，但系统要求：\n1. 如果问题涉及最新信息、事实核查、专业知识 → 使用 search\n2. 如果用户要画图 → 使用 draw\n3. 如果问题复杂 → 使用 reflect\n请重新考虑是否有合适的工具可用。只有简单问候或确认才应直接回答。',
+              sourceName: 'System',
+              sourceType: 'system_note',
+            ));
+            
+            // Record this attempt in decision history
+            sessionDecisions.add(AgentDecision(
+              type: AgentActionType.reflect,
+              content: '系统阻止了直接回答，要求先考虑工具使用',
+              reason: '[SYSTEM GUARD] Prevented premature answer. User asked: "$content". Must reconsider tools.',
+            ));
+            
+            steps++;
+            continue;
+          }
           
           // Deep Think: Check confidence before answering
           if (decision.needsMoreWork && steps < maxSteps - 2) {
