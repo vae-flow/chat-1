@@ -2072,15 +2072,19 @@ ONLY output JSON. No explanation.''';
         r.sourceType == 'reflection' || r.sourceType == 'hypothesis' || r.sourceType == 'system' || r.sourceType == 'system_note'
       ).toList();
       
+      // 💡 System feedback (observations for Agent to consider)
+      final feedbackRefs = sessionRefs.where((r) => r.sourceType == 'feedback').toList();
+      
       // URL content (deep read results)
       final urlContentRefs = sessionRefs.where((r) => r.sourceType == 'url_content').toList();
       
-      // Filter web refs (exclude knowledge refs and url_content now)
+      // Filter web refs (exclude all special types)
       var webRefs = sessionRefs.where((r) => 
         r.sourceType != 'vision' && r.sourceType != 'generated' && 
         r.sourceType != 'reflection' && r.sourceType != 'hypothesis' && 
         r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis' &&
-        r.sourceType != 'knowledge' && r.sourceType != 'knowledge_search' && r.sourceType != 'url_content'
+        r.sourceType != 'knowledge' && r.sourceType != 'knowledge_search' && r.sourceType != 'url_content' &&
+        r.sourceType != 'feedback'  // Don't mix feedback with web results
       ).toList();
       
       // LIMIT CONTEXT: Keep only recent/relevant references to prevent context explosion
@@ -2093,6 +2097,18 @@ ONLY output JSON. No explanation.''';
       }
       
       int idx = 1;
+      
+      // 💡 SYSTEM FEEDBACK FIRST (most important for decision-making)
+      // This ensures Agent sees the feedback prominently before other data
+      if (feedbackRefs.isNotEmpty) {
+        refsBuffer.writeln('═══════════════════════════════════════════════════════════════');
+        refsBuffer.writeln('💡 [系统观察反馈 - 请阅读后自行决策]');
+        refsBuffer.writeln('═══════════════════════════════════════════════════════════════');
+        for (var r in feedbackRefs) {
+          refsBuffer.writeln(r.snippet);
+          refsBuffer.writeln('');
+        }
+      }
       
       // Global Synthesis first (most important overview)
       if (synthesisRefs.isNotEmpty) {
@@ -2375,65 +2391,107 @@ ONLY output JSON. No explanation.''';
     final toolbelt = '''
 ### TOOLBELT (what you can call)
 
+## ⚠️ REQUIRED JSON FIELDS FOR ALL TOOLS:
+Every tool output MUST include: type, reason, confidence(0-1), continue(true/false)
+
 **🔧 ACTION TOOLS:**
-- search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider (web search returns short references)" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
-- draw: ${drawAvailable ? "AVAILABLE (image generation; put the full image prompt in content; set continue=true if you want to comment on the result)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
-- vision: ${visionAvailable ? "AVAILABLE (analyze an image; put custom analysis prompt in content; if user uploaded image, analysis result is in <current_observations>)" : "UNAVAILABLE (vision API not configured)"}
-- read_url: ${searchAvailable ? "AVAILABLE - Deep read a specific webpage to get full content. Use when search results snippets are insufficient and you need the complete article/page." : "UNAVAILABLE (no network access)"}
-  * content: The full URL to read, e.g., "https://example.com/article"
+
+- search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
+  * **JSON**: {"type":"search","query":"搜索关键词","reason":"P1:...|P2:...|P3:...","confidence":0.9,"continue":true}
+  * query: The search keywords (REQUIRED - NOT content!)
+  * Returns: Short references/snippets from web search
+  * continue: Usually true (you'll answer after seeing results)
+
+- draw: ${drawAvailable ? "AVAILABLE (image generation)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
+  * **JSON**: {"type":"draw","content":"detailed image prompt in English","reason":"...","confidence":0.95,"continue":false}
+  * content: Full image prompt (REQUIRED)
+  * continue: false (image is shown to user) or true (if you want to comment)
+
+- vision: ${visionAvailable ? "AVAILABLE (image analysis)" : "UNAVAILABLE (vision API not configured)"}
+  * **JSON**: {"type":"vision","content":"custom analysis prompt","reason":"...","confidence":0.85,"continue":true}
+  * content: What to analyze in the image (REQUIRED)
+  * NOTE: If user already uploaded image, check <current_observations> first - it may already be analyzed!
+
+- read_url: ${searchAvailable ? "AVAILABLE - Deep read a webpage for full content" : "UNAVAILABLE (no network access)"}
+  * **JSON**: {"type":"read_url","content":"https://example.com/article","reason":"...","confidence":0.85,"continue":true}
+  * content: The full URL to read (REQUIRED)
   * Returns: Title + extracted main content (up to 8000 chars)
-  * USE WHEN: Search gave you a relevant URL but snippet is too short to answer the question
+  * USE WHEN: Search gave you a relevant URL but snippet is too short
   * WORKFLOW: search → review results → read_url on promising link → answer
 
 **📚 KNOWLEDGE BASE TOOLS (3-Step Retrieval Flow):**
 ${hasKnowledge ? '''
 - search_knowledge: AVAILABLE - Search the knowledge base by keywords.
-  * STEP 1: Use this FIRST to find relevant chunks.
-  * content: Comma-separated keywords, e.g., "authentication, login, token"
-  * Returns: Up to 5 chunk summaries per batch, with chunk IDs
-  * If more results exist, use same keywords again to get next batch
+  * **JSON**: {"type":"search_knowledge","content":"keyword1, keyword2","reason":"...","confidence":0.8,"continue":true}
+  * content: Comma-separated keywords (REQUIRED)
+  * Returns: Chunk summaries WITH CHUNK IDs (e.g., "file123_0", "file123_3000")
+  * ⚠️ IMPORTANT: Note down the Chunk IDs from results - you need them for read_knowledge!
   
 - take_note: AVAILABLE - Save notes to temporary memory.
-  * STEP 2 (Optional): After reviewing search results, note which chunks are relevant.
-  * content: Your notes, e.g., "Chunk 123_0 covers login flow, 123_3000 covers token refresh"
-  * Notes persist for this conversation only.
-  * Use this when processing large result sets across multiple batches.
+  * **JSON**: {"type":"take_note","content":"your notes here","reason":"...","confidence":0.9,"continue":true}
+  * content: Your notes text (REQUIRED)
+  * 💡 TIP: Write down relevant Chunk IDs here! e.g., "file123_0 covers auth, file123_3000 covers tokens"
 
 - read_knowledge: AVAILABLE - Read full content of specific chunks.
-  * STEP 3: Read the chunks you identified as relevant.
-  * content: Comma-separated chunk IDs, e.g., "123_0, 123_3000"
+  * **JSON**: {"type":"read_knowledge","content":"file123_0, file123_3000","reason":"...","confidence":0.85,"continue":true}
+  * content: Comma-separated Chunk IDs from search results (REQUIRED)
+  * ⚠️ CRITICAL: Use the EXACT Chunk IDs returned by search_knowledge! Format: "fileId_offset"
   * Returns: Full text content of the chunks (up to 15000 chars total)
 
 - delete_knowledge: AVAILABLE - Delete content from knowledge base.
-  * content: file_id or chunk_id to delete
+  * **JSON**: {"type":"delete_knowledge","content":"file_id or chunk_id","reason":"...","confidence":0.9,"continue":false}
+  * content: file_id or chunk_id to delete (REQUIRED)
   * NOTE: Irreversible. Confirm with user first.
 
-**Knowledge Retrieval Workflow Example:**
-1. User asks: "How does authentication work?"
-2. You: search_knowledge with content="authentication, login, token"
-3. System returns: 5 chunk summaries with IDs
-4. You: take_note with content="123_0 has login, 123_3000 has token refresh - both relevant"
-5. If more batches exist, repeat search_knowledge to see them
-6. You: read_knowledge with content="123_0, 123_3000"
-7. You: answer based on the content
+**⚠️ Knowledge Workflow - INDEX IS CRITICAL:**
+1. search_knowledge → Get Chunk IDs (e.g., "doc1_0", "doc1_3000")
+2. (optional) take_note → Record which Chunk IDs are relevant
+3. read_knowledge → Use EXACT Chunk IDs to fetch content
+4. answer → Synthesize information
+Example: search returns [doc1_0, doc1_3000] → read_knowledge with "doc1_0, doc1_3000"
 ''' : '''
 - search_knowledge: UNAVAILABLE (knowledge base is empty - no files uploaded)
 - read_knowledge: UNAVAILABLE (knowledge base is empty)
 - delete_knowledge: UNAVAILABLE (knowledge base is empty)
 '''}
 
-- save_file: ALWAYS AVAILABLE - Save text or code to a local file. Use when user asks to "save", "download", "create file", or "export". Put filename in "filename" and content in "content".
+- save_file: ALWAYS AVAILABLE - Save text or code to a local file.
+  * **JSON**: {"type":"save_file","filename":"code.py","content":"file content here","reason":"...","confidence":1.0,"continue":false}
+  * filename: File name with extension (REQUIRED)
+  * content: File content to save (REQUIRED)
+  * Use when user asks to "save", "download", "create file", or "export"
+
 - system_control: AVAILABLE - Control device global actions.
-  * content: "home", "back", "recents", "notifications", "lock", "screenshot"
+  * **JSON**: {"type":"system_control","content":"home","reason":"...","confidence":1.0,"continue":false}
+  * content: One of: "home", "back", "recents", "notifications", "lock", "screenshot" (REQUIRED)
   * NOTE: Requires Accessibility Service. If action fails, ask user to enable it.
 
 **🧠 THINKING TOOLS:**
+
 - reflect: Pause and self-critique. Use when confused or stuck.
-- hypothesize: Generate 2-3 alternative approaches. Use when one path fails.
-- clarify: Ask user for missing info. Use when you can't proceed without it.
+  * **JSON**: {"type":"reflect","content":"My analysis of this situation...","reason":"...","confidence":0.6,"continue":true}
+  * content: Your reflection/analysis text (REQUIRED)
+  * continue: Usually true (you'll take action after reflecting)
+
+- hypothesize: Generate 2-3 alternative approaches.
+  * **JSON**: {"type":"hypothesize","hypotheses":["approach A","approach B","approach C"],"selected_hypothesis":"approach A because...","reason":"...","confidence":0.7,"continue":true}
+  * hypotheses: Array of alternative approaches (REQUIRED)
+  * selected_hypothesis: Which one you chose and why (REQUIRED)
+  * Use when one path fails and you need new ideas
+
+- clarify: Ask user for missing info.
+  * **JSON**: {"type":"clarify","content":"Your question to the user","reason":"...","confidence":0.5,"continue":false}
+  * content: The question to ask user (REQUIRED)
+  * continue: false (wait for user response)
+  * Use ONLY when you truly cannot proceed without user input
 
 **📝 OUTPUT:**
-- answer: Final response. Use ONLY after tools or for simple greetings.
+
+- answer: Final response to user.
+  * **JSON**: {"type":"answer","content":"Your response here","reason":"...","confidence":0.95,"continue":false}
+  * content: Your natural language response (REQUIRED)
+  * continue: Usually false (conversation ends)
+  * ⚠️ Use ONLY after gathering info with tools, or for simple greetings
 ${hasSessionImage ? """
 
 ⚠️ **IMAGE UPLOADED**: Check <current_observations> for vision analysis.
@@ -2480,9 +2538,21 @@ Before outputting your JSON decision, you MUST internally perform THREE rounds o
 Example: "P1:用户想了解最新动态 | P2:search可获实时数据,已添加日期限定 | P3:高质量搜索结果将直接满足需求✓"
 
 ## ⚠️ CRITICAL RULE: TOOL-FIRST PRINCIPLE ⚠️
-**BEFORE using "answer", you MUST check if ANY tool can help.**
-- If you jump to "answer" without trying tools, you are WRONG.
-- The user installed this app FOR THE TOOLS. Direct answers are lazy.
+**BEFORE using "answer", carefully consider if ANY tool can improve your response.**
+
+🧠 **SELF-CHECK BEFORE "answer":**
+1. Is <current_observations> EMPTY or just system notes? → Tools might provide better data
+2. Does user ask about facts/news/prices/events? → search usually helps
+3. Does user want an image? → draw is the right choice
+4. Is this a complex question? → reflect can help, then maybe search
+5. ONLY for simple greetings (你好/hi/谢谢) → answer directly is fine
+
+**SYSTEM FEEDBACK:**
+- If you choose "answer" without tool usage, system will provide OBSERVATIONS (not commands)
+- You can then DECIDE whether to use a tool or stick with your answer
+- This is YOUR decision - system just provides information to help you think
+
+- The user installed this app FOR THE TOOLS. Consider if tools add value.
 - Review your available tools: search, draw, vision, read_url, save_file, system_control, search_knowledge, read_knowledge, reflect, hypothesize, clarify, take_note
 
 ## 🔄 ITERATIVE DECISION LOOP
@@ -2703,6 +2773,40 @@ $userText
         {'role': 'system', 'content': systemPrompt},
       ];
       
+      // Build PLAN status indicator if we have an active plan
+      String planStatusSection = '';
+      if (_currentPlan != null) {
+        final plan = _currentPlan!;
+        final remainingSteps = plan.steps.length - _currentPlanStep;
+        
+        if (remainingSteps <= 0) {
+          // Plan completed
+          planStatusSection = '''
+<plan_status>
+🏁 [PLAN COMPLETED]
+Original Plan: ${plan.steps.length} steps
+P1 (意图): ${plan.userIntent}
+P2 (能力): ${plan.capabilityReview}
+P3 (效果): ${plan.expectedOutcome}
+所有计划步骤已执行完毕。现在请决定：
+- 如果信息足够 → 输出 type: "answer" 生成最终回答
+- 如果发现新需求 → 输出新的 "mode": "plan" 继续探索
+</plan_status>
+''';
+        } else {
+          // Plan in progress (but this shouldn't happen in _planAgentStep since we execute from plan directly)
+          planStatusSection = '''
+<plan_status>
+📋 [ACTIVE PLAN]
+Progress: ${_currentPlanStep}/${plan.steps.length} steps completed ($remainingSteps remaining)
+P1 (意图): ${plan.userIntent}
+Next Planned: Step ${_currentPlanStep + 1} - ${plan.steps[_currentPlanStep].action.name}
+Note: Plan is executing. This call may be for replanning due to step failure.
+</plan_status>
+''';
+        }
+      }
+      
       // ALWAYS include full context - this is the "memory" that makes the agent smarter
       // Build comprehensive context that includes EVERYTHING the model needs
       final fullContextPrompt = '''
@@ -2721,7 +2825,7 @@ $historicalSummary
 <knowledge_overview>
 $knowledgeOverview
 </knowledge_overview>
-
+$planStatusSection
 <chat_history>
 $contextBuffer
 </chat_history>
@@ -2793,14 +2897,19 @@ ${refsBuffer.toString()}
 ═══════════════════════════════════════════════════════════════
 🎯 DECISION REQUIRED: Step ${previousDecisions.length + 1}
 ═══════════════════════════════════════════════════════════════
+📋 CHECK OBSERVATIONS ABOVE: Look for any "系统观察反馈" - these contain helpful information.
+
 Review everything above. Apply THREE-PASS thinking:
 - P1 (意图): What does the user REALLY need?
 - P2 (能力): Am I FULLY utilizing my tools? (search/draw/vision/reflect/hypothesize/read_url/knowledge...)
 - P3 (效果): Will this action actually achieve the user's goal?
 
-If you have SUFFICIENT info to answer → type: "answer"
-If you need MORE info → use appropriate tool
-If previous approach FAILED → try a DIFFERENT strategy
+DECISION GUIDANCE:
+- If observations contain feedback about missing data → Consider if a tool would help
+- If you have SUFFICIENT data from real tool results → type: "answer"
+- If you need MORE info → use appropriate tool
+- If previous approach FAILED → try a DIFFERENT strategy
+- YOU decide - feedback is informational, not mandatory
 
 Output your decision as JSON:
 ''';
@@ -2827,9 +2936,17 @@ ${prevActionsBuffer.toString()}
 🎯 FIRST DECISION REQUIRED
 ═══════════════════════════════════════════════════════════════
 This is Step 1. Analyze the user's request and context above.
+
+💡 STEP 1 GUIDANCE:
+- If <current_observations> is empty → Consider if a tool could provide useful data
+- Questions about facts/news/data → search usually provides better answers
+- Image requests → draw is the right tool
+- Complex questions → reflect helps organize thoughts
+- Simple greetings → answer directly is fine
+
 Apply THREE-PASS thinking:
 - P1 (意图): What does the user REALLY want? (underlying goal)
-- P2 (能力): What tools do I have? Am I using them fully?
+- P2 (能力): What tools do I have? Could any of them improve my response?
 - P3 (效果): Will this action lead to user satisfaction?
 
 Output your decision as JSON:
@@ -2841,6 +2958,7 @@ Output your decision as JSON:
         'messages': messages,
         'stream': false,
         'temperature': 0.1, // Low temp for precise decision
+        'max_tokens': 4096, // Ensure response isn't truncated
       });
 
       final resp = await http.post(
@@ -2917,42 +3035,56 @@ Output your decision as JSON:
         }
         
         // Strategy 2: Use Worker API to semantically parse natural language into structured intent
+        // IMPORTANT: Worker parses model's "thinking" text, not user input
+        // Only trust Worker if it extracts an ACTION (not just "answer")
         debugPrint('🔄 JSON parse failed, using Worker API for semantic intent extraction...');
         
         try {
           final workerDecision = await _parseIntentWithWorker(content);
           if (workerDecision != null) {
-            debugPrint('✅ Worker successfully parsed intent: ${workerDecision.type}');
-            _currentPlan = null; // Clear plan for worker-parsed decisions
-            return workerDecision;
+            // 🔴 CRITICAL: If Worker returns "answer", it means model just rambled text
+            // In this case, we should NOT trust it and fall through to regex on USER input
+            if (workerDecision.type == AgentActionType.answer) {
+              debugPrint('⚠️ Worker returned "answer" (model rambling). Falling through to regex on USER input.');
+              // Don't return - fall through to Strategy 3
+            } else {
+              debugPrint('✅ Worker extracted ACTION: ${workerDecision.type}');
+              _currentPlan = null; // Clear plan for worker-parsed decisions
+              return workerDecision;
+            }
           }
         } catch (workerError) {
           debugPrint('⚠️ Worker intent parsing failed: $workerError, falling back to regex');
         }
         
-        // Strategy 3: Fallback to regex-based extraction (less reliable but works offline)
-        debugPrint('🔄 Falling back to regex-based intent extraction...');
+        // Strategy 3: Fallback to regex-based extraction
+        // IMPORTANT: We should analyze USER'S ORIGINAL REQUEST (userText), not model's rambling (content)
+        debugPrint('🔄 Falling back to regex-based intent extraction on USER INPUT...');
         _currentPlan = null; // Clear plan for regex-parsed decisions
-        final lowerContent = content.toLowerCase();
+        
+        // Use userText (user's original request) for intent detection, not model output
+        final lowerUserText = userText.toLowerCase();
         
         // ====== SEARCH INTENT ======
         final searchPatterns = [
-          RegExp(r'(搜索|查找|查询|搜一下|查一下|search|look up|find|去.*?找|网上.*?查|了解|获取信息)', caseSensitive: false),
+          RegExp(r'(搜索|查找|查询|搜一下|查一下|search|look up|find|去.*?找|网上.*?查|了解|获取信息|最新|今天|多少钱|价格|新闻|天气)', caseSensitive: false),
         ];
         for (var pattern in searchPatterns) {
-          if (pattern.hasMatch(content)) {
-            // Extract any quoted text as query, or use first line
-            final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
+          if (pattern.hasMatch(userText)) {
+            // Extract any quoted text as query, or use user's input cleaned up
+            final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
             String query = quoteMatch?.group(1) ?? '';
             if (query.isEmpty) {
-              query = content.split('\n').first.replaceAll(RegExp(r'[^\w\s\u4e00-\u9fff]'), '').trim();
+              // Use the user's text directly as search query
+              query = userText.replaceAll(RegExp(r'(请|帮我|告诉我|我想知道|什么是|怎么|如何|呢|吗|吧)'), '').trim();
             }
             if (query.length > 80) query = query.substring(0, 80);
-            debugPrint('🔍 Regex inferred SEARCH: "$query"');
+            if (query.isEmpty) query = userText.split(' ').first;
+            debugPrint('🔍 Regex inferred SEARCH from user input: "$query"');
             return AgentDecision(
               type: AgentActionType.search,
-              query: query.isNotEmpty ? query : '用户问题',
-              reason: '[REGEX-FALLBACK] Detected search-like words.',
+              query: query.isNotEmpty ? query : userText,
+              reason: '[REGEX-FALLBACK] Detected search intent in user query.',
               continueAfter: true,
             );
           }
@@ -2964,36 +3096,35 @@ Output your decision as JSON:
           RegExp(r'(应该|需要|可以)\s*(画|绘制|生成)', caseSensitive: false),
         ];
         for (var pattern in drawPatterns) {
-          final match = pattern.firstMatch(content);
+          final match = pattern.firstMatch(userText);
           if (match != null) {
             String? prompt = match.groupCount >= 2 ? match.group(2)?.trim() : null;
             if (prompt == null || prompt.isEmpty) {
-              final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
-              prompt = quoteMatch?.group(1) ?? '用户要求的图片';
+              final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
+              prompt = quoteMatch?.group(1) ?? userText.replaceAll(RegExp(r'(画|绘制|生成|帮我|请)'), '').trim();
             }
-            debugPrint('🎨 Inferred DRAW: "$prompt"');
+            debugPrint('🎨 Inferred DRAW from user input: "$prompt"');
             return AgentDecision(
               type: AgentActionType.draw,
-              content: prompt,
-              reason: '[AUTO-INFERRED] Detected draw intent.',
+              content: prompt.isNotEmpty ? prompt : 'user requested image',
+              reason: '[AUTO-INFERRED] Detected draw intent in user query.',
               continueAfter: false,
             );
           }
         }
         
         // ====== SAVE FILE INTENT ======
-        if (lowerContent.contains('保存') || lowerContent.contains('save') || 
-            lowerContent.contains('导出') || lowerContent.contains('export') ||
-            lowerContent.contains('下载') || lowerContent.contains('download')) {
+        if (lowerUserText.contains('保存') || lowerUserText.contains('save') || 
+            lowerUserText.contains('导出') || lowerUserText.contains('export') ||
+            lowerUserText.contains('下载') || lowerUserText.contains('download')) {
           // Try to find filename
-          final filenameMatch = RegExp(r'[\w\-]+\.(txt|md|py|js|json|html|css|csv)').firstMatch(content);
+          final filenameMatch = RegExp(r'[\w\-]+\.(txt|md|py|js|json|html|css|csv)').firstMatch(userText);
           final filename = filenameMatch?.group(0) ?? 'output.txt';
-          // Content is everything after "保存" or the whole thing
           debugPrint('💾 Inferred SAVE_FILE: $filename');
           return AgentDecision(
             type: AgentActionType.save_file,
             filename: filename,
-            content: content,
+            content: userText,
             reason: '[AUTO-INFERRED] Detected save intent.',
             continueAfter: false,
           );
@@ -3010,7 +3141,7 @@ Output your decision as JSON:
         };
         for (var entry in controlMap.entries) {
           for (var keyword in entry.value) {
-            if (lowerContent.contains(keyword.toLowerCase())) {
+            if (lowerUserText.contains(keyword.toLowerCase())) {
               debugPrint('📱 Inferred SYSTEM_CONTROL: ${entry.key}');
               return AgentDecision(
                 type: AgentActionType.system_control,
@@ -3023,35 +3154,43 @@ Output your decision as JSON:
         }
         
         // ====== REFLECT INTENT ======
-        if (lowerContent.contains('反思') || lowerContent.contains('思考') || 
-            lowerContent.contains('分析') || lowerContent.contains('reflect') ||
-            lowerContent.contains('think') || lowerContent.contains('consider')) {
+        if (lowerUserText.contains('反思') || lowerUserText.contains('思考') || 
+            lowerUserText.contains('分析') || lowerUserText.contains('reflect') ||
+            lowerUserText.contains('think') || lowerUserText.contains('consider')) {
           debugPrint('🤔 Inferred REFLECT');
           return AgentDecision(
             type: AgentActionType.reflect,
-            content: content.length > 300 ? content.substring(0, 300) : content,
+            content: userText.length > 300 ? userText.substring(0, 300) : userText,
             reason: '[AUTO-INFERRED] Detected reflection/thinking intent.',
             continueAfter: true,
           );
         }
         
         // ====== CLARIFY INTENT ======
-        if (content.contains('?') || content.contains('？') ||
-            lowerContent.contains('请问') || lowerContent.contains('能否告诉') ||
-            lowerContent.contains('需要更多信息') || lowerContent.contains('clarify')) {
-          debugPrint('❓ Inferred CLARIFY');
-          return AgentDecision(
-            type: AgentActionType.clarify,
-            content: content,
-            reason: '[AUTO-INFERRED] Detected question/clarification intent.',
-          );
+        if (userText.contains('?') || userText.contains('？') ||
+            lowerUserText.contains('请问') || lowerUserText.contains('能否告诉') ||
+            lowerUserText.contains('需要更多信息') || lowerUserText.contains('clarify')) {
+          // This might be a question that needs search, not clarification
+          // Check if it's asking about something factual
+          if (lowerUserText.contains('是什么') || lowerUserText.contains('多少') ||
+              lowerUserText.contains('怎么') || lowerUserText.contains('如何') ||
+              lowerUserText.contains('为什么') || lowerUserText.contains('哪里')) {
+            // This is a factual question, use search
+            debugPrint('🔍 Question detected, using SEARCH');
+            return AgentDecision(
+              type: AgentActionType.search,
+              query: userText.replaceAll(RegExp(r'[\?？]'), '').trim(),
+              reason: '[AUTO-INFERRED] User question detected, searching for answer.',
+              continueAfter: true,
+            );
+          }
         }
         
         // ====== KNOWLEDGE BASE INTENT ======
-        if (lowerContent.contains('知识库') || lowerContent.contains('上传的文件') ||
-            lowerContent.contains('knowledge') || lowerContent.contains('uploaded file')) {
-          final keywordMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(content);
-          final keywords = keywordMatch?.group(1) ?? content.split('\n').first;
+        if (lowerUserText.contains('知识库') || lowerUserText.contains('上传的文件') ||
+            lowerUserText.contains('knowledge') || lowerUserText.contains('uploaded file')) {
+          final keywordMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
+          final keywords = keywordMatch?.group(1) ?? userText.split('\n').first;
           debugPrint('📚 Inferred SEARCH_KNOWLEDGE: $keywords');
           return AgentDecision(
             type: AgentActionType.search_knowledge,
@@ -3062,79 +3201,78 @@ Output your decision as JSON:
         }
         
         // ====== READ URL INTENT ======
-        final urlMatch = RegExp(r'https?://[^\s<>"]+').firstMatch(content);
-        if (urlMatch != null && (lowerContent.contains('读') || lowerContent.contains('看看') || 
-            lowerContent.contains('打开') || lowerContent.contains('访问') ||
-            lowerContent.contains('read') || lowerContent.contains('open') || lowerContent.contains('fetch'))) {
+        final urlMatch = RegExp(r'https?://[^\s<>"]+').firstMatch(userText);
+        if (urlMatch != null) {
           final url = urlMatch.group(0)!;
           debugPrint('🌐 Inferred READ_URL: $url');
           return AgentDecision(
             type: AgentActionType.read_url,
             content: url,
-            reason: '[AUTO-INFERRED] Detected URL reading intent.',
+            reason: '[AUTO-INFERRED] URL detected in user input.',
             continueAfter: true,
           );
         }
         
         // ====== VISION INTENT ======
-        if (lowerContent.contains('看图') || lowerContent.contains('分析图') || 
-            lowerContent.contains('图片里') || lowerContent.contains('图中') ||
-            lowerContent.contains('analyze image') || lowerContent.contains('看看图')) {
+        if (lowerUserText.contains('看图') || lowerUserText.contains('分析图') || 
+            lowerUserText.contains('图片里') || lowerUserText.contains('图中') ||
+            lowerUserText.contains('analyze image') || lowerUserText.contains('看看图') ||
+            lowerUserText.contains('这张图') || lowerUserText.contains('图片')) {
           debugPrint('👁️ Inferred VISION');
           return AgentDecision(
             type: AgentActionType.vision,
-            content: content,
+            content: userText,
             reason: '[AUTO-INFERRED] Detected image analysis intent.',
             continueAfter: true,
           );
         }
         
         // ====== READ KNOWLEDGE INTENT ======
-        final chunkIdMatch = RegExp(r'(chunk_\w+|读取\s*[\w_]+)').firstMatch(content);
-        if (chunkIdMatch != null || lowerContent.contains('读取知识') || lowerContent.contains('获取块')) {
+        final chunkIdMatch = RegExp(r'(chunk_\w+|读取\s*[\w_]+)').firstMatch(userText);
+        if (chunkIdMatch != null || lowerUserText.contains('读取知识') || lowerUserText.contains('获取块')) {
           final chunkId = chunkIdMatch?.group(0)?.replaceAll('读取', '').trim() ?? '';
           debugPrint('📖 Inferred READ_KNOWLEDGE: $chunkId');
           return AgentDecision(
             type: AgentActionType.read_knowledge,
-            content: chunkId.isNotEmpty ? chunkId : content,
+            content: chunkId.isNotEmpty ? chunkId : userText,
             reason: '[AUTO-INFERRED] Detected knowledge reading intent.',
             continueAfter: true,
           );
         }
         
         // ====== DELETE KNOWLEDGE INTENT ======
-        if (lowerContent.contains('删除知识') || lowerContent.contains('移除') ||
-            lowerContent.contains('delete knowledge') || lowerContent.contains('remove file')) {
-          final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|doc)').firstMatch(content);
+        if (lowerUserText.contains('删除知识') || lowerUserText.contains('移除') ||
+            lowerUserText.contains('delete knowledge') || lowerUserText.contains('remove file')) {
+          final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|doc)').firstMatch(userText);
           debugPrint('🗑️ Inferred DELETE_KNOWLEDGE');
           return AgentDecision(
             type: AgentActionType.delete_knowledge,
-            content: idMatch?.group(0) ?? content,
+            content: idMatch?.group(0) ?? userText,
             reason: '[AUTO-INFERRED] Detected knowledge deletion intent.',
             continueAfter: false,
           );
         }
         
         // ====== TAKE NOTE INTENT ======
-        if (lowerContent.contains('记下') || lowerContent.contains('记录') || 
-            lowerContent.contains('note') || lowerContent.contains('记住')) {
+        if (lowerUserText.contains('记下') || lowerUserText.contains('记录') || 
+            lowerUserText.contains('note') || lowerUserText.contains('记住')) {
           debugPrint('📝 Inferred TAKE_NOTE');
           return AgentDecision(
             type: AgentActionType.take_note,
-            content: content,
+            content: userText,
             reason: '[AUTO-INFERRED] Detected note-taking intent.',
             continueAfter: true,
           );
         }
         
         // ====== HYPOTHESIZE INTENT ======
-        if (lowerContent.contains('假设') || lowerContent.contains('可能的方案') || 
-            lowerContent.contains('几种方法') || lowerContent.contains('hypothes') ||
-            lowerContent.contains('alternatives') || lowerContent.contains('options')) {
+        if (lowerUserText.contains('假设') || lowerUserText.contains('可能的方案') || 
+            lowerUserText.contains('几种方法') || lowerUserText.contains('hypothes') ||
+            lowerUserText.contains('alternatives') || lowerUserText.contains('options')) {
           debugPrint('💡 Inferred HYPOTHESIZE');
           return AgentDecision(
             type: AgentActionType.hypothesize,
-            content: content,
+            content: userText,
             hypotheses: ['方案1', '方案2'], // Placeholder
             selectedHypothesis: '方案1',
             reason: '[AUTO-INFERRED] Detected hypothesis generation intent.',
@@ -3142,101 +3280,46 @@ Output your decision as JSON:
           );
         }
         
-        // ====== MULTI-STEP PLAN DETECTION ======
-        // Detect "先...再...然后..." or "1. ... 2. ... 3. ..." patterns
-        final multiStepPatterns = [
-          RegExp(r'(先|首先|第一步)[：:,，]?\s*(.+?)(再|然后|接着|第二步|之后)', caseSensitive: false),
-          RegExp(r'1[\.、]\s*(.+?)\s*2[\.、]', caseSensitive: false),
-          RegExp(r'(step\s*1|first)[：:,]?\s*(.+?)(step\s*2|then|next)', caseSensitive: false),
-        ];
+        // ====== DEFAULT: Force SEARCH for any non-trivial query ======
+        // If we got here, model failed to produce JSON and no specific intent matched
+        final isSimpleGreeting = userText.length < 10 && 
+            (lowerUserText.contains('你好') || lowerUserText.contains('hi') || 
+             lowerUserText.contains('hello') || lowerUserText.contains('谢谢') ||
+             lowerUserText.contains('好的') || lowerUserText.contains('ok'));
         
-        for (var pattern in multiStepPatterns) {
-          final match = pattern.firstMatch(content);
-          if (match != null) {
-            debugPrint('📋 Detected MULTI-STEP PLAN in response');
-            // Extract the FIRST step only, let the loop handle the rest
-            String firstStep = match.group(2)?.trim() ?? match.group(1)?.trim() ?? '';
-            
-            // Now determine what the first step wants to do
-            final firstStepLower = firstStep.toLowerCase();
-            
-            if (firstStepLower.contains('搜索') || firstStepLower.contains('search') || firstStepLower.contains('查找')) {
-              final queryMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(firstStep);
-              final query = queryMatch?.group(1) ?? firstStep.replaceAll(RegExp(r'(搜索|查找|search)'), '').trim();
-              debugPrint('📋 Multi-step: First action is SEARCH: $query');
-              return AgentDecision(
-                type: AgentActionType.search,
-                query: query.isNotEmpty ? query : '用户问题相关信息',
-                reason: '[MULTI-STEP PLAN] Step 1: Search. More steps will follow.',
-                continueAfter: true, // Important: continue to next step
-              );
-            }
-            
-            if (firstStepLower.contains('分析') || firstStepLower.contains('思考') || firstStepLower.contains('理解')) {
-              debugPrint('📋 Multi-step: First action is REFLECT');
-              return AgentDecision(
-                type: AgentActionType.reflect,
-                content: '执行多步计划的第一步：$firstStep',
-                reason: '[MULTI-STEP PLAN] Step 1: Reflect/Analyze.',
-                continueAfter: true,
-              );
-            }
-            
-            if (firstStepLower.contains('画') || firstStepLower.contains('生成图')) {
-              debugPrint('📋 Multi-step: First action is DRAW');
-              return AgentDecision(
-                type: AgentActionType.draw,
-                content: firstStep,
-                reason: '[MULTI-STEP PLAN] Step 1: Draw.',
-                continueAfter: true, // Might want to comment on result
-              );
-            }
-            
-            // Default: treat first step as reflection to understand the plan
-            debugPrint('📋 Multi-step: Converting plan to REFLECT');
-            return AgentDecision(
-              type: AgentActionType.reflect,
-              content: '用户需要多步操作，计划是：$content',
-              reason: '[MULTI-STEP PLAN] Converting complex plan to reflection first.',
-              continueAfter: true,
-            );
-          }
-        }
-        
-        // ====== SEQUENTIAL ACTIONS IN LIST FORMAT ======
-        // Detect numbered or bulleted lists that might be action sequences
-        final listItems = RegExp(r'[\d\-\*•]\s*[\.、]?\s*(.+)').allMatches(content).toList();
-        if (listItems.length >= 2) {
-          debugPrint('📋 Detected ${listItems.length} list items, treating as plan');
-          final firstItem = listItems.first.group(1)?.trim() ?? '';
-          final firstItemLower = firstItem.toLowerCase();
-          
-          // Analyze the first item
-          if (firstItemLower.contains('搜索') || firstItemLower.contains('查')) {
-            return AgentDecision(
-              type: AgentActionType.search,
-              query: firstItem.replaceAll(RegExp(r'(搜索|查找|查询|search)'), '').trim(),
-              reason: '[LIST PLAN] Executing item 1 of ${listItems.length}.',
-              continueAfter: true,
-            );
-          }
-          
-          // Default: reflect on the list
+        if (isSimpleGreeting) {
+          debugPrint('👋 Simple greeting detected');
           return AgentDecision(
-            type: AgentActionType.reflect,
-            content: '发现多步计划，共${listItems.length}步：${listItems.map((m) => m.group(1)).join(" → ")}',
-            reason: '[LIST PLAN] Reflecting on multi-step plan.',
-            continueAfter: true,
+            type: AgentActionType.answer,
+            content: '',
+            reason: '[GREETING] Simple greeting, no tools needed.',
           );
         }
         
-        // Strategy 3: If nothing matched, treat as answer (but log it)
-        debugPrint('⚠️ No intent pattern matched, treating as direct answer');
-        return AgentDecision(
-          type: AgentActionType.answer,
-          content: content,
-          reason: '[PASSTHROUGH] No structured intent detected, using raw response as answer.',
-        );
+        // Check if search is available before forcing it
+        if (searchAvailable) {
+          // For everything else, force a search
+          String searchQuery = userText.replaceAll(RegExp(r'(请|帮我|告诉我|我想知道|什么是|怎么|如何|呢|吗|吧|？|\?)'), '').trim();
+          if (searchQuery.length > 80) searchQuery = searchQuery.substring(0, 80);
+          if (searchQuery.isEmpty) searchQuery = userText.split(' ').take(5).join(' ');
+          
+          debugPrint('🔍 Default fallback: SEARCH with "$searchQuery"');
+          return AgentDecision(
+            type: AgentActionType.search,
+            query: searchQuery,
+            reason: '[DEFAULT FALLBACK] No specific intent matched, using search.',
+            continueAfter: true,
+          );
+        } else {
+          // No search available, fall back to direct answer
+          debugPrint('📝 Default fallback: No search available, using answer');
+          return AgentDecision(
+            type: AgentActionType.answer,
+            content: '',
+            reason: '[DEFAULT FALLBACK] No search API configured, using direct answer.',
+            continueAfter: false,
+          );
+        }
         
       } else {
         debugPrint('❌ Agent API returned status ${resp.statusCode}: ${resp.body}');
@@ -3245,9 +3328,28 @@ Output your decision as JSON:
       debugPrint('❌ Agent planning exception: $e');
     }
     
-    // Fallback - but now we know WHY
-    debugPrint('⚠️ Falling back to answer due to parsing failure');
-    return AgentDecision(type: AgentActionType.answer, reason: "Fallback: Model did not return valid JSON. Check debug logs.");
+    // Fallback - API failed completely, still try to help user
+    // Check if search is available before using it
+    if (searchAvailable) {
+      debugPrint('⚠️ API failed, forcing search on user query');
+      String fallbackQuery = userText.replaceAll(RegExp(r'[？\?]'), '').trim();
+      if (fallbackQuery.length > 60) fallbackQuery = fallbackQuery.substring(0, 60);
+      
+      return AgentDecision(
+        type: AgentActionType.search,
+        query: fallbackQuery.isNotEmpty ? fallbackQuery : 'user question',
+        reason: '[API FALLBACK] API error, attempting search.',
+        continueAfter: true,
+      );
+    } else {
+      debugPrint('⚠️ API failed and no search available, using direct answer');
+      return AgentDecision(
+        type: AgentActionType.answer,
+        content: '',
+        reason: '[API FALLBACK] API error and no search configured, using direct answer.',
+        continueAfter: false,
+      );
+    }
   }
 
   // _analyzeIntent removed as it is superseded by _planAgentStep and the Agent Loop.
@@ -3387,53 +3489,97 @@ Output your decision as JSON:
     try {
       while (steps < maxSteps) {
         AgentDecision decision;
+        bool isFromPlan = false;
+        int planStepIndex = -1;
         
         // Check if we have an active plan with remaining steps
         if (_currentPlan != null && _currentPlanStep < _currentPlan!.steps.length) {
           // ===== PLAN MODE: Execute next step from existing plan =====
-          _currentPlanStep++;
-          final stepIndex = _currentPlanStep - 1;
-          final step = _currentPlan!.steps[stepIndex];
+          planStepIndex = _currentPlanStep;
+          final step = _currentPlan!.steps[planStepIndex];
+          isFromPlan = true;
           
-          setState(() => _loadingStatus = '执行计划步骤 ${_currentPlanStep}/${_currentPlan!.steps.length}: ${step.action.name}...');
-          debugPrint('📋 Executing plan step $_currentPlanStep: ${step.action.name}');
+          setState(() => _loadingStatus = '执行计划 [${planStepIndex + 1}/${_currentPlan!.steps.length}]: ${step.action.name}...');
+          debugPrint('📋 Executing plan step ${planStepIndex + 1}: ${step.action.name}');
           
-          // Check dependencies (skip if dependencies not met)
+          // Check dependencies - verify that dependent steps succeeded
           bool dependenciesMet = true;
-          for (var depIdx in step.dependsOn) {
-            if (depIdx > sessionDecisions.length) {
+          String? failedDependency;
+          for (var depStep in step.dependsOn) {
+            // depStep is 1-indexed, sessionDecisions contains results
+            if (depStep > sessionDecisions.length) {
               dependenciesMet = false;
-              debugPrint('⚠️ Step $_currentPlanStep dependency on step $depIdx not yet complete');
+              failedDependency = 'Step $depStep not yet executed';
+              break;
+            }
+            // Check if the dependent step failed
+            final depDecision = sessionDecisions[depStep - 1];
+            if (depDecision.reason?.contains('FAILED') == true || 
+                depDecision.reason?.contains('error') == true ||
+                depDecision.reason?.contains('returned 0') == true) {
+              dependenciesMet = false;
+              failedDependency = 'Step $depStep failed: ${depDecision.reason}';
               break;
             }
           }
           
-          if (!dependenciesMet && !step.continueOnFail) {
-            // Skip this step, try next
-            debugPrint('⏭️ Skipping step $_currentPlanStep due to unmet dependencies');
-            continue;
-          }
-          
-          decision = AgentDecision(
-            type: step.action,
-            query: step.query,
-            content: step.content,
-            filename: step.filename,
-            reason: '[PLAN Step $_currentPlanStep/${_currentPlan!.steps.length}] ${step.purpose}',
-            confidence: _currentPlan!.overallConfidence,
-            continueAfter: _currentPlanStep < _currentPlan!.steps.length,
-          );
-          
-          // If this is the last step, clear the plan
-          if (_currentPlanStep >= _currentPlan!.steps.length) {
-            debugPrint('📋 Plan completed! All ${_currentPlan!.steps.length} steps executed.');
-            _currentPlan = null;
-            _currentPlanStep = 0;
+          if (!dependenciesMet) {
+            debugPrint('⚠️ Step ${planStepIndex + 1} dependency failed: $failedDependency');
+            
+            if (step.continueOnFail) {
+              // Skip this step but continue plan
+              debugPrint('⏭️ Skipping step ${planStepIndex + 1} (continue_on_fail=true)');
+              _currentPlanStep++;
+              continue;
+            } else {
+              // Dependency failed, need to REPLAN
+              debugPrint('🔄 Dependency failed, triggering REPLAN...');
+              
+              // Add failure note to refs so model can see what happened
+              sessionRefs.add(ReferenceItem(
+                title: '⚠️ 计划执行中断',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 无法执行，依赖条件未满足: $failedDependency\n\n原计划: P1:${_currentPlan!.userIntent} | P2:${_currentPlan!.capabilityReview}\n\n请根据当前情况重新规划。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              
+              // Clear plan and let model replan
+              _currentPlan = null;
+              _currentPlanStep = 0;
+              
+              // Fall through to normal planning mode
+              setState(() => _loadingStatus = '正在重新规划 (Step ${steps + 1})...');
+              decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+              isFromPlan = false;
+            }
+          } else {
+            // Dependencies met, create decision from plan step
+            decision = AgentDecision(
+              type: step.action,
+              query: step.query,
+              content: step.content,
+              filename: step.filename,
+              reason: '[PLAN ${planStepIndex + 1}/${_currentPlan!.steps.length}] ${step.purpose}',
+              confidence: _currentPlan!.overallConfidence,
+              continueAfter: true, // Let plan control continuation
+            );
+            
+            _currentPlanStep++;
           }
         } else {
           // ===== NORMAL MODE: Get next decision from API =====
-          setState(() => _loadingStatus = '正在规划下一步 (Step ${steps + 1})...');
+          // This also handles replanning after plan completion or failure
+          setState(() => _loadingStatus = '正在规划 (Step ${steps + 1})...');
           decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+          
+          // If a new plan was created, reset the step counter
+          if (_currentPlan != null && _currentPlanStep == 0) {
+            // Plan was just created in _planAgentStep, first step is already returned
+            _currentPlanStep = 1;
+            isFromPlan = true;
+            planStepIndex = 0;
+          }
         }
         
         sessionDecisions.add(decision); // Record decision
@@ -3454,7 +3600,10 @@ Output your decision as JSON:
           }
         }
 
-        // B. Act (Execute Decision)
+        // B. Act (Execute Decision) - with plan-aware result handling
+        bool stepSucceeded = true;
+        String stepResult = '';
+        
         if (decision.type == AgentActionType.search && decision.query != null) {
           // Action: Search
           setState(() => _loadingStatus = '正在搜索: ${decision.query}...');
@@ -3467,6 +3616,9 @@ Output your decision as JSON:
               final existingUrls = sessionRefs.map((r) => r.url).toSet();
               final uniqueNewRefs = newRefs.where((r) => !existingUrls.contains(r.url)).toList();
               if (uniqueNewRefs.isNotEmpty) {
+                stepSucceeded = true;
+                stepResult = 'Found ${uniqueNewRefs.length} results';
+                
                 // Check if synthesis is enabled
                 final prefs = await SharedPreferences.getInstance();
                 final enableSynthesis = prefs.getBool('enable_search_synthesis') ?? true;
@@ -3543,6 +3695,8 @@ Output your decision as JSON:
             } else {
               // Search returned nothing - let planner decide next action (may rewrite query)
               debugPrint('Search returned no results. Continuing to let planner rewrite query.');
+              stepSucceeded = false;
+              stepResult = 'Search returned 0 results';
               
               // Explicitly add a system note to observations so the Agent SEES the failure
               sessionRefs.add(ReferenceItem(
@@ -3558,11 +3712,28 @@ Output your decision as JSON:
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.search,
                 query: decision.query,
-                reason: '${decision.reason} [RESULT: Search #$searchAttempt returned 0 results. Suggestions: 1) Use different keywords 2) Broaden query 3) Try English terms]',
+                reason: '${decision.reason} [RESULT: FAILED - Search #$searchAttempt returned 0 results. Suggestions: 1) Use different keywords 2) Broaden query 3) Try English terms]',
               );
+              
+              // 🔴 PLAN SELF-ADJUSTMENT: If this was from a plan, trigger replanning
+              if (isFromPlan && _currentPlan != null) {
+                debugPrint('🔄 Plan step failed (search 0 results), triggering REPLAN...');
+                sessionRefs.add(ReferenceItem(
+                  title: '🔄 计划调整通知',
+                  url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: $stepResult\n原计划 P1 意图: ${_currentPlan!.userIntent}\n请根据当前情况调整计划。',
+                  sourceName: 'System',
+                  sourceType: 'system_note',
+                ));
+                _currentPlan = null;
+                _currentPlanStep = 0;
+                steps++;
+                continue; // Let next iteration call _planAgentStep to replan
+              }
+              
               // Check if we've had too many empty searches
               final emptySearches = sessionDecisions.where((d) => 
-                d.type == AgentActionType.search && d.reason?.contains('[RESULT: Search #') == true && d.reason?.contains('returned 0') == true
+                d.type == AgentActionType.search && d.reason?.contains('[RESULT:') == true && d.reason?.contains('returned 0') == true
               ).length;
               if (emptySearches >= 3) {
                 debugPrint('3+ empty searches, forcing answer.');
@@ -3577,6 +3748,8 @@ Output your decision as JSON:
           } catch (searchError) {
             // Search failed - record in action history for planner visibility
             debugPrint('Search failed: $searchError');
+            stepSucceeded = false;
+            stepResult = 'Search error: $searchError';
             
             // Add error note so Agent can see and try alternative approach
             sessionRefs.add(ReferenceItem(
@@ -3590,8 +3763,24 @@ Output your decision as JSON:
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.search,
               query: decision.query,
-              reason: '${decision.reason} [RESULT: Search error - $searchError. Agent should try alternatives.]',
+              reason: '${decision.reason} [RESULT: FAILED - Search error - $searchError. Agent should try alternatives.]',
             );
+            
+            // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
+            if (isFromPlan && _currentPlan != null) {
+              debugPrint('🔄 Plan step failed (search error), triggering REPLAN...');
+              sessionRefs.add(ReferenceItem(
+                title: '🔄 计划调整通知',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: $stepResult\n搜索服务异常，请调整策略（如使用知识库或直接回答）。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              _currentPlan = null;
+              _currentPlanStep = 0;
+              steps++;
+              continue;
+            }
             
             // Count search failures
             final searchFailures = sessionDecisions.where((d) => 
@@ -3614,6 +3803,30 @@ Output your decision as JSON:
         else if (decision.type == AgentActionType.read_url && decision.content != null) {
           // Action: Read URL content - deep read a specific webpage
           final url = decision.content!.trim();
+          
+          // 🔒 Pre-check: Network access requires search API to be configured
+          final prefs = await SharedPreferences.getInstance();
+          final hasNetworkAccess = (prefs.getString('exa_key') ?? '').isNotEmpty ||
+                                   (prefs.getString('you_key') ?? '').isNotEmpty ||
+                                   (prefs.getString('brave_key') ?? '').isNotEmpty;
+          if (!hasNetworkAccess) {
+            debugPrint('⚠️ read_url requested but no network API configured');
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 网页读取失败',
+              url: 'internal://error/read_url-no-api/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '无法读取网页：未配置搜索/网络API。\n请在设置中配置 Exa、You.com 或 Brave Search API。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.read_url,
+              content: url,
+              reason: '${decision.reason} [RESULT: FAILED - No network API configured. Cannot access web.]',
+            );
+            steps++;
+            continue;
+          }
+          
           setState(() => _loadingStatus = '正在阅读网页内容...');
           debugPrint('Agent reading URL: $url');
           
@@ -3624,6 +3837,8 @@ Output your decision as JSON:
             if ((urlRef.reliability ?? 0.0) > 0.0) {
               // Success - add to session refs
               sessionRefs.add(urlRef);
+              stepSucceeded = true;
+              stepResult = 'Read ${urlRef.snippet.length} chars from ${urlRef.sourceName}';
               
               final contentLength = urlRef.snippet.length;
               sessionDecisions.last = AgentDecision(
@@ -3635,12 +3850,31 @@ Output your decision as JSON:
               debugPrint('URL read success: $contentLength chars');
             } else {
               // Failed to fetch
+              stepSucceeded = false;
+              stepResult = 'Failed to read URL: ${urlRef.snippet}';
+              
               sessionRefs.add(urlRef); // Still add error ref for Agent awareness
               sessionDecisions.last = AgentDecision(
                 type: AgentActionType.read_url,
                 content: url,
                 reason: '${decision.reason} [RESULT: FAILED to read URL. Error: ${urlRef.snippet}]',
               );
+              
+              // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
+              if (isFromPlan && _currentPlan != null) {
+                debugPrint('🔄 Plan step failed (URL read failed), triggering REPLAN...');
+                sessionRefs.add(ReferenceItem(
+                  title: '🔄 计划调整通知',
+                  url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 无法读取URL $url\n请调整策略（如搜索其他来源或使用已有信息）。',
+                  sourceName: 'System',
+                  sourceType: 'system_note',
+                ));
+                _currentPlan = null;
+                _currentPlanStep = 0;
+                steps++;
+                continue;
+              }
             }
             
             if (!decision.continueAfter) {
@@ -3654,11 +3888,31 @@ Output your decision as JSON:
             continue;
           } catch (e) {
             debugPrint('read_url error: $e');
+            stepSucceeded = false;
+            stepResult = 'URL read exception: $e';
+            
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.read_url,
               content: url,
-              reason: '${decision.reason} [RESULT: Exception - $e]',
+              reason: '${decision.reason} [RESULT: FAILED - Exception - $e]',
             );
+            
+            // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
+            if (isFromPlan && _currentPlan != null) {
+              debugPrint('🔄 Plan step failed (URL exception), triggering REPLAN...');
+              sessionRefs.add(ReferenceItem(
+                title: '🔄 计划调整通知',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: URL读取异常 - $e\n请调整策略。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              _currentPlan = null;
+              _currentPlanStep = 0;
+              steps++;
+              continue;
+            }
+            
             // Fallback to answer
             setState(() => _loadingStatus = '网页读取失败，正在回答...');
             await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
@@ -3667,6 +3921,26 @@ Output your decision as JSON:
         } 
         else if (decision.type == AgentActionType.draw && decision.content != null) {
           // Action: Draw
+          
+          // 🔒 Pre-check: Is Draw API configured?
+          if (_imgBase.contains('your-oneapi-host') || _imgKey.isEmpty) {
+            debugPrint('⚠️ draw requested but Draw API not configured');
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 图片生成失败',
+              url: 'internal://error/draw-no-api/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '无法生成图片：未配置生图API。\n请在设置中配置图片生成API（如 DALL-E）。\n建议：告知用户需要先配置API。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.draw,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: FAILED - Draw API not configured. Cannot generate images.]',
+            );
+            steps++;
+            continue;
+          }
+          
           setState(() => _loadingStatus = '正在生成图片...');
           final generatedPath = await _performImageGeneration(decision.content!, addUserMessage: false, manageSendingState: false);
           if (generatedPath != null) {
@@ -3725,12 +3999,32 @@ Output your decision as JSON:
           } else {
             // Generation returned null (failed)
             debugPrint('Draw returned null');
+            stepSucceeded = false;
+            stepResult = 'Image generation failed';
+            
             final failedPrompt = decision.content ?? '';
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.draw,
               content: decision.content,
-              reason: '${decision.reason} [RESULT: Draw FAILED. Possible causes: 1) Invalid prompt 2) Content policy violation 3) API error. Prompt was: "${failedPrompt.length > 50 ? failedPrompt.substring(0, 50) + "..." : failedPrompt}"]',
+              reason: '${decision.reason} [RESULT: FAILED - Draw FAILED. Possible causes: 1) Invalid prompt 2) Content policy violation 3) API error. Prompt was: "${failedPrompt.length > 50 ? failedPrompt.substring(0, 50) + "..." : failedPrompt}"]',
             );
+            
+            // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
+            if (isFromPlan && _currentPlan != null) {
+              debugPrint('🔄 Plan step failed (draw failed), triggering REPLAN...');
+              sessionRefs.add(ReferenceItem(
+                title: '🔄 计划调整通知',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 图片生成失败\n提示词: "${failedPrompt.length > 100 ? failedPrompt.substring(0, 100) + "..." : failedPrompt}"\n请调整策略（如修改提示词或告知用户）。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              _currentPlan = null;
+              _currentPlanStep = 0;
+              steps++;
+              continue;
+            }
+            
             // Fallback to answer explaining the failure
             setState(() => _loadingStatus = '生图失败，正在回复...');
             await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
@@ -3790,11 +4084,14 @@ Output your decision as JSON:
             }
           } else {
             // All failed
+            stepSucceeded = false;
+            stepResult = 'All knowledge chunks not found';
+            
             final availableIds = _knowledgeService.getAllChunkIds();
             final suggestion = availableIds.isNotEmpty 
                 ? 'Available IDs: ${availableIds.take(5).join(", ")}${availableIds.length > 5 ? "..." : ""}'
                 : 'Knowledge base is empty.';
-            resultMsg = 'All chunks NOT FOUND: ${failedReads.join(", ")}. $suggestion';
+            resultMsg = 'FAILED - All chunks NOT FOUND: ${failedReads.join(", ")}. $suggestion';
             
             sessionRefs.add(ReferenceItem(
               title: '⚠️ 知识库查询失败',
@@ -3803,6 +4100,20 @@ Output your decision as JSON:
               sourceName: 'KnowledgeBase',
               sourceType: 'system_note',
             ));
+            
+            // 🔴 PLAN SELF-ADJUSTMENT
+            if (isFromPlan && _currentPlan != null) {
+              debugPrint('🔄 Plan step failed (knowledge not found), triggering REPLAN...');
+              sessionRefs.add(ReferenceItem(
+                title: '🔄 计划调整通知',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 知识库内容未找到\n请调整策略（如使用search_knowledge搜索或使用其他工具）。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              _currentPlan = null;
+              _currentPlanStep = 0;
+            }
           }
           
           // Add combined content as a single comprehensive reference
@@ -3911,10 +4222,15 @@ Output your decision as JSON:
             resultBuffer.writeln('📚 Search Results (Batch ${knowledgeSearchBatchIndex + 1}, showing ${results.length} of $totalMatches matches):');
             resultBuffer.writeln('Keywords: $keywords\n');
             
+            // Collect all chunk IDs for easy reference
+            final chunkIdList = results.map((r) => r['id'] as String).toList();
+            resultBuffer.writeln('📋 Available Chunk IDs: ${chunkIdList.join(', ')}');
+            resultBuffer.writeln('   ↳ Use these IDs with read_knowledge to get full content!\n');
+            
             for (var result in results) {
               resultBuffer.writeln('━━━━━━━━━━━━━━━━━━━━');
               resultBuffer.writeln('📄 File: ${result['filename']}');
-              resultBuffer.writeln('🔖 Chunk ID: ${result['id']} (Chunk #${result['chunkIndex']})');
+              resultBuffer.writeln('🔖 Chunk ID: ${result['id']} ← Use this ID for read_knowledge');
               resultBuffer.writeln('🎯 Match Score: ${result['score']} keyword(s)');
               resultBuffer.writeln('📝 Summary: ${result['summary']}');
             }
@@ -3922,9 +4238,10 @@ Output your decision as JSON:
             if (hasMore) {
               resultBuffer.writeln('\n⏳ More results available: $remainingCount remaining');
               resultBuffer.writeln('💡 Use search_knowledge with same keywords to see next batch.');
-              resultBuffer.writeln('💡 Or use take_note to record findings, then read_knowledge to get content.');
+              resultBuffer.writeln('💡 Or use read_knowledge with IDs: ${chunkIdList.join(', ')}');
             } else {
               resultBuffer.writeln('\n✅ All $totalMatches results shown.');
+              resultBuffer.writeln('💡 Next: Use read_knowledge with content="${chunkIdList.join(', ')}" to read full content.');
             }
           }
           
@@ -4000,13 +4317,32 @@ Output your decision as JSON:
              ));
           } else {
              // Failed or Cancelled
+             stepSucceeded = false;
+             stepResult = 'File save cancelled or failed';
+             
              sessionDecisions.last = AgentDecision(
                 type: AgentActionType.save_file,
                 filename: decision.filename,
                 content: decision.content,
-                reason: '${decision.reason} [RESULT: File save cancelled or failed]',
+                reason: '${decision.reason} [RESULT: FAILED - File save cancelled or failed]',
                 continueAfter: decision.continueAfter,
              );
+             
+             // 🔴 PLAN SELF-ADJUSTMENT
+             if (isFromPlan && _currentPlan != null) {
+               debugPrint('🔄 Plan step failed (save_file failed), triggering REPLAN...');
+               sessionRefs.add(ReferenceItem(
+                 title: '🔄 计划调整通知',
+                 url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                 snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 文件保存失败\n请调整策略（如询问用户或使用其他工具）。',
+                 sourceName: 'System',
+                 sourceType: 'system_note',
+               ));
+               _currentPlan = null;
+               _currentPlanStep = 0;
+               steps++;
+               continue;
+             }
           }
           
           if (!decision.continueAfter) {
@@ -4024,6 +4360,9 @@ Output your decision as JSON:
           final isEnabled = await SystemControl.isServiceEnabled();
           if (!isEnabled) {
              // Service not enabled - ask user
+             stepSucceeded = false;
+             stepResult = 'Accessibility Service not enabled';
+             
              sessionDecisions.last = AgentDecision(
                 type: AgentActionType.system_control,
                 content: decision.content,
@@ -4038,6 +4377,22 @@ Output your decision as JSON:
                 sourceName: 'SystemControl',
                 sourceType: 'system',
              ));
+             
+             // 🔴 PLAN SELF-ADJUSTMENT
+             if (isFromPlan && _currentPlan != null) {
+               debugPrint('🔄 Plan step failed (system_control no permission), triggering REPLAN...');
+               sessionRefs.add(ReferenceItem(
+                 title: '🔄 计划调整通知',
+                 url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                 snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 系统控制需要权限\n请调整策略（告知用户需要授权）。',
+                 sourceName: 'System',
+                 sourceType: 'system_note',
+               ));
+               _currentPlan = null;
+               _currentPlanStep = 0;
+               steps++;
+               continue;
+             }
              
              // Prompt user to open settings
              setState(() {
@@ -4088,6 +4443,22 @@ Output your decision as JSON:
                 sourceName: 'SystemControl',
                 sourceType: 'system',
              ));
+          } else {
+             // 🔴 PLAN SELF-ADJUSTMENT for failed system control
+             if (isFromPlan && _currentPlan != null) {
+               debugPrint('🔄 Plan step failed (system_control failed), triggering REPLAN...');
+               sessionRefs.add(ReferenceItem(
+                 title: '🔄 计划调整通知',
+                 url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                 snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 系统操作 $action 失败\n请调整策略。',
+                 sourceName: 'System',
+                 sourceType: 'system_note',
+               ));
+               _currentPlan = null;
+               _currentPlanStep = 0;
+               steps++;
+               continue;
+             }
           }
           
           if (!decision.continueAfter) break;
@@ -4096,6 +4467,28 @@ Output your decision as JSON:
         }
         else if (decision.type == AgentActionType.vision && currentSessionImagePath != null) {
           // Action: Additional Vision Analysis (with custom prompt)
+          
+          // 🔒 Pre-check: Is Vision API configured? (with fallback to Chat API)
+          final visionApiConfigured = !_visionBase.contains('your-oneapi-host') && _visionKey.isNotEmpty;
+          final chatApiConfigured = !_chatBase.contains('your-oneapi-host') && _chatKey.isNotEmpty;
+          if (!visionApiConfigured && !chatApiConfigured) {
+            debugPrint('⚠️ vision requested but neither Vision nor Chat API configured');
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 图片分析失败',
+              url: 'internal://error/vision-no-api/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '无法分析图片：未配置识图API或聊天API。\n请在设置中至少配置一个支持视觉的模型。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.vision,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: FAILED - No Vision/Chat API configured. Cannot analyze images.]',
+            );
+            steps++;
+            continue;
+          }
+          
           // Count existing vision analyses for context
           final existingVisionCount = sessionRefs.where((r) => r.sourceType == 'vision').length;
           setState(() => _loadingStatus = '正在深度分析图片 (第${existingVisionCount + 1}次分析)...');
@@ -4149,11 +4542,28 @@ Output your decision as JSON:
             // Continue loop to process the new vision info
           } catch (visionError) {
             debugPrint('Vision analysis failed: $visionError');
+            stepSucceeded = false;
+            stepResult = 'Vision exception: $visionError';
+            
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.vision,
               content: decision.content,
-              reason: '${decision.reason} [RESULT: Vision failed - $visionError. Consider: 1) Different prompt 2) Fallback to describe without analysis]',
+              reason: '${decision.reason} [RESULT: FAILED - Vision failed - $visionError. Consider: 1) Different prompt 2) Fallback to describe without analysis]',
             );
+            
+            // 🔴 PLAN SELF-ADJUSTMENT
+            if (isFromPlan && _currentPlan != null) {
+              debugPrint('🔄 Plan step failed (vision error), triggering REPLAN...');
+              sessionRefs.add(ReferenceItem(
+                title: '🔄 计划调整通知',
+                url: 'internal://plan/replan/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '原计划步骤 ${planStepIndex + 1} 执行失败: 图片分析异常 - $visionError\n请调整策略。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              _currentPlan = null;
+              _currentPlanStep = 0;
+            }
             // Continue loop - Agent will decide next action based on failure
           }
           steps++;
@@ -4300,41 +4710,109 @@ Output your decision as JSON:
           await _saveChatHistory();
           return; // Exit Agent loop, wait for user input
         }
-        else if (decision.type == AgentActionType.answer || 
-                 (decision.type == AgentActionType.vision && currentSessionImagePath == null)) {
-          // Action: Answer (or vision without image = fallback to answer)
+        else if (decision.type == AgentActionType.vision && currentSessionImagePath == null) {
+          // ⚠️ Vision requested but NO IMAGE available - this is an error!
+          debugPrint('⚠️ Vision requested but no image available');
+          stepSucceeded = false;
+          stepResult = 'Vision failed: No image in current session';
           
-          // 🔴 CRITICAL FIX: Prevent premature answering on first step
-          // If this is the FIRST step and Agent chose "answer" without using any tools,
-          // force it to think about whether tools could help.
-          // Exceptions: simple greetings, follow-up questions, or explicit user requests
+          sessionDecisions.last = AgentDecision(
+            type: AgentActionType.vision,
+            content: decision.content,
+            reason: '${decision.reason} [RESULT: FAILED - No image available. User must send an image first.]',
+          );
+          
+          sessionRefs.add(ReferenceItem(
+            title: '⚠️ 图片分析失败',
+            url: 'internal://error/vision-no-image/${DateTime.now().millisecondsSinceEpoch}',
+            snippet: '无法执行图片分析：当前会话没有图片。\n请提示用户发送图片，或使用其他工具（如search）获取信息。',
+            sourceName: 'System',
+            sourceType: 'system_note',
+          ));
+          
+          // 🔴 PLAN SELF-ADJUSTMENT
+          if (isFromPlan && _currentPlan != null) {
+            debugPrint('🔄 Plan step failed (vision no image), triggering REPLAN...');
+            _currentPlan = null;
+            _currentPlanStep = 0;
+          }
+          
+          steps++;
+          continue; // Let Agent try alternative approach
+        }
+        else if (decision.type == AgentActionType.answer) {
+          // Action: Answer
+          
+          // 🧠 SMART FEEDBACK: Instead of forcing, provide feedback and let Agent decide
           final isSimpleGreeting = content.length < 10 && 
             (content.contains('你好') || content.contains('hi') || content.contains('hello') ||
              content.contains('谢谢') || content.contains('再见') || content.contains('好的'));
-          final hasToolsAlreadyUsed = sessionDecisions.any((d) => 
-            d.type != AgentActionType.answer && 
-            d.type != AgentActionType.reflect && 
-            d.type != AgentActionType.hypothesize);
           
-          if (steps == 0 && !isSimpleGreeting && !hasToolsAlreadyUsed && sessionRefs.isEmpty) {
-            // First step, no tools used, no refs gathered - force reflection
-            debugPrint('⚠️ GUARD: Agent tried to answer on step 0 without using tools. Forcing tool consideration.');
-            setState(() => _loadingStatus = '🤔 正在分析是否需要搜索或其他工具...');
+          // Check if any REAL tools were used (not just reflect/hypothesize which are thinking tools)
+          final hasRealToolsUsed = sessionDecisions.any((d) => 
+            d.type == AgentActionType.search ||
+            d.type == AgentActionType.draw ||
+            d.type == AgentActionType.vision ||
+            d.type == AgentActionType.read_url ||
+            d.type == AgentActionType.search_knowledge ||
+            d.type == AgentActionType.read_knowledge ||
+            d.type == AgentActionType.save_file ||
+            d.type == AgentActionType.system_control);
+          
+          // Check if we have real data from tools (not just system notes)
+          final hasRealData = sessionRefs.any((r) => 
+            r.sourceType != 'system_note' && 
+            r.sourceType != 'system_command' &&
+            r.sourceType != 'system' &&
+            r.sourceType != 'feedback');
+          
+          // Count feedback attempts (not "blocks", just feedback)
+          final feedbackAttempts = sessionDecisions.where((d) => 
+            d.reason?.contains('[FEEDBACK]') == true
+          ).length;
+          
+          // Determine if we should provide feedback or allow the answer
+          final shouldProvideToolFeedback = !isSimpleGreeting && 
+            !hasRealToolsUsed && 
+            !hasRealData && 
+            feedbackAttempts < 2 &&  // Only give feedback twice max
+            steps < maxSteps - 2;
+          
+          if (shouldProvideToolFeedback) {
+            // 🧠 FEEDBACK MODE: Tell Agent what we observed, let it decide
+            debugPrint('💡 FEEDBACK: Agent chose answer without tools. Providing observation for reconsideration.');
+            setState(() => _loadingStatus = '🧠 Agent 正在重新评估...');
             
-            // Inject a strong hint to use tools
+            // Provide observation feedback - NOT a command, just information
             sessionRefs.add(ReferenceItem(
-              title: '⚠️ 系统提示：请优先使用工具',
-              url: 'internal://system/tool-first-reminder',
-              snippet: '您尝试在第一步直接回答，但系统要求：\n1. 如果问题涉及最新信息、事实核查、专业知识 → 使用 search\n2. 如果用户要画图 → 使用 draw\n3. 如果问题复杂 → 使用 reflect\n请重新考虑是否有合适的工具可用。只有简单问候或确认才应直接回答。',
-              sourceName: 'System',
-              sourceType: 'system_note',
+              title: '💡 系统观察反馈 (非强制)',
+              url: 'internal://feedback/observation/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '''[OBSERVATION - Agent 请自行判断]
+
+你选择了直接回答，但系统观察到：
+• 当前 <current_observations> 中没有来自工具的真实数据
+• 用户问题: "$content"
+
+可能的情况分析：
+1. 如果这是一个需要实时信息的问题（新闻、价格、天气等）→ search 可能更好
+2. 如果这是一个创作请求（画图等）→ draw 是正确选择
+3. 如果这确实是一个可以直接回答的问题（常识、简单计算等）→ 继续 answer 是合理的
+4. 如果问题复杂需要思考 → reflect 可以帮助理清思路
+
+请根据你对用户问题的理解，自行决定：
+- 坚持使用 "answer"（如果你确信不需要工具）
+- 或改用其他工具（如果你认为工具能提供更好的回答）
+
+这不是强制命令，是帮助你做出更好决策的反馈。''',
+              sourceName: 'SystemFeedback',
+              sourceType: 'feedback',
             ));
             
-            // Record this attempt in decision history
+            // Record this as a feedback (not a block/override)
             sessionDecisions.add(AgentDecision(
               type: AgentActionType.reflect,
-              content: '系统阻止了直接回答，要求先考虑工具使用',
-              reason: '[SYSTEM GUARD] Prevented premature answer. User asked: "$content". Must reconsider tools.',
+              content: '系统提供了观察反馈，Agent 正在重新评估决策',
+              reason: '[FEEDBACK] Observation provided. Agent will reconsider. User: "$content"',
             ));
             
             steps++;
@@ -4343,17 +4821,28 @@ Output your decision as JSON:
           
           // Deep Think: Check confidence before answering
           if (decision.needsMoreWork && steps < maxSteps - 2) {
-            // Confidence too low - force a reflection before answering
-            debugPrint('Confidence ${decision.confidence} too low, forcing reflection');
-            setState(() => _loadingStatus = '🤔 置信度不足，正在深入思考...');
+            // Confidence too low - provide feedback instead of forcing
+            debugPrint('💡 FEEDBACK: Confidence ${decision.confidence} is low.');
+            setState(() => _loadingStatus = '🧠 Agent 置信度较低，正在重新评估...');
             
-            // Add a note that we're forcing more thought
+            // Provide confidence feedback
             sessionRefs.add(ReferenceItem(
-              title: '⚠️ 置信度检查',
-              url: 'internal://confidence-check/${DateTime.now().millisecondsSinceEpoch}',
-              snippet: '系统检测到回答置信度为 ${((decision.confidence ?? 0.5) * 100).toInt()}%，低于阈值70%。\n已触发深度思考模式，将重新评估策略。\n【不确定性】${decision.uncertainties?.join(", ") ?? "未明确"}',
-              sourceName: 'DeepThink',
-              sourceType: 'system',
+              title: '💡 置信度反馈',
+              url: 'internal://feedback/confidence/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '''[CONFIDENCE OBSERVATION]
+
+你的回答置信度为 ${((decision.confidence ?? 0.5) * 100).toInt()}%，系统观察到这可能不够确定。
+
+不确定性: ${decision.uncertainties?.join(", ") ?? "未明确指出"}
+
+建议（非强制）：
+• 如果不确定事实 → search 可以获取更可靠的信息
+• 如果逻辑复杂 → reflect 可以帮助理清思路
+• 如果你认为当前置信度已足够 → 继续 answer 也可以
+
+请自行判断是否需要额外的工具来提高回答质量。''',
+              sourceName: 'SystemFeedback',
+              sourceType: 'feedback',
             ));
             
             // Continue loop to let Agent reconsider
@@ -4361,8 +4850,14 @@ Output your decision as JSON:
             continue;
           }
           
+          // Agent decided to answer - execute it
           setState(() => _loadingStatus = '正在撰写回复...');
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+          
+          // Clean up plan state after answer
+          _currentPlan = null;
+          _currentPlanStep = 0;
+          
           break; // Answer is a terminal action
         }
         else {
