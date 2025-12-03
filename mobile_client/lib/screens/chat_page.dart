@@ -3518,7 +3518,6 @@ Output your decision as JSON:
 
     // 1. Handle Image Input (Analyze & Prepare)
     if (_selectedImage != null) {
-    if (_selectedImage != null) {
       // Persist the picked image
       currentSessionImagePath = await savePickedImage(_selectedImage!);
       
@@ -3910,6 +3909,14 @@ Output your decision as JSON:
             debugPrint('Search failed: $searchError');
             stepSucceeded = false;
             stepResult = 'Search error: $searchError';
+            
+            // 更新推理面板
+            if (mounted) {
+              setState(() {
+                _reasoningSteps.add('❌ 搜索失败: ${decision.query}');
+                _currentReasoning = '正在考虑备选方案...';
+              });
+            }
             
             // Add error note so Agent can see and try alternative approach
             sessionRefs.add(ReferenceItem(
@@ -4569,7 +4576,11 @@ Output your decision as JSON:
         else if (decision.type == AgentActionType.system_control && decision.content != null) {
           // Action: System Control
           final action = decision.content!.toLowerCase();
-          setState(() => _loadingStatus = '正在执行系统操作: $action...');
+          setState(() {
+            _loadingStatus = '正在执行系统操作: $action...';
+            _reasoningSteps.add('🔧 系统控制: $action');
+            _currentReasoning = '正在执行系统操作...';
+          });
           
           // Check service status first
           final isEnabled = await SystemControl.isServiceEnabled();
@@ -4878,7 +4889,11 @@ Output your decision as JSON:
         }
         else if (decision.type == AgentActionType.clarify) {
           // Action: Request Clarification from User
-          setState(() => _loadingStatus = '❓ 需要您提供更多信息...');
+          setState(() {
+            _loadingStatus = '❓ 需要您提供更多信息...';
+            _reasoningSteps.add('❓ 请求澄清: 需要更多信息');
+            _currentReasoning = '等待用户回复...';
+          });
           debugPrint('Agent requesting clarification: ${decision.content}');
           
           final clarificationRequest = decision.content ?? '请提供更多信息';
@@ -5178,26 +5193,32 @@ Output your decision as JSON:
       if (steps >= maxSteps) {
         // Fallback if max steps reached
         setState(() => _loadingStatus = '思考步骤过多，正在强制回复...');
+        // 清理 Plan 状态
+        _currentPlan = null;
+        _currentPlanStep = 0;
         await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
       }
 
     } catch (e) {
       _showError('Agent Error: $e');
+      // 出错时也清理 Plan 状态
+      _currentPlan = null;
+      _currentPlanStep = 0;
     } finally {
       if (mounted) {
         setState(() {
           _sending = false;
           _loadingStatus = '';
-          // 延迟隐藏推理链面板
-          Future.delayed(const Duration(seconds: 2), () {
-            if (mounted && !_sending) {
-              setState(() {
-                _showReasoningPanel = false;
-                _reasoningSteps = [];
-                _currentReasoning = '';
-              });
-            }
-          });
+        });
+        // 延迟隐藏推理链面板 (移到 setState 外部)
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted && !_sending) {
+            setState(() {
+              _showReasoningPanel = false;
+              _reasoningSteps = [];
+              _currentReasoning = '';
+            });
+          }
         });
       }
     }
