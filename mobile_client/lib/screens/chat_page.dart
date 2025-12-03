@@ -3213,7 +3213,7 @@ Output your decision as JSON:
         for (var pattern in searchPatterns) {
           if (pattern.hasMatch(userText)) {
             // Extract any quoted text as query, or use user's input cleaned up
-            final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
+            final quoteMatch = RegExp('["\'“”]([^"\'“”]+)["\'“”]').firstMatch(userText);
             String query = quoteMatch?.group(1) ?? '';
             if (query.isEmpty) {
               // Use the user's text directly as search query
@@ -3233,15 +3233,15 @@ Output your decision as JSON:
         
         // ====== DRAW INTENT ======
         final drawPatterns = [
-          RegExp(r'(画|绘制|生成图片|draw|generate image|create image)\s*[：:「"\']?([^」"\'。\n]+)', caseSensitive: false),
-          RegExp(r'(应该|需要|可以)\s*(画|绘制|生成)', caseSensitive: false),
+          RegExp('(画|绘制|生成图片|draw|generate image|create image)\\s*[：:"\']?(.+)', caseSensitive: false),
+          RegExp('(应该|需要|可以)\\s*(画|绘制|生成)', caseSensitive: false),
         ];
         for (var pattern in drawPatterns) {
           final match = pattern.firstMatch(userText);
           if (match != null) {
             String? prompt = match.groupCount >= 2 ? match.group(2)?.trim() : null;
             if (prompt == null || prompt.isEmpty) {
-              final quoteMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
+              final quoteMatch = RegExp('["\'“”]([^"\'“”]+)["\'“”]').firstMatch(userText);
               prompt = quoteMatch?.group(1) ?? userText.replaceAll(RegExp(r'(画|绘制|生成|帮我|请)'), '').trim();
             }
             debugPrint('🎨 Inferred DRAW from user input: "$prompt"');
@@ -3330,7 +3330,7 @@ Output your decision as JSON:
         // ====== KNOWLEDGE BASE INTENT ======
         if (lowerUserText.contains('知识库') || lowerUserText.contains('上传的文件') ||
             lowerUserText.contains('knowledge') || lowerUserText.contains('uploaded file')) {
-          final keywordMatch = RegExp(r'[""「\'"]([^""」\'"]+)[""」\'"]').firstMatch(userText);
+          final keywordMatch = RegExp('["\'“”]([^"\'“”]+)["\'“”]').firstMatch(userText);
           final keywords = keywordMatch?.group(1) ?? userText.split('\n').first;
           debugPrint('📚 Inferred SEARCH_KNOWLEDGE: $keywords');
           return AgentDecision(
