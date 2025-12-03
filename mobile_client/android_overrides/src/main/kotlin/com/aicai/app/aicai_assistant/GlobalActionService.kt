@@ -1,4 +1,4 @@
-package com.oneapi.pro.oneapi_assistant_pro
+package com.aicai.app.aicai_assistant
 
 import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
@@ -14,7 +14,7 @@ class GlobalActionService : AccessibilityService() {
 
     private val actionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.oneapi.pro.PERFORM_GLOBAL_ACTION") {
+            if (intent?.action == "com.aicai.app.PERFORM_GLOBAL_ACTION") {
                 val actionId = intent.getIntExtra("actionId", 0)
                 Log.d("GlobalActionService", "Received action request: $actionId")
                 if (actionId > 0) {
@@ -27,7 +27,7 @@ class GlobalActionService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.d("GlobalActionService", "Service Connected")
-        val filter = IntentFilter("com.oneapi.pro.PERFORM_GLOBAL_ACTION")
+        val filter = IntentFilter("com.aicai.app.PERFORM_GLOBAL_ACTION")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(actionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {

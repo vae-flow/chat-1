@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 
 class SystemControl {
-  static const MethodChannel _channel = MethodChannel('com.oneapi.pro/system_control');
+  static const MethodChannel _channel = MethodChannel('com.aicai.app/system_control');
 
   /// Trigger a global system action
   /// [actionId]:

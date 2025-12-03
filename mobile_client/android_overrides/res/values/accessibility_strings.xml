@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="accessibility_service_description">One-API Assistant Pro System Control Service. Allows the AI Agent to perform global actions like Home, Back, and Notifications.</string>
+    <string name="accessibility_service_description">AI财系统控制服务。允许 AI Agent 执行全局操作，如返回主屏、返回和通知栏。</string>
 </resources>

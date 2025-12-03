@@ -1,17 +1,21 @@
 #!/bin/bash
 
-echo "Configuring Android project..."
+echo "Configuring Android project for AI财..."
 
 GRADLE_FILE="android/app/build.gradle"
 MANIFEST_FILE="android/app/src/main/AndroidManifest.xml"
 
-# 1. Update minSdkVersion to 23
+# 1. Update minSdkVersion to 23 and change applicationId
 if [ -f "$GRADLE_FILE" ]; then
     echo "Updating minSdkVersion in $GRADLE_FILE..."
     # Replace variable usage with explicit version 23
     sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 23/g' "$GRADLE_FILE"
     # Also try to replace explicit numbers if they exist and are lower
     sed -i 's/minSdkVersion [0-9]\{1,2\}/minSdkVersion 23/g' "$GRADLE_FILE"
+    
+    # Update applicationId to new package name
+    echo "Updating applicationId..."
+    sed -i 's/applicationId "com.example.aicai_assistant"/applicationId "com.aicai.app.aicai_assistant"/g' "$GRADLE_FILE"
 else
     echo "Error: $GRADLE_FILE not found!"
     exit 1
@@ -36,6 +40,10 @@ if [ -f "$MANIFEST_FILE" ]; then
     else
         echo "Permissions appear to be present already."
     fi
+    
+    # Update android:label to new app name
+    echo "Updating app label..."
+    sed -i 's/android:label="[^"]*"/android:label="AI财"/g' "$MANIFEST_FILE"
     
 else
     echo "Error: $MANIFEST_FILE not found!"

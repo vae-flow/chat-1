@@ -1,4 +1,4 @@
-package com.oneapi.pro.oneapi_assistant_pro
+package com.aicai.app.aicai_assistant
 
 import android.content.Intent
 import android.provider.Settings
@@ -11,10 +11,10 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.oneapi.pro/system_control").setMethodCallHandler { call, result ->
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.aicai.app/system_control").setMethodCallHandler { call, result ->
             if (call.method == "performGlobalAction") {
                 val actionId = call.argument<Int>("actionId")
-                val intent = Intent("com.oneapi.pro.PERFORM_GLOBAL_ACTION")
+                val intent = Intent("com.aicai.app.PERFORM_GLOBAL_ACTION")
                 intent.putExtra("actionId", actionId)
                 intent.setPackage(context.packageName)
                 context.sendBroadcast(intent)

@@ -1,7 +1,7 @@
-name: oneapi_assistant_pro
-description: One-API Assistant Pro - 增强版多功能AI助手客户端
+name: aicai_assistant
+description: AI财 - 智能AI助手，你的互联网嘴替
 publish_to: "none"
-version: 2.0.0+1
+version: 3.0.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
