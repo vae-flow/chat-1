@@ -140,6 +140,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   // PLANNER: Current execution plan (if any)
   AgentPlan? _currentPlan;
   int _currentPlanStep = 0; // Which step of the plan we're on
+  
+  // 初始化状态标志
+  bool _isInitialized = false;
 
   // Settings
   // Chat
@@ -197,12 +200,29 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _initAnimations();
     _initNotifications();
     _loadSettings();
-    _loadPersonas().then((_) {
-      // Initialize knowledge base with current persona after personas are loaded
-      _knowledgeService.init();
-      _knowledgeService.setPersona(_currentPersonaId);
-    });
-    _loadChatHistory();
+    _initializeApp(); // 统一的异步初始化入口
+  }
+  
+  /// 统一异步初始化，确保正确的加载顺序
+  Future<void> _initializeApp() async {
+    // 1. 先加载人格配置（决定 _currentPersonaId）
+    await _loadPersonas();
+    
+    // 2. 初始化知识库服务
+    await _knowledgeService.init();
+    
+    // 3. 设置当前人格的知识库
+    await _knowledgeService.setPersona(_currentPersonaId);
+    
+    // 4. 最后加载聊天历史（依赖 _currentPersonaId）
+    await _loadChatHistory();
+    
+    // 5. 标记初始化完成
+    if (mounted) {
+      setState(() {
+        _isInitialized = true;
+      });
+    }
   }
   
   void _initAnimations() {
@@ -5343,6 +5363,58 @@ Output your decision as JSON:
 
   @override
   Widget build(BuildContext context) {
+    // 等待初始化完成
+    if (!_isInitialized) {
+      return Scaffold(
+        body: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppColors.primaryStart.withOpacity(0.1),
+                AppColors.primaryEnd.withOpacity(0.05),
+              ],
+            ),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    gradient: AppColors.primaryGradient,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primaryStart.withOpacity(0.3),
+                        blurRadius: 20,
+                        spreadRadius: 5,
+                      ),
+                    ],
+                  ),
+                  child: const CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation(Colors.white),
+                    strokeWidth: 3,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  '正在初始化...',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.grey[600],
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    
     final totalChars = _calculateTotalChars();
     final isMemoryFull = totalChars > 50000; // 用户API支持60K tokens
 
