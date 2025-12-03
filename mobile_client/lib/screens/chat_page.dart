@@ -2637,17 +2637,6 @@ $userText
             );
           }
         }
-            if (query.isNotEmpty && query.length < 100) {
-              debugPrint('🔍 Inferred SEARCH: "$query"');
-              return AgentDecision(
-                type: AgentActionType.search,
-                query: query,
-                reason: '[AUTO-INFERRED] Detected search intent in natural language.',
-                continueAfter: true,
-              );
-            }
-          }
-        }
         
         // ====== DRAW INTENT ======
         final drawPatterns = [
@@ -3216,16 +3205,39 @@ $userText
             }
           } catch (searchError) {
             // Search failed - record in action history for planner visibility
-            debugPrint('Search failed: $searchError. Falling back to answer.');
+            debugPrint('Search failed: $searchError');
+            
+            // Add error note so Agent can see and try alternative approach
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 搜索失败',
+              url: 'internal://error/search/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '搜索 "${decision.query}" 失败: $searchError\n\n可能的解决方案:\n1. 尝试不同的关键词\n2. 使用知识库 (search_knowledge)\n3. 直接回答已知信息',
+              sourceName: 'System',
+              sourceType: 'system_note',
+            ));
+            
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.search,
               query: decision.query,
-              reason: '${decision.reason} [RESULT: Search error - $searchError]',
+              reason: '${decision.reason} [RESULT: Search error - $searchError. Agent should try alternatives.]',
             );
-            // Graceful degradation: continue with existing refs or answer directly
-            setState(() => _loadingStatus = '搜索服务暂时不可用，正在生成回答...');
-            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
-            break;
+            
+            // Count search failures
+            final searchFailures = sessionDecisions.where((d) => 
+              d.type == AgentActionType.search && d.reason?.contains('Search error') == true
+            ).length;
+            
+            if (searchFailures >= 3) {
+              // Too many failures, force answer
+              debugPrint('3+ search failures, forcing answer.');
+              setState(() => _loadingStatus = '搜索服务不可用，正在生成回答...');
+              await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+              break;
+            }
+            
+            // Continue loop - let Agent try alternative approach
+            steps++;
+            continue;
           }
         }
         else if (decision.type == AgentActionType.read_url && decision.content != null) {
@@ -3668,16 +3680,26 @@ $userText
           }
           
           bool success = false;
+          String actionResult = '';
           switch (action) {
-            case 'home': success = await SystemControl.goHome(); break;
-            case 'back': success = await SystemControl.goBack(); break;
-            case 'recents': success = await SystemControl.showRecents(); break;
-            case 'notifications': success = await SystemControl.showNotifications(); break;
-            case 'lock': success = await SystemControl.lockScreen(); break;
-            case 'screenshot': success = await SystemControl.takeScreenshot(); break;
+            case 'home': success = await SystemControl.goHome(); actionResult = 'home'; break;
+            case 'back': success = await SystemControl.goBack(); actionResult = 'back'; break;
+            case 'recents': success = await SystemControl.showRecents(); actionResult = 'recents'; break;
+            case 'notifications': success = await SystemControl.showNotifications(); actionResult = 'notifications'; break;
+            case 'lock': success = await SystemControl.lockScreen(); actionResult = 'lock'; break;
+            case 'screenshot': success = await SystemControl.takeScreenshot(); actionResult = 'screenshot'; break;
             default: 
               success = false;
+              actionResult = 'UNKNOWN';
               debugPrint('Unknown system action: $action');
+              // Record available actions for agent context
+              sessionRefs.add(ReferenceItem(
+                title: '❓ 未知的系统操作',
+                url: 'internal://system/unknown-action',
+                snippet: '操作 "$action" 不支持。\n支持的操作有: home, back, recents, notifications, lock, screenshot\n请使用支持的操作或改用其他工具。',
+                sourceName: 'SystemControl',
+                sourceType: 'system_note',
+              ));
           }
           
           sessionDecisions.last = AgentDecision(
