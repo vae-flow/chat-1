@@ -2736,6 +2736,76 @@ ${_activePersona.prompt}
 - depends_on: Array of step numbers that must complete first (e.g., [1,2])
 - output_as: Variable name to store result for later steps (optional)
 - continue_on_fail: If true, continue plan even if this step fails
+
+## 🚀 PLAN TRIGGER CONDITIONS (必须使用PLAN的场景)
+
+**📋 USE PLAN MODE WHEN ANY OF THESE ARE TRUE:**
+1. User asks a question needing RESEARCH + ANALYSIS + ANSWER (3+ steps)
+2. User wants COMPARISON (搜索A → 搜索B → 对比分析)
+3. User asks "详细分析/深入研究/全面了解" (comprehensive request)
+4. Task involves MULTIPLE data sources (网络 + 知识库 + 图片)
+5. User asks about pros/cons, recommendations, or complex decisions
+6. First step may fail and needs fallback strategy
+
+**📋 PLAN EXAMPLES:**
+
+**User: "帮我对比一下iPhone和安卓手机的优缺点"**
+```json
+{
+  "mode": "plan",
+  "P1": "用户需要两个平台的客观对比分析",
+  "P2": "将使用search获取两方信息,reflect整理对比,answer输出结论",
+  "P3": "预期:用户获得清晰的优缺点对比表",
+  "confidence": 0.85,
+  "steps": [
+    {"step": 1, "type": "search", "query": "iPhone优点缺点 2024", "purpose": "获取iOS平台信息"},
+    {"step": 2, "type": "search", "query": "安卓手机优点缺点 2024", "purpose": "获取Android平台信息"},
+    {"step": 3, "type": "reflect", "content": "整理两个平台的优缺点对比...", "purpose": "深入分析", "depends_on": [1,2]},
+    {"step": 4, "type": "answer", "content": "对比分析结果...", "purpose": "最终回答", "depends_on": [3]}
+  ],
+  "fallback": "如果搜索失败，基于通用知识回答"
+}
+```
+
+**User: "我想了解最近的AI新闻，并分析一下趋势"**
+```json
+{
+  "mode": "plan",
+  "P1": "用户要AI新闻+趋势分析(两个子任务)",
+  "P2": "search获取新闻,reflect分析趋势,answer综合",
+  "P3": "预期:新闻摘要+趋势洞察",
+  "confidence": 0.8,
+  "steps": [
+    {"step": 1, "type": "search", "query": "AI新闻 2024年12月", "purpose": "获取最新新闻"},
+    {"step": 2, "type": "reflect", "content": "分析这些新闻背后的趋势...", "purpose": "趋势分析", "depends_on": [1]},
+    {"step": 3, "type": "answer", "content": "", "purpose": "输出新闻摘要和趋势分析", "depends_on": [1,2]}
+  ]
+}
+```
+
+**User: "根据我的知识库回答这个问题"**
+```json
+{
+  "mode": "plan",
+  "P1": "用户要从知识库提取信息",
+  "P2": "search_knowledge找索引,read_knowledge读内容,answer回复",
+  "P3": "预期:基于用户知识库的精准回答",
+  "confidence": 0.9,
+  "steps": [
+    {"step": 1, "type": "search_knowledge", "content": "相关关键词", "purpose": "搜索知识库找到Chunk ID"},
+    {"step": 2, "type": "read_knowledge", "content": "chunk_ids", "purpose": "读取完整内容", "depends_on": [1]},
+    {"step": 3, "type": "answer", "content": "", "purpose": "基于知识库回答", "depends_on": [2]}
+  ]
+}
+```
+
+**📋 USE SINGLE MODE WHEN:**
+- Simple greeting or farewell (你好/谢谢/再见)
+- Single direct action (画图/搜索/保存文件/系统控制)
+- User explicitly asks for ONE thing only
+- <action_history> already shows progress, just need final answer
+
+**⚠️ DEFAULT TO PLAN FOR COMPLEX QUESTIONS. When in doubt, use PLAN!**
 ''';
 
     final userPrompt = '''
@@ -2962,17 +3032,50 @@ ${prevActionsBuffer.toString()}
 ═══════════════════════════════════════════════════════════════
 This is Step 1. Analyze the user's request and context above.
 
+⭐ IMPORTANT: 你有两种输出模式！
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 PLAN MODE (mode: "plan") - 用于复杂多步任务:
+   适用场景：
+   - 用户说"研究/分析/调研..." → 需要搜索+阅读+综合
+   - 用户说"比较A和B" → 需要多次搜索+对比分析
+   - 用户说"写一篇关于X的报告" → 需要调研+组织+撰写
+   - 任何需要2个以上步骤才能完成的任务
+   
+🔹 SINGLE MODE (mode: "single") - 用于单步任务:
+   适用场景：
+   - 简单问候 → 直接回答
+   - 单一搜索问题 → 一次搜索足够
+   - 简单画图请求 → 直接画图
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 💡 STEP 1 GUIDANCE:
 - If <current_observations> is empty → Consider if a tool could provide useful data
 - Questions about facts/news/data → search usually provides better answers
 - Image requests → draw is the right tool
-- Complex questions → reflect helps organize thoughts
+- Complex multi-step tasks → USE PLAN MODE (mode: "plan")
 - Simple greetings → answer directly is fine
 
 Apply THREE-PASS thinking:
 - P1 (意图): What does the user REALLY want? (underlying goal)
 - P2 (能力): What tools do I have? Could any of them improve my response?
 - P3 (效果): Will this action lead to user satisfaction?
+
+📌 IF THIS IS A COMPLEX TASK, OUTPUT PLAN FORMAT:
+{
+  "mode": "plan",
+  "P1": "用户真正的需求",
+  "P2": "我会使用哪些能力",
+  "P3": "预期达成什么效果",
+  "steps": [...]
+}
+
+📌 IF THIS IS A SIMPLE TASK, OUTPUT SINGLE FORMAT:
+{
+  "mode": "single",
+  "type": "search/answer/draw/...",
+  "query": "...",
+  "reason": "..."
+}
 
 Output your decision as JSON:
 '''});
