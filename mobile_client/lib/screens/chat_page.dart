@@ -5485,7 +5485,10 @@ $intentHint
           final savedPath = await FileSaver.saveTextFile(decision.filename!, decision.content!);
           
           if (savedPath != null) {
-             // Success
+             // Success - 静默保存成功
+             stepSucceeded = true;
+             stepResult = 'File saved to $savedPath';
+             
              sessionDecisions.last = AgentDecision(
                 type: AgentActionType.save_file,
                 filename: decision.filename,
@@ -5494,23 +5497,32 @@ $intentHint
                 continueAfter: decision.continueAfter,
              );
              
+             // 获取友好的目录提示
+             final dirHint = savedPath.contains('AiCai') 
+                 ? '📂 可在文件管理器的 AiCai 文件夹中找到'
+                 : '📂 可在应用目录中找到';
+             
              sessionRefs.add(ReferenceItem(
                 title: '💾 文件已保存',
                 url: 'file://$savedPath',
-                snippet: '文件 ${decision.filename} 已保存。\n路径: $savedPath',
+                snippet: '✅ 文件 ${decision.filename} 已保存\n\n路径: $savedPath\n\n$dirHint',
                 sourceName: 'FileSaver',
                 sourceType: 'system',
              ));
+             
+             setState(() {
+               _reasoningSteps.add('✅ 文件已保存: ${decision.filename}');
+             });
           } else {
-             // Failed or Cancelled
+             // Failed
              stepSucceeded = false;
-             stepResult = 'File save cancelled or failed';
+             stepResult = 'File save failed';
              
              // 添加错误反馈让Agent知道失败原因
              sessionRefs.add(ReferenceItem(
                title: '⚠️ 文件保存失败',
                url: 'internal://error/save_file/${DateTime.now().millisecondsSinceEpoch}',
-               snippet: '文件 "${decision.filename}" 保存失败或被取消。\n\n可能原因: 1) 用户取消 2) 存储权限不足 3) 磁盘空间不足\n建议: 询问用户是否重试，或检查存储权限',
+               snippet: '文件 "${decision.filename}" 保存失败。\n\n可能原因: 1) 存储权限不足 2) 磁盘空间不足 3) 文件名非法\n建议: 检查存储权限或尝试其他文件名',
                sourceName: 'System',
                sourceType: 'feedback',
              ));
