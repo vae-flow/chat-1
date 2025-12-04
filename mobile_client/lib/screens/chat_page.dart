@@ -2448,6 +2448,111 @@ $refsContext
     }
   }
 
+  /// 前置意图预分析：在调用 Agent 之前判断本地资源是否足够
+  /// 实现"本地优先"原则：对话历史 > 知识库 > 外部搜索
+  Map<String, dynamic> _preAnalyzeIntent(String userText, List<ReferenceItem> currentRefs) {
+    final lowerText = userText.toLowerCase();
+    
+    // ====== 1. 检测是否是对之前内容的引用 ======
+    final refersPrevious = RegExp(r'(之前|刚才|上次|那个|这个|你说的|你提到的|前面|earlier|previous|that|the one)').hasMatch(lowerText);
+    
+    // ====== 2. 检测消息类型 ======
+    // 评价/反馈类
+    final isFeedback = RegExp(r'^(不错|很好|好的|可以|明白|懂了|谢谢|感谢|太棒了|很棒|挺好|对|是的|没错|同意|ok|okay|good|great|thanks|nice|perfect)').hasMatch(lowerText) ||
+        (refersPrevious && RegExp(r'(不错|很好|挺好|很棒|喜欢|满意)').hasMatch(lowerText));
+    
+    // 继续/展开类
+    final wantsContinue = RegExp(r'(继续|接着|然后|详细|展开|说说|解释|什么意思|为什么|怎么理解|more|continue|explain|elaborate)').hasMatch(lowerText);
+    
+    // 明确要求搜索
+    final explicitSearchRequest = RegExp(r'(搜索一下|搜一下|查一下|网上找|去搜|帮我搜|search for|look up|google)').hasMatch(lowerText);
+    
+    // 需要实时信息
+    final needsRealtime = RegExp(r'(今天|现在|最新|最近|实时|当前|目前|价格|股价|天气|新闻|汇率|today|current|latest|now|price|weather|news)').hasMatch(lowerText);
+    
+    // ====== 3. 检查对话历史中是否有相关内容 ======
+    bool hasRelevantHistory = false;
+    String historyContext = '';
+    
+    if (refersPrevious || wantsContinue) {
+      // 在最近的消息中查找相关内容
+      final recentMessages = _messages.length > 6 ? _messages.sublist(_messages.length - 6) : _messages;
+      for (final msg in recentMessages) {
+        if (msg.role == 'assistant' && msg.content.length > 50) {
+          hasRelevantHistory = true;
+          historyContext = '对话历史中有 ${recentMessages.where((m) => m.role == "assistant").length} 条助手回复可供参考';
+          break;
+        }
+      }
+    }
+    
+    // ====== 4. 检查知识库 ======
+    final hasKnowledge = _knowledgeService.hasKnowledge;
+    
+    // ====== 5. 决策逻辑 ======
+    
+    // 场景A: 评价/反馈 → 不需要搜索
+    if (isFeedback && !explicitSearchRequest) {
+      return {
+        'skipExternalTools': true,
+        'intentType': '评价/反馈',
+        'reason': '用户在表达态度或给予反馈，不是信息请求',
+        'guidance': '直接回应用户的反馈，不要搜索。可以表示感谢并询问是否需要其他帮助。',
+      };
+    }
+    
+    // 场景B: 引用之前内容 + 有历史记录 → 优先用历史
+    if (refersPrevious && hasRelevantHistory && !explicitSearchRequest) {
+      return {
+        'skipExternalTools': true,
+        'intentType': '引用对话历史',
+        'reason': '用户引用了之前的内容，$historyContext',
+        'guidance': '回顾对话历史，理解用户指的是什么内容，基于上下文回应。不要搜索已经讨论过的内容。',
+      };
+    }
+    
+    // 场景C: 请求展开/继续 + 有历史 → 基于历史继续
+    if (wantsContinue && hasRelevantHistory && !explicitSearchRequest && !needsRealtime) {
+      return {
+        'skipExternalTools': true,
+        'intentType': '请求展开/继续',
+        'reason': '用户希望继续之前的话题或获取更多细节',
+        'guidance': '基于之前的对话内容继续展开，不需要搜索新信息。',
+      };
+    }
+    
+    // 场景D: 明确要求搜索 或 需要实时信息 → 允许搜索
+    if (explicitSearchRequest || needsRealtime) {
+      return {
+        'skipExternalTools': false,
+        'intentType': explicitSearchRequest ? '明确搜索请求' : '实时信息需求',
+        'reason': explicitSearchRequest ? '用户明确要求搜索' : '需要实时/最新信息',
+        'guidance': '可以使用搜索工具，但要提取关键词，不要搜索整句话。',
+      };
+    }
+    
+    // 场景E: 有知识库 + 问题可能相关 → 先查知识库
+    if (hasKnowledge && !needsRealtime) {
+      final knowledgeKeywords = RegExp(r'(文档|文件|资料|内容|教程|笔记|之前上传|知识库)').hasMatch(lowerText);
+      if (knowledgeKeywords) {
+        return {
+          'skipExternalTools': false, // 允许用知识库工具，但不搜索外部
+          'intentType': '知识库查询',
+          'reason': '用户可能在询问知识库中的内容',
+          'guidance': '优先使用 search_knowledge 查询本地知识库，而不是外部搜索。',
+        };
+      }
+    }
+    
+    // 默认: 不特别限制，让 Agent 自行判断
+    return {
+      'skipExternalTools': false,
+      'intentType': '一般查询',
+      'reason': '需要 Agent 进一步判断',
+      'guidance': '按照上下文优先原则决策：先检查对话历史和知识库，确认本地无答案后再考虑外部搜索。',
+    };
+  }
+
   /// Use Worker API to semantically parse natural language into a structured AgentDecision
   /// This is smarter than regex because it understands meaning, not just keywords
   Future<AgentDecision?> _parseIntentWithWorker(String rawResponse) async {
@@ -3364,15 +3469,35 @@ Before outputting your JSON decision, you MUST internally perform THREE rounds o
 **Include your three-pass reasoning in the "reason" field:**
 Example: "P1:用户想了解最新动态 | P2:search可获实时数据,已添加日期限定 | P3:高质量搜索结果将直接满足需求✓"
 
-## ⚠️ CRITICAL RULE: TOOL-FIRST PRINCIPLE ⚠️
-**BEFORE using "answer", carefully consider if ANY tool can improve your response.**
+## ⚠️ CRITICAL RULE: CONTEXT-FIRST PRINCIPLE ⚠️
+**先理解已有上下文，再决定是否需要工具。**
 
-🧠 **SELF-CHECK BEFORE "answer":**
-1. Is <current_observations> EMPTY or just system notes? → Tools might provide better data
-2. Does user ask about facts/news/prices/events? → search usually helps
-3. Does user want an image? → draw is the right choice
-4. Is this a complex question? → reflect can help, then maybe search
-5. ONLY for simple greetings (你好/hi/谢谢) → answer directly is fine
+🧠 **决策流程（按顺序执行！）:**
+
+### Step 1: 检查对话历史
+用户提到"之前/刚才/上次/那个/这个"时，**必须先回顾对话上下文**：
+- 查看 <action_history> 和之前的对话
+- 理解用户指代的是什么内容
+- 例："你之前润玉的提示词很不错" → 在对话历史中找"润玉"相关内容
+
+### Step 2: 判断已有信息是否足够
+```
+对话历史中有相关信息吗？
+├─ 有 → 基于已有信息回应，无需工具
+├─ 有但不完整 → 可以追问或用 recall_search 查历史
+└─ 没有 → 才考虑使用 search/search_knowledge
+```
+
+### Step 3: 如果确实需要搜索，提取关键词
+- ❌ 错误: query="帮我查一下苹果公司最近怎么样" （口语化原句）
+- ✅ 正确: query="苹果公司 最新动态 2024" （实体+限定词）
+
+🚫 **典型错误场景:**
+| 用户说 | ❌ 错误做法 | ✅ 正确做法 |
+|--------|------------|------------|
+| "你之前润玉的提示词很不错" | 搜索"润玉提示词" | 回顾对话找到润玉相关内容，回应感谢 |
+| "刚才那个分析挺好" | 搜索"分析" | 理解指的是刚才的分析，回应并询问是否需要展开 |
+| "继续说" | 搜索当前话题 | 继续之前未完成的内容 |
 
 ### HARD TRIGGERS (必须先用工具)
 - 出现“数据/趋势/统计/来源/权威/最新/市场/指标/分析” → 先 search 或 read_url 拿权威来源；有文件/知识库则 search_knowledge/read_knowledge 结合引用。
@@ -3454,6 +3579,16 @@ If you write anything other than JSON, the system cannot understand you!
 **User: "你好"**
 → {"type":"answer","content":"你好呀！有什么可以帮你的？","reason":"P1:简单社交问候 | P2:无需工具,纯对话即可 | P3:友好回应建立连接✓","confidence":1.0,"continue":false}
 
+**User: "你之前润玉的提示词很不错"** ⚠️ 上下文优先！
+→ {"type":"answer","content":"谢谢你的认可！润玉这个角色的提示词我确实花了心思...（回顾对话中润玉相关内容）","reason":"P1:用户评价之前讨论的内容 | P2:对话历史中有润玉相关信息,无需搜索 | P3:基于上下文回应✓","confidence":1.0,"continue":false}
+❌ 错误: {"type":"search","query":"润玉提示词"} ← 对话里已经有了，为什么要搜索？
+
+**User: "刚才那个分析挺好的，能再展开说说第二点吗"**
+→ {"type":"answer","content":"好的，关于第二点...（基于刚才分析的内容展开）","reason":"P1:用户想深入了解之前分析的某个点 | P2:对话历史中有完整分析,直接展开 | P3:延续上下文✓","confidence":1.0,"continue":false}
+
+**User: "润玉是谁？"** ← 这才是真正需要搜索的情况
+→ {"type":"search","query":"润玉 角色 人物","reason":"P1:用户询问不了解的人物 | P2:对话历史无相关信息,需要搜索 | P3:获取信息后可回答✓","confidence":0.8,"continue":true}
+
 ## ✅ MULTI-STEP DECISION EXAMPLES (CRITICAL!)
 
 **Scenario: User asks "今天比特币价格多少"**
@@ -3482,21 +3617,37 @@ If you write anything other than JSON, the system cannot understand you!
 ❌ 任何不以 { 开头的回复！
 
 ## 📋 DECISION RULES (Apply THREE-PASS to each!)
-**FIRST, check <current_observations>:**
-- If observations HAVE useful results → Use "answer" to synthesize them
-- If observations are EMPTY/insufficient → Use tools below:
 
-**THEN, match user intent (P1) and review tools (P2):**
-1. "最新/今天/天气/新闻/股价/多少钱" → search (实时数据)
-2. "画/生成图/设计图" → draw (创意生成)
-3. "保存/导出/下载" → save_file (文件操作)
-4. "回桌面/返回/锁屏/截图/通知/快捷设置/分屏" → system_control (设备控制)
-5. "分析/思考/复杂问题" → reflect (深度推理)
-6. "换个角度/试试别的" → hypothesize (策略调整)
-7. "你好/谢谢/再见" AND no complex question → answer (社交对话)
-8. 搜索结果不够详细 → read_url (深度阅读)
-9. 需要记住/保存想法 → take_note (知识积累)
-10. 查询已保存知识 → search_knowledge / read_knowledge
+### 🧠 上下文优先决策流程
+**每次决策前，先问自己这三个问题：**
+
+**Q1: 对话历史里有答案吗？**
+- 用户说"之前/刚才/那个/这个" → 先在对话历史中找相关内容
+- 用户评价/反馈之前的内容 → 回顾上下文理解指的是什么
+- 如果找到了 → 基于已有信息回应，不需要搜索
+
+**Q2: 用户真的在请求新信息吗？**
+- 表达态度（不错/很好/谢谢）→ 不是信息请求
+- 确认/继续（好的/继续/明白）→ 不是信息请求
+- 提问新事实（XX多少钱/XX最新消息）→ 是信息请求
+
+**Q3: 如果需要搜索，应该搜什么？**
+- 提取核心实体，不要搜索整句话
+- 添加时间/范围限定词
+- 去掉口语化成分
+
+---
+
+**工具选择指南（已理解上下文后）:**
+1. 需要**实时信息**（价格/新闻/天气）→ search
+2. 需要**创作**（画/生成图）→ draw
+3. 需要**保存**（导出/下载）→ save_file
+4. 需要**设备操作**（截图/锁屏）→ system_control
+5. 需要**深度分析**（复杂问题）→ reflect
+6. **对话历史足够回答** → answer (基于上下文)
+7. **用户在评价/反馈/闲聊** → answer (回应情感)
+8. 需要**历史搜索结果** → recall_search
+9. 需要**知识库内容** → search_knowledge / read_knowledge
 
 ## 🎭 PERSONA
 <persona>
@@ -4468,6 +4619,32 @@ $intentHint
     final effectiveUserText = content.isEmpty && currentSessionImagePath != null 
         ? "Please analyze the image I just sent." 
         : content;
+
+    // ========== 前置意图预分析：本地优先原则 ==========
+    // 在调用 Agent 之前，先判断本地资源是否足够回答
+    final intentAnalysis = _preAnalyzeIntent(content, sessionRefs);
+    if (intentAnalysis['skipExternalTools'] == true) {
+      // 本地资源足够，添加提示让 Agent 优先使用本地信息
+      sessionRefs.add(ReferenceItem(
+        title: '💡 意图预分析结果',
+        url: 'internal://intent-analysis/${DateTime.now().millisecondsSinceEpoch}',
+        snippet: '''[LOCAL-FIRST HINT]
+用户意图类型: ${intentAnalysis['intentType']}
+分析结论: ${intentAnalysis['reason']}
+
+⚠️ 指导：${intentAnalysis['guidance']}
+
+本地可用资源:
+- 对话历史: ${_messages.length} 条消息
+- 知识库: ${_knowledgeService.hasKnowledge ? '有内容' : '空'}
+- 当前会话引用: ${sessionRefs.length} 条
+
+请优先基于已有信息回答，除非用户明确要求搜索新信息。''',
+        sourceName: 'IntentAnalysis',
+        sourceType: 'intent_hint',
+      ));
+      _addReasoningStep('💡 意图预分析: ${intentAnalysis['intentType']}');
+    }
 
     try {
       while (steps < maxSteps) {
