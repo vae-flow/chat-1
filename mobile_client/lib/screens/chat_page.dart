@@ -6065,14 +6065,37 @@ $intentHint
           
           // 🧠 DEEP THINKING MODE: Enforce quality standards with Diverge-Converge pattern
           if (_deepReasoningMode && steps < maxSteps - 2 && !isSimpleGreeting) {
-            // Track thinking phases
-            final reflectCount = sessionDecisions.where((d) => d.type == AgentActionType.reflect).length;
-            final hypothesizeCount = sessionDecisions.where((d) => d.type == AgentActionType.hypothesize).length;
-            final searchCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.search || 
-              d.type == AgentActionType.search_knowledge ||
-              d.type == AgentActionType.read_url).length;
-            final noteCount = sessionDecisions.where((d) => d.type == AgentActionType.take_note).length;
+            // Track thinking phases - ONLY count Agent's actual tool calls, NOT system feedback/auto-inferred
+            // System-added records have reason starting with: [FEEDBACK], [DEEP_PHASE_*], [AUTO-INFERRED], [PLAN...], etc.
+            bool isAgentDecision(AgentDecision d) {
+              final reason = d.reason ?? '';
+              // Exclude system-generated decisions
+              if (reason.startsWith('[FEEDBACK]')) return false;
+              if (reason.startsWith('[DEEP_PHASE_')) return false;
+              if (reason.startsWith('[AUTO-INFERRED]')) return false;
+              if (reason.startsWith('[PLAN ')) return false;
+              if (reason.startsWith('[PLAN]')) return false;
+              if (reason.startsWith('[REGEX-FALLBACK]')) return false;
+              if (reason.startsWith('[GREETING]')) return false;
+              if (reason.startsWith('[DEFAULT FALLBACK]')) return false;
+              if (reason.startsWith('[API FALLBACK]')) return false;
+              return true;
+            }
+            
+            final agentReflectCount = sessionDecisions.where((d) => 
+              d.type == AgentActionType.reflect && isAgentDecision(d)
+            ).length;
+            final agentHypothesizeCount = sessionDecisions.where((d) => 
+              d.type == AgentActionType.hypothesize && isAgentDecision(d)
+            ).length;
+            final agentSearchCount = sessionDecisions.where((d) => 
+              (d.type == AgentActionType.search || 
+               d.type == AgentActionType.search_knowledge ||
+               d.type == AgentActionType.read_url) && isAgentDecision(d)
+            ).length;
+            final agentNoteCount = sessionDecisions.where((d) => 
+              d.type == AgentActionType.take_note && isAgentDecision(d)
+            ).length;
             
             // Count phase feedback attempts to avoid infinite loops
             final phase1FeedbackCount = sessionDecisions.where((d) => 
@@ -6086,7 +6109,7 @@ $intentHint
             String phaseTag = '';
             
             // Phase 1: 发散/上采样 (Diverge/Upsample) - 扩展思维空间
-            if (reflectCount == 0 && phase1FeedbackCount < 1) {
+            if (agentReflectCount == 0 && phase1FeedbackCount < 1) {
               phaseTag = '[DEEP_PHASE_1]';
               phaseFeedback = '''[深度思考 Phase 1/3: 发散/上采样 🔺]
 
@@ -6111,13 +6134,13 @@ $intentHint
 ⚠️ 如果问题确实简单，可以跳过此阶段直接 answer。''';
             }
             // Phase 2: 验证/采集 (Validate/Collect) - 用证据填充
-            else if (reflectCount > 0 && searchCount == 0 && !hasRealData && phase2FeedbackCount < 1) {
+            else if (agentReflectCount > 0 && agentSearchCount == 0 && !hasRealData && phase2FeedbackCount < 1) {
               phaseTag = '[DEEP_PHASE_2]';
               phaseFeedback = '''[深度思考 Phase 2/3: 验证/采集 📊]
 
 你已完成问题解构，现在建议**收集证据**支撑你的分析。
 
-📌 当前状态：已反思${reflectCount}次，假设${hypothesizeCount}次，但无外部数据
+📌 当前状态：已反思${agentReflectCount}次，假设${agentHypothesizeCount}次，但无外部数据
 🎯 Phase 2 目标：用事实验证假设，而非凭空推理
 
 建议动作：
@@ -6134,13 +6157,13 @@ $intentHint
 ⚠️ 如果你有足够的先验知识，可以跳过此阶段。''';
             }
             // Phase 3: 收敛/下采样 (Converge/Downsample) - 综合整理
-            else if (reflectCount > 0 && (searchCount > 0 || hasRealData) && noteCount == 0 && phase3FeedbackCount < 1) {
+            else if (agentReflectCount > 0 && (agentSearchCount > 0 || hasRealData) && agentNoteCount == 0 && phase3FeedbackCount < 1) {
               phaseTag = '[DEEP_PHASE_3]';
               phaseFeedback = '''[深度思考 Phase 3/3: 收敛/下采样 🔻]
 
 你已完成发散和验证，现在建议**收敛整合**再回答。
 
-📌 当前状态：反思${reflectCount}次，假设${hypothesizeCount}次，搜索${searchCount}次
+📌 当前状态：反思${agentReflectCount}次，假设${agentHypothesizeCount}次，搜索${agentSearchCount}次
 🎯 Phase 3 目标：把发散的信息"压缩"成结构化洞察
 
 建议动作：
