@@ -5972,6 +5972,17 @@ $intentHint
                   _reasoningSteps.add('✅ 质量评估通过');
                 });
               }
+              // 添加明确提示告诉 Agent 可以输出最终回答
+              sessionRefs.add(ReferenceItem(
+                title: '✅ 深度思考完成 - 请输出最终回答',
+                url: 'internal://deep-think/complete/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '你的质量自评结果为 PASS。所有深度思考阶段已完成。\n\n现在请使用 answer 输出你的最终回答。',
+                sourceName: 'DeepThinkMode',
+                sourceType: 'deep_complete',
+              ));
+              // 质量评估通过后，强制继续循环让 Agent 输出最终回答
+              steps++;
+              continue;
             } else if (verdictRetry) {
               debugPrint('🔄 DEEP THINK: Quality review requires RETRY');
               if (mounted) {
@@ -6227,40 +6238,64 @@ $intentHint
               if (reason.startsWith('[GREETING]')) return false;
               if (reason.startsWith('[DEFAULT FALLBACK]')) return false;
               if (reason.startsWith('[API FALLBACK]')) return false;
-              if (reason.startsWith('[RETRY_ROUND]')) return false;
               return true;
             }
             
-            // 统计各阶段完成情况
-            final agentHypothesizeCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.hypothesize && isAgentDecision(d)
-            ).length;
-            final agentReflectCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.reflect && isAgentDecision(d)
-            ).length;
-            final agentAnswerCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.answer && isAgentDecision(d)
-            ).length;
-            
-            // 检查是否有反思评估结果（Phase 4 的输出）
-            final hasQualityReview = sessionRefs.any((r) => 
-              r.sourceType == 'quality_review' && r.url.contains('deep-review'));
-            final lastReviewRef = sessionRefs.lastWhere(
-              (r) => r.sourceType == 'quality_review',
-              orElse: () => ReferenceItem(title: '', url: '', snippet: '', sourceName: '', sourceType: ''),
-            );
-            final reviewPassed = lastReviewRef.snippet.contains('verdict: pass');
-            final retryCount = sessionDecisions.where((d) => 
+            // 计算当前轮次（根据 RETRY_ROUND 数量）
+            final currentRound = sessionDecisions.where((d) => 
               d.reason?.contains('[RETRY_ROUND]') == true
             ).length;
             
-            // 统计各阶段强制提示次数（防死循环）
-            final phase1PromptCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_P1_FORCE]') == true).length;
-            final phase2PromptCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_P2_FORCE]') == true).length;
-            final phase4PromptCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_P4_FORCE]') == true).length;
+            // 判断决策是否属于当前轮次（在最后一个 RETRY_ROUND 之后）
+            int lastRetryIndex = -1;
+            for (int i = sessionDecisions.length - 1; i >= 0; i--) {
+              if (sessionDecisions[i].reason?.contains('[RETRY_ROUND]') == true) {
+                lastRetryIndex = i;
+                break;
+              }
+            }
+            bool isCurrentRound(int index) => index > lastRetryIndex;
+            
+            // 统计**当前轮次**的各阶段完成情况
+            int agentHypothesizeCount = 0;
+            int agentReflectCount = 0;
+            int agentAnswerCount = 0;
+            for (int i = 0; i < sessionDecisions.length; i++) {
+              final d = sessionDecisions[i];
+              if (!isCurrentRound(i) || !isAgentDecision(d)) continue;
+              if (d.type == AgentActionType.hypothesize) agentHypothesizeCount++;
+              if (d.type == AgentActionType.reflect) agentReflectCount++;
+              if (d.type == AgentActionType.answer) agentAnswerCount++;
+            }
+            
+            // 当前决策是 answer 且尚未记录，需要临时计入
+            final currentIsAnswer = decision.type == AgentActionType.answer;
+            if (currentIsAnswer) agentAnswerCount++;
+            
+            // retryCount 和 currentRound 是同一个值
+            final retryCount = currentRound;
+            
+            // 检查**当前轮次**是否有反思评估结果
+            // 简化逻辑：只看最新的 quality_review，如果是 pass 就通过
+            final qualityReviews = sessionRefs.where((r) => 
+              r.sourceType == 'quality_review' && r.url.contains('deep-review')).toList();
+            final hasQualityReview = qualityReviews.isNotEmpty;
+            final lastReviewRef = qualityReviews.isNotEmpty 
+                ? qualityReviews.last 
+                : ReferenceItem(title: '', url: '', snippet: '', sourceName: '', sourceType: '');
+            final reviewPassed = lastReviewRef.snippet.contains('verdict: pass');
+            
+            // 统计**当前轮次**各阶段强制提示次数（防死循环）
+            int phase1PromptCount = 0;
+            int phase2PromptCount = 0;
+            int phase4PromptCount = 0;
+            for (int i = 0; i < sessionDecisions.length; i++) {
+              if (!isCurrentRound(i)) continue;
+              final reason = sessionDecisions[i].reason ?? '';
+              if (reason.contains('[DEEP_P1_FORCE]')) phase1PromptCount++;
+              if (reason.contains('[DEEP_P2_FORCE]')) phase2PromptCount++;
+              if (reason.contains('[DEEP_P4_FORCE]')) phase4PromptCount++;
+            }
             
             String? forcePrompt;
             String phaseTag = '';
@@ -6315,7 +6350,8 @@ $hypothesizeResults
             // 此阶段不强制提示，Agent自然会answer
             
             // ====== Phase 4: 反思评估（强制，在answer之后） ======
-            else if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !hasQualityReview && phase4PromptCount < 2) {
+            // 需要 Phase 4 的条件：当前轮次完成了 P1+P2+P3(answer) 但还没有 pass 的 quality_review
+            else if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !reviewPassed && phase4PromptCount < 2) {
               // 获取之前的answer内容
               final lastAnswer = sessionDecisions.lastWhere(
                 (d) => d.type == AgentActionType.answer && isAgentDecision(d),
