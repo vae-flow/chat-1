@@ -2922,6 +2922,22 @@ $deepReasoningSection
 ## ⚠️ 统一输出格式
 每个工具调用必须是 JSON: {"type":"工具名", ...参数, "reason":"决策理由", "confidence":0-1, "continue":true/false}
 
+## 🛑 continue 字段使用规则 (非常重要!)
+- **continue: true** → 执行完工具后继续下一步（需要更多信息时）
+- **continue: false** → 执行完工具后**立即停止并回答用户**
+
+**何时设置 continue: false:**
+1. 任务已完成（draw画完、save_file保存完、system_control执行完）
+2. 已有足够信息可以回答（search到结果+可以综合回答）
+3. 只需执行单一操作（锁屏、截图、回桌面）
+
+**何时设置 continue: true:**
+1. 需要多步操作（search后还要read_url）
+2. 需要先获取信息再回答（vision分析后需要回答）
+3. 中间步骤（reflect/hypothesize后需要验证）
+
+⚠️ **不设 continue:false 就会一直循环调用工具！**
+
 ## 🔄 反馈循环机制
 你调用工具后，系统会在 <current_observations> 返回结果。
 - **成功**: 你会看到工具返回的数据，据此决定下一步
@@ -4469,6 +4485,12 @@ $intentHint
                   );
                 }
               }
+              // Check if Agent wants to stop after this search
+              if (!decision.continueAfter) {
+                setState(() => _loadingStatus = '正在生成回答...');
+                await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+                break;
+              }
               // Continue loop to re-evaluate with new info
               steps++;
               continue;
@@ -4961,10 +4983,15 @@ $intentHint
             type: AgentActionType.read_knowledge,
             content: decision.content,
             reason: '${decision.reason} [RESULT: $resultMsg]',
-            continueAfter: true,
+            continueAfter: decision.continueAfter,
           );
           
-          // Explicitly continue loop - Agent needs to process the retrieved content
+          // Check if Agent wants to stop
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
           continue;
         }
@@ -4988,7 +5015,7 @@ $intentHint
               type: AgentActionType.delete_knowledge,
               content: targetId,
               reason: '${decision.reason} [RESULT: Successfully deleted $deleteType $targetId]',
-              continueAfter: true,
+              continueAfter: decision.continueAfter,
             );
             
             sessionRefs.add(ReferenceItem(
@@ -5003,7 +5030,7 @@ $intentHint
               type: AgentActionType.delete_knowledge,
               content: targetId,
               reason: '${decision.reason} [RESULT: Failed to delete - ID $targetId not found]',
-              continueAfter: true,
+              continueAfter: decision.continueAfter,
             );
             
             sessionRefs.add(ReferenceItem(
@@ -5013,6 +5040,11 @@ $intentHint
               sourceName: 'KnowledgeBase',
               sourceType: 'system_note',
             ));
+          }
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
           }
           steps++;
           continue;
@@ -5098,9 +5130,14 @@ $intentHint
             type: AgentActionType.search_knowledge,
             content: keywords,
             reason: '${decision.reason} [RESULT: Found $totalMatches matches, showing batch ${knowledgeSearchBatchIndex + 1}]',
-            continueAfter: true,
+            continueAfter: decision.continueAfter,
           );
           
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
           continue;
         }
@@ -5135,9 +5172,14 @@ $intentHint
             type: AgentActionType.take_note,
             content: noteContent,
             reason: '${decision.reason} [NOTE #$noteCount SAVED]',
-            continueAfter: true,
+            continueAfter: decision.continueAfter,
           );
           
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
           continue;
         }
@@ -5407,6 +5449,7 @@ $intentHint
                 type: AgentActionType.vision,
                 content: customPrompt,
                 reason: '${decision.reason} [RESULT: Vision #${existingVisionCount + 1} complete. Key insight: $summaryPreview]',
+                continueAfter: decision.continueAfter,
               );
             } else {
               // Vision returned empty - record for planner
@@ -5414,6 +5457,7 @@ $intentHint
                 type: AgentActionType.vision,
                 content: customPrompt,
                 reason: '${decision.reason} [RESULT: Vision returned no insights - try different analysis angle]',
+                continueAfter: decision.continueAfter,
               );
             }
             // Continue loop to process the new vision info
@@ -5452,8 +5496,14 @@ $intentHint
             }
             // Continue loop - Agent will decide next action based on failure
           }
+          // Check if Agent wants to stop after vision
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
-          continue; // Always continue after vision to let Agent decide next action
+          continue;
         }
         else if (decision.type == AgentActionType.ocr) {
           // Action: OCR - Extract text from image
@@ -5534,6 +5584,7 @@ $intentHint
                 type: AgentActionType.ocr,
                 content: customPrompt,
                 reason: '${decision.reason} [RESULT: OCR success. Extracted text preview: $previewText]',
+                continueAfter: decision.continueAfter,
               );
             } else {
               _addReasoningStep('⚠️ OCR 未提取到文字');
@@ -5548,6 +5599,7 @@ $intentHint
                 type: AgentActionType.ocr,
                 content: customPrompt,
                 reason: '${decision.reason} [RESULT: OCR returned empty - image may not contain readable text. Try vision instead.]',
+                continueAfter: decision.continueAfter,
               );
             }
           } catch (ocrError) {
@@ -5565,10 +5617,17 @@ $intentHint
               type: AgentActionType.ocr,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - OCR error: $ocrError. Consider using vision instead.]',
+              continueAfter: decision.continueAfter,
             );
           }
+          // Check if Agent wants to stop after OCR
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
-          continue; // Always continue after OCR to let Agent process the result
+          continue;
         }
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)
@@ -5587,6 +5646,7 @@ $intentHint
             reason: '${decision.reason} [REFLECTION: $reflectionSummary]',
             confidence: decision.confidence,
             uncertainties: decision.uncertainties,
+            continueAfter: decision.continueAfter,
           );
           
           // Add reflection as a special observation for next iteration
@@ -5605,10 +5665,14 @@ $intentHint
             });
           }
           
-          // Reflect always continues to next action
-          // (Agent will decide what to do based on reflection)
+          // Reflect: check if Agent wants to stop
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
-          continue; // Continue loop to let Agent decide next action
+          continue;
         }
         else if (decision.type == AgentActionType.hypothesize) {
           // Action: Multi-Hypothesis Generation (Deep Think)
@@ -5639,6 +5703,7 @@ $intentHint
             confidence: decision.confidence,
             hypotheses: hypothesesList,
             selectedHypothesis: selected,
+            continueAfter: decision.continueAfter,
           );
           
           // Add hypothesis analysis as observation
@@ -5658,9 +5723,14 @@ $intentHint
             sourceType: 'hypothesis',
           ));
           
-          // Hypothesize always continues to execute the selected hypothesis
+          // Hypothesize: check if Agent wants to stop
+          if (!decision.continueAfter) {
+            setState(() => _loadingStatus = '正在生成回答...');
+            await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+            break;
+          }
           steps++;
-          continue; // Continue loop to let Agent execute the selected hypothesis
+          continue;
         }
         else if (decision.type == AgentActionType.clarify) {
           // Action: Request Clarification from User
