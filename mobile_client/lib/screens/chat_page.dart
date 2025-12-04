@@ -23,7 +23,9 @@ import '../services/file_saver.dart';
 import '../services/system_control.dart';
 import '../services/knowledge_service.dart';
 import '../services/document_parser.dart';
+import '../services/task_queue.dart';
 import '../utils/constants.dart';
+import '../models/task.dart';
 import 'package:file_picker/file_picker.dart';
 import 'settings_page.dart';
 import 'persona_manager_page.dart';
@@ -129,6 +131,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   final FlutterLocalNotificationsPlugin _notificationsPlugin = FlutterLocalNotificationsPlugin();
   final ReferenceManager _refManager = ReferenceManager();
   final KnowledgeService _knowledgeService = KnowledgeService();
+  final TaskQueueService _taskQueue = TaskQueueService();
   
   bool _sending = false;
   String _loadingStatus = ''; // To show detailed agent status
@@ -144,6 +147,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   
   // 初始化状态标志
   bool _isInitialized = false;
+  Timer? _taskPollTimer;
+  bool _taskPollInProgress = false;
 
   // Settings
   // Chat
@@ -208,6 +213,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _initNotifications();
     _loadSettings();
     _initializeApp(); // 统一的异步初始化入口
+    _startTaskPolling();
   }
   
   /// 统一异步初始化，确保正确的加载顺序
@@ -217,6 +223,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     
     // 2. 初始化知识库服务
     await _knowledgeService.init();
+    await _taskQueue.loadFromStorage();
     
     // 3. 设置当前人格的知识库
     await _knowledgeService.setPersona(_currentPersonaId);
@@ -282,6 +289,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _sendButtonController.dispose();
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
+    _taskPollTimer?.cancel();
     super.dispose();
   }
   
@@ -7304,6 +7312,82 @@ Output your decision as JSON:
     if (normalized.isEmpty) return '查询';
     if (normalized.length <= 80) return normalized;
     return normalized.substring(0, 80);
+  }
+
+  /// Start periodic polling for async tasks
+  void _startTaskPolling() {
+    _taskPollTimer?.cancel();
+    _taskPollTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      _pollAsyncTasks();
+    });
+  }
+
+  Future<void> _pollAsyncTasks() async {
+    if (_taskPollInProgress) return;
+    _taskPollInProgress = true;
+    try {
+      await _taskQueue.pollTasks();
+      final ready = _taskQueue.getUndeliveredReady();
+      if (ready.isEmpty) return;
+
+      final refs = <ReferenceItem>[];
+      final deliveredIds = <String>[];
+      final newSystemMessages = <ChatMessage>[];
+
+      for (final task in ready) {
+        deliveredIds.add(task.id);
+        final isSuccess = task.status == TaskStatus.success;
+        final sourceType = _mapTaskTypeToSource(task.type);
+        final statusLabel = isSuccess ? '✅ 已完成' : (task.status == TaskStatus.failed ? '❌ 失败' : '⚠️ 异常');
+        final snippet = (task.result?.isNotEmpty == true ? task.result! : task.error ?? '未返回结果').trim();
+        refs.add(ReferenceItem(
+          title: '$statusLabel · 任务 ${task.type}',
+          url: task.statusUrl ?? 'task://${task.id}',
+          snippet: snippet,
+          sourceName: 'AsyncTask',
+          sourceType: sourceType,
+          reliability: isSuccess ? 0.7 : 0.3,
+          authorityLevel: 'unknown',
+          caveats: task.error != null ? [task.error!] : null,
+        ));
+
+        // Add a system message to inform user/agent
+        newSystemMessages.add(ChatMessage(
+          'system',
+          '$statusLabel: 任务 ${task.id} (${task.type})\n${snippet.isNotEmpty ? snippet : "无内容"}',
+          isMemory: true,
+        ));
+      }
+
+      if (refs.isNotEmpty) {
+        await _refManager.addExternalReferences(refs);
+        if (mounted) {
+          setState(() {
+            _messages.addAll(newSystemMessages);
+            _saveChatHistory();
+          });
+        } else {
+          _messages.addAll(newSystemMessages);
+          _saveChatHistory();
+        }
+      }
+
+      await _taskQueue.markDelivered(deliveredIds);
+    } catch (e) {
+      debugPrint('Async task polling error: $e');
+    } finally {
+      _taskPollInProgress = false;
+    }
+  }
+
+  String _mapTaskTypeToSource(String type) {
+    final lower = type.toLowerCase();
+    if (lower.contains('vision') || lower.contains('ocr') || lower.contains('image')) return 'vision';
+    if (lower.contains('read') || lower.contains('url')) return 'url_content';
+    if (lower.contains('knowledge')) return 'knowledge';
+    if (lower.contains('search')) return 'web';
+    if (lower.contains('analysis') || lower.contains('summary')) return 'feedback';
+    return 'feedback';
   }
 
   /// Finalize a decision: enforce tool policy, fill missing fields with safe defaults
