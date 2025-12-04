@@ -2960,99 +2960,81 @@ ONLY output JSON. No explanation.''';
         : '';
     final deepReasoningSection = _deepReasoningMode
         ? '''
-## 🧠 DEEP THINKING MODE (深度思考模式)
+## 🧠 DEEP THINKING MODE (深度思考模式) - 强制执行
 
-### 核心理念：发散-验证-收敛 (Diverge-Validate-Converge)
-像钻石一样思考：先向外扩展，再用证据填充，最后精炼成形。
+⚠️ **本模式下必须按顺序完成4个阶段，不可跳过！**
 
 ```
-    Phase 1: 发散/上采样 🔺
-         /  |  \\
-       多个视角和可能性
-              ↓
-    Phase 2: 验证/采集 📊
-       证据填充每个分支
-              ↓
-    Phase 3: 收敛/下采样 🔻
-         \\  |  /
-       精炼的结构化回答
+Phase 1: 发散 🔺 ──→ Phase 2: 收敛 🔻 ──→ Phase 3: 回答 📝 ──→ Phase 4: 反思 🔍
+ (hypothesize)       (reflect)           (answer)          (reflect+verdict)
+    │                    │                   │                    │
+ 3-10个维度         合并→2-5个核心      综合考量回答         质量自评
+ 尽量正交独立        识别独特价值                          pass/retry
 ```
 
 ---
 
-### Phase 1: 发散/上采样 🔺 (使用 reflect + hypothesize)
+### Phase 1: 发散/上采样 🔺 【强制 hypothesize】
 
-**目标**：把问题"放大"，发现更多维度
+**目标**：生成多个**正交/独立**的分析维度
 
-**问题解构** (reflect)：
-1. **表层 vs 深层**：用户字面问了什么？实际想解决什么？
-2. **隐含假设**：用户和我各有什么假设？这些假设可靠吗？
-3. **问题边界**：什么在范围内？什么不在？
-4. **成功标准**：怎样才算真正回答好？
+**关键原则**：
+- 生成 3-10 个可能的分析角度
+- 问自己："这个角度能带来什么**新信息**？"
+- 维度之间应尽量独立，避免在相似角度打转
+- **必须包含**至少1个"反对/质疑"视角
 
-**多维度展开** (hypothesize)：
-- 生成至少3个不同视角
-- **时间维度**：短期/中期/长期影响
-- **利益相关者**：不同角色怎么看？
-- **因果链条**：根本原因 → 当前问题 → 后续影响
-- **反事实思考**：如果情况相反会怎样？
-- **魔鬼代言人**：最强的反对观点是什么？
-
-💡 宁可多想几个方向，也不要过早收敛。
+💡 不用追求完美，先发散再说。
 
 ---
 
-### Phase 2: 验证/采集 📊 (使用 search + knowledge)
+### Phase 2: 正交化收敛 🔻 【强制 reflect】
 
-**目标**：用事实填充发散出的框架
+**目标**：从发散的维度中提炼核心
 
-**证据收集**：
-- 每个重要断言必须有支撑
-- 主动搜索**反面证据**
-- 区分：事实(fact) / 推断(inference) / 观点(opinion)
+**操作**：
+1. 审视所有维度，合并相似/重叠的
+2. 识别 2-5 个**真正独立**的核心视角
+3. 每个视角的独特价值是什么？
+4. 确定综合考量的策略
 
-**质量把控**：
-- 信息的**时效性**：多久之前的？还有效吗？
-- 信息的**可信度**：来源可靠吗？有交叉验证吗？
-- 信息的**完整性**：有遗漏的重要方面吗？
-
-💡 让发散出的框架有血有肉，而非凭空推理。
+💡 类似施密特正交化：去除冗余，保留独立成分。
 
 ---
 
-### Phase 3: 收敛/下采样 🔻 (使用 take_note + reflect)
+### Phase 3: 综合回答 📝 【answer】
 
-**目标**：把发散的信息"压缩"成结构化洞察
-
-**综合涌现** (take_note)：
-- 最重要的3个洞察是什么？
-- 多个信息源交叉验证后，有什么**新发现**？
-- 碎片信息连接起来，能看到什么**模式**？
-
-**元认知检查** (reflect)：
-- 我的推理有漏洞吗？哪里最薄弱？
-- 我是否陷入了确认偏误？
-- 置信度真的有我声称的那么高吗？
-- 还有什么**不知道的**需要诚实说明？
-
-💡 提炼精华，剔除冗余，准备输出。
+**基于核心视角给出最佳回答**：
+- 每个核心视角如何影响结论？
+- 权重如何分配？
+- 综合考量后的答案是什么？
 
 ---
 
-### 输出结构
-深度思考的回答应该包含：
-1. **问题理解**：我理解你实际想要的是...
-2. **分析框架**：我从X/Y/Z三个角度分析...
-3. **证据/数据**：根据[来源]...
-4. **综合洞察**：综合来看，关键发现是...
-5. **行动建议**：具体建议是...（如适用）
-6. **局限性**：需要说明的是...
+### Phase 4: 反思评估 🔍 【强制 reflect + verdict】
+
+**目标**：质量自评，决定是否打回重做
+
+**评估清单**：
+1. 是否真正回答了用户问题？
+2. 推理漏洞在哪？
+3. 是否有确认偏误？
+4. 哪些是事实？哪些是推测？
+5. 如果错了，最可能错在哪？
+
+**必须输出 verdict**：
+- `verdict: pass` → 质量达标，输出答案
+- `verdict: retry` → 质量不够，带着教训重做
+
+💡 如果 retry，系统会带着你的反思重新执行 Phase 1-4（最多2轮）。
+
+---
 
 ### ⚠️ 禁止
+- 禁止跳过任何阶段直接 answer
 - 禁止假装知道不知道的事
-- 禁止跳过论证直接给结论
 - 禁止忽视反面证据
-- 禁止用术语堆砌代替真正的分析
+- 禁止 verdict 为 retry 却不说明改进方向
 '''
         : '';
 
@@ -5942,12 +5924,18 @@ $intentHint
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)
           final reflectionSummary = decision.content ?? '自我审视当前方法';
+          final isQualityReview = decision.reason?.contains('[QUALITY_REVIEW]') == true ||
+                                   reflectionSummary.contains('verdict:') ||
+                                   reflectionSummary.contains('质量自评');
+          
           // Show the actual thought process in UI
-          setState(() => _loadingStatus = '🤔 反思: ${reflectionSummary.length > 15 ? reflectionSummary.substring(0, 15) + "..." : reflectionSummary}');
-          debugPrint('Agent reflecting: ${decision.content}');
+          setState(() => _loadingStatus = isQualityReview 
+              ? '📊 质量评估中...' 
+              : '🤔 反思: ${reflectionSummary.length > 15 ? reflectionSummary.substring(0, 15) + "..." : reflectionSummary}');
+          debugPrint('Agent reflecting${isQualityReview ? " (QUALITY REVIEW)" : ""}: ${decision.content}');
           
           // Artificial delay to let user see the thinking state
-          await Future.delayed(const Duration(milliseconds: 1200));
+          await Future.delayed(const Duration(milliseconds: isQualityReview ? 800 : 1200));
           
           // Record reflection in action history with insights
           sessionDecisions.last = AgentDecision(
@@ -5959,20 +5947,58 @@ $intentHint
             continueAfter: decision.continueAfter,
           );
           
-          // Add reflection as a special observation for next iteration
-          sessionRefs.add(ReferenceItem(
-            title: '🧠 深度反思',
-            url: 'internal://reflection/${DateTime.now().millisecondsSinceEpoch}',
-            snippet: '【反思结论】$reflectionSummary\n【置信度】${((decision.confidence ?? 0.5) * 100).toInt()}%\n【待解决不确定性】${decision.uncertainties?.join(", ") ?? "无"}',
-            sourceName: 'DeepThink',
-            sourceType: 'reflection',
-          ));
-          
-          // 更新推理链
-          if (mounted) {
-            setState(() {
-              _reasoningSteps.add('🤔 深度反思');
-            });
+          // 检测是否为质量评估（Phase 4）
+          if (isQualityReview) {
+            // 判断 verdict
+            final verdictPass = reflectionSummary.toLowerCase().contains('verdict: pass') ||
+                                reflectionSummary.toLowerCase().contains('verdict:pass');
+            final verdictRetry = reflectionSummary.toLowerCase().contains('verdict: retry') ||
+                                 reflectionSummary.toLowerCase().contains('verdict:retry');
+            
+            // 添加质量评估结果
+            sessionRefs.add(ReferenceItem(
+              title: verdictPass ? '✅ 质量评估通过' : (verdictRetry ? '🔄 质量评估需重做' : '📊 质量评估结果'),
+              url: 'internal://deep-review/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '【评估内容】$reflectionSummary\n\nverdict: ${verdictPass ? "pass" : (verdictRetry ? "retry" : "unknown")}',
+              sourceName: 'DeepThinkReview',
+              sourceType: 'quality_review',
+            ));
+            
+            if (verdictPass) {
+              debugPrint('✅ DEEP THINK: Quality review PASSED - allowing final output');
+              // 更新推理链
+              if (mounted) {
+                setState(() {
+                  _reasoningSteps.add('✅ 质量评估通过');
+                });
+              }
+            } else if (verdictRetry) {
+              debugPrint('🔄 DEEP THINK: Quality review requires RETRY');
+              if (mounted) {
+                setState(() {
+                  _reasoningSteps.add('🔄 质量评估：需要重做');
+                });
+              }
+              // 继续循环，会触发 RETRY_ROUND
+              steps++;
+              continue;
+            }
+          } else {
+            // 普通反思
+            sessionRefs.add(ReferenceItem(
+              title: '🧠 深度反思',
+              url: 'internal://reflection/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '【反思结论】$reflectionSummary\n【置信度】${((decision.confidence ?? 0.5) * 100).toInt()}%\n【待解决不确定性】${decision.uncertainties?.join(", ") ?? "无"}',
+              sourceName: 'DeepThink',
+              sourceType: 'reflection',
+            ));
+            
+            // 更新推理链
+            if (mounted) {
+              setState(() {
+                _reasoningSteps.add('🤔 深度反思');
+              });
+            }
           }
           
           // Reflect: check if Agent wants to stop
@@ -6188,148 +6214,188 @@ $intentHint
             d.reason?.contains('[FEEDBACK]') == true
           ).length;
           
-          // ========== 深度思考模式：优先处理 ==========
-          // 深度思考模式有自己的三阶段检查系统，不使用普通反馈
+          // ========== 深度思考模式：强制4阶段流程 ==========
           if (_deepReasoningMode && steps < maxSteps - 2 && !isSimpleGreeting) {
-            // Track thinking phases - ONLY count Agent's actual tool calls, NOT system feedback/auto-inferred
+            // 辅助函数：判断是否是Agent真正的决策（排除系统生成的）
             bool isAgentDecision(AgentDecision d) {
               final reason = d.reason ?? '';
-              // Exclude system-generated decisions
               if (reason.startsWith('[FEEDBACK]')) return false;
-              if (reason.startsWith('[DEEP_PHASE_')) return false;
+              if (reason.startsWith('[DEEP_')) return false;
               if (reason.startsWith('[AUTO-INFERRED]')) return false;
-              if (reason.startsWith('[PLAN ')) return false;
-              if (reason.startsWith('[PLAN]')) return false;
+              if (reason.startsWith('[PLAN')) return false;
               if (reason.startsWith('[REGEX-FALLBACK]')) return false;
               if (reason.startsWith('[GREETING]')) return false;
               if (reason.startsWith('[DEFAULT FALLBACK]')) return false;
               if (reason.startsWith('[API FALLBACK]')) return false;
+              if (reason.startsWith('[RETRY_ROUND]')) return false;
               return true;
             }
             
-            final agentReflectCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.reflect && isAgentDecision(d)
-            ).length;
+            // 统计各阶段完成情况
             final agentHypothesizeCount = sessionDecisions.where((d) => 
               d.type == AgentActionType.hypothesize && isAgentDecision(d)
             ).length;
-            final agentSearchCount = sessionDecisions.where((d) => 
-              (d.type == AgentActionType.search || 
-               d.type == AgentActionType.search_knowledge ||
-               d.type == AgentActionType.read_url) && isAgentDecision(d)
+            final agentReflectCount = sessionDecisions.where((d) => 
+              d.type == AgentActionType.reflect && isAgentDecision(d)
             ).length;
-            final agentNoteCount = sessionDecisions.where((d) => 
-              d.type == AgentActionType.take_note && isAgentDecision(d)
+            final agentAnswerCount = sessionDecisions.where((d) => 
+              d.type == AgentActionType.answer && isAgentDecision(d)
             ).length;
             
-            // Count phase feedback attempts to avoid infinite loops
-            final phase1FeedbackCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_PHASE_1]') == true).length;
-            final phase2FeedbackCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_PHASE_2]') == true).length;
-            final phase3FeedbackCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_PHASE_3]') == true).length;
+            // 检查是否有反思评估结果（Phase 4 的输出）
+            final hasQualityReview = sessionRefs.any((r) => 
+              r.sourceType == 'quality_review' && r.url.contains('deep-review'));
+            final lastReviewRef = sessionRefs.lastWhere(
+              (r) => r.sourceType == 'quality_review',
+              orElse: () => ReferenceItem(title: '', url: '', snippet: '', sourceName: '', sourceType: ''),
+            );
+            final reviewPassed = lastReviewRef.snippet.contains('verdict: pass');
+            final retryCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[RETRY_ROUND]') == true
+            ).length;
             
-            String? phaseFeedback;
+            // 统计各阶段强制提示次数（防死循环）
+            final phase1PromptCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_P1_FORCE]') == true).length;
+            final phase2PromptCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_P2_FORCE]') == true).length;
+            final phase4PromptCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_P4_FORCE]') == true).length;
+            
+            String? forcePrompt;
             String phaseTag = '';
             
-            // Phase 1: 发散/上采样 (Diverge/Upsample) - 扩展思维空间
-            if (agentReflectCount == 0 && phase1FeedbackCount < 1) {
-              phaseTag = '[DEEP_PHASE_1]';
-              phaseFeedback = '''[深度思考 Phase 1/3: 发散/上采样 🔺]
+            // ====== Phase 1: 发散/上采样（强制） ======
+            if (agentHypothesizeCount == 0 && phase1PromptCount < 2) {
+              phaseTag = '[DEEP_P1_FORCE]';
+              forcePrompt = '''⚠️ [深度思考 Phase 1/4: 发散] - 必须执行
 
-你准备直接回答，但深度思考模式建议先**扩展思维空间**。
+你**必须**先使用 hypothesize 生成多个分析维度，才能继续。
 
-📌 当前状态：尚未进行问题解构
-🎯 Phase 1 目标：把问题"放大"，发现更多维度
+📌 要求：
+1. 生成 3-10 个可能的分析角度/维度
+2. 维度要尽量**正交/独立**——问自己："这个角度能带来什么新信息？"
+3. 必须包含至少1个"反对/质疑"视角
+4. 不用管是否完美，先发散再说
 
-建议动作：
-1. 使用 **reflect** 进行问题解构：
-   - 表层问题 vs 真实意图
-   - 隐含假设有哪些？
-   - 问题的边界在哪？
-   - 成功标准是什么？
+🎯 输出格式：
+{"type":"hypothesize","hypotheses":["维度1:...","维度2:...","维度3:...","反对视角:..."],"selected_hypothesis":"待Phase2确定","reason":"...","continue":true}
 
-2. 使用 **hypothesize** 生成多个视角：
-   - 至少3个不同角度
-   - 包括一个"魔鬼代言人"视角（反对观点）
-   - 考虑时间/人物/因果等维度
-
-💡 这是"上采样"阶段：宁可多想几个方向，也不要过早收敛。
-⚠️ 如果问题确实简单，可以跳过此阶段直接 answer。''';
+❌ 直接 answer 将被拒绝，必须先完成此阶段。''';
             }
-            // Phase 2: 验证/采集 (Validate/Collect) - 用证据填充
-            else if (agentReflectCount > 0 && agentSearchCount == 0 && !hasRealData && phase2FeedbackCount < 1) {
-              phaseTag = '[DEEP_PHASE_2]';
-              phaseFeedback = '''[深度思考 Phase 2/3: 验证/采集 📊]
+            // ====== Phase 2: 正交化收敛（强制） ======
+            else if (agentHypothesizeCount > 0 && agentReflectCount == 0 && phase2PromptCount < 2) {
+              // 获取之前的 hypothesize 结果
+              final hypothesizeResults = sessionDecisions
+                  .where((d) => d.type == AgentActionType.hypothesize && isAgentDecision(d))
+                  .map((d) => d.hypotheses?.join(', ') ?? d.content ?? '')
+                  .join('\n');
+              
+              phaseTag = '[DEEP_P2_FORCE]';
+              forcePrompt = '''⚠️ [深度思考 Phase 2/4: 正交化收敛] - 必须执行
 
-你已完成问题解构，现在建议**收集证据**支撑你的分析。
+你已发散出维度：
+$hypothesizeResults
 
-📌 当前状态：已反思${agentReflectCount}次，假设${agentHypothesizeCount}次，但无外部数据
-🎯 Phase 2 目标：用事实验证假设，而非凭空推理
+现在**必须**使用 reflect 进行正交化收敛：
 
-建议动作：
-1. 使用 **search** 搜索关键信息
-2. 使用 **search_knowledge** 查找相关知识
-3. 使用 **read_url** 深入阅读重要来源
+📌 要求：
+1. 审视上面的维度，合并相似/重叠的
+2. 识别出 2-5 个**真正独立**的核心视角
+3. 为每个核心视角简要说明：它能提供什么独特洞察？
+4. 确定从这些视角综合考量的策略
 
-验证清单：
-• 你的每个重要断言有证据支撑吗？
-• 有没有**反面证据**你还没考虑？
-• 信息的时效性和可信度如何？
+🎯 输出格式：
+{"type":"reflect","content":"【正交化分析】\\n原始维度: ...\\n合并后核心视角:\\n1. [视角名]: [独特价值]\\n2. ...\\n综合策略: ...","reason":"...","continue":true}
 
-💡 这是"填充"阶段：让发散出的框架有血有肉。
-⚠️ 如果你有足够的先验知识，可以跳过此阶段。''';
+❌ 直接 answer 将被拒绝，必须先完成此阶段。''';
             }
-            // Phase 3: 收敛/下采样 (Converge/Downsample) - 综合整理
-            else if (agentReflectCount > 0 && (agentSearchCount > 0 || hasRealData) && agentNoteCount == 0 && phase3FeedbackCount < 1) {
-              phaseTag = '[DEEP_PHASE_3]';
-              phaseFeedback = '''[深度思考 Phase 3/3: 收敛/下采样 🔻]
+            // ====== Phase 3: 综合回答 ======
+            // 如果已完成P1+P2，允许answer（Phase 3）
+            // 此阶段不强制提示，Agent自然会answer
+            
+            // ====== Phase 4: 反思评估（强制，在answer之后） ======
+            else if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !hasQualityReview && phase4PromptCount < 2) {
+              // 获取之前的answer内容
+              final lastAnswer = sessionDecisions.lastWhere(
+                (d) => d.type == AgentActionType.answer && isAgentDecision(d),
+                orElse: () => AgentDecision(type: AgentActionType.answer, content: ''),
+              );
+              
+              phaseTag = '[DEEP_P4_FORCE]';
+              forcePrompt = '''⚠️ [深度思考 Phase 4/4: 反思评估] - 必须执行
 
-你已完成发散和验证，现在建议**收敛整合**再回答。
+你已给出回答，现在**必须**进行质量自评：
 
-📌 当前状态：反思${agentReflectCount}次，假设${agentHypothesizeCount}次，搜索${agentSearchCount}次
-🎯 Phase 3 目标：把发散的信息"压缩"成结构化洞察
+📌 评估清单（对照用户问题: "$content"）：
+1. 是否真正回答了用户的问题？（目标达成度）
+2. 推理过程有没有漏洞？最薄弱的环节在哪？
+3. 是否有确认偏误（只看支持自己观点的证据）？
+4. 哪些是确定的事实？哪些是推测？
+5. 如果我错了，最可能错在哪？
+6. 质量评分 1-10（7分以上为达标）
 
-建议动作：
-1. 使用 **take_note** 记录关键发现：
-   - 最重要的3个洞察是什么？
-   - 各信息源之间有什么交叉验证？
-   - 有什么意外发现或模式？
+🎯 输出格式（必须包含verdict字段）：
+{"type":"reflect","content":"【质量自评】\\n目标达成: .../10\\n推理漏洞: ...\\n确认偏误检查: ...\\n不确定性: ...\\n总分: X/10\\nverdict: pass/retry\\n如需retry的改进方向: ...","reason":"[QUALITY_REVIEW]...","continue":true}
 
-2. 使用 **reflect** 进行元认知检查：
-   - 我的推理有漏洞吗？
-   - 哪些是确定的？哪些是推测的？
-   - 置信度真的有那么高吗？
+⚠️ 如果verdict为retry，系统将带着你的反思重新执行Phase 1-4。''';
+            }
+            // ====== 反思打回机制 ======
+            else if (hasQualityReview && !reviewPassed && retryCount < 2) {
+              // 获取反思中指出的问题
+              final reviewContent = lastReviewRef.snippet;
+              
+              phaseTag = '[RETRY_ROUND]';
+              forcePrompt = '''🔄 [深度思考: 反思打回 - 第${retryCount + 1}轮重做]
 
-💡 这是"下采样"阶段：提炼精华，剔除冗余，准备输出。
-⚠️ 如果你已经心中有数，可以直接 answer。''';
+你的反思评估结果为 **retry**，需要重新思考。
+
+📌 上一轮的问题：
+$reviewContent
+
+📌 本轮要求：
+1. **避免**上述指出的问题
+2. 重新从 Phase 1 开始（hypothesize）
+3. 针对性改进薄弱环节
+4. 不要重复同样的错误
+
+🎯 现在请输出新的 hypothesize，开始第${retryCount + 1}轮深度思考：
+{"type":"hypothesize","hypotheses":[...],"reason":"[RETRY_ROUND] 针对上轮问题改进...","continue":true}''';
+              
+              // 清除旧的决策记录，但保留反思内容作为教训
+              // （实际上不删除，让Agent能看到之前的失败）
             }
             
-            if (phaseFeedback != null) {
-              debugPrint('🧠 DEEP THINK: $phaseTag triggered');
-              setState(() => _loadingStatus = '🧠 深度思考：${phaseTag.replaceAll(RegExp(r'[\[\]]'), '')}');
+            // 执行强制提示
+            if (forcePrompt != null) {
+              debugPrint('🧠 DEEP THINK FORCE: $phaseTag');
+              setState(() => _loadingStatus = '🧠 深度思考：${phaseTag.replaceAll(RegExp(r'[\[\]_]'), ' ').trim()}');
               
               sessionRefs.add(ReferenceItem(
-                title: '🧠 深度思考阶段引导',
-                url: 'internal://feedback/deep-think/${DateTime.now().millisecondsSinceEpoch}',
-                snippet: phaseFeedback,
+                title: '🧠 深度思考强制阶段',
+                url: 'internal://deep-think/force/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: forcePrompt,
                 sourceName: 'DeepThinkMode',
-                sourceType: 'feedback',
+                sourceType: phaseTag.contains('P4') ? 'quality_review_prompt' : 'deep_phase_force',
               ));
               
               sessionDecisions.add(AgentDecision(
                 type: AgentActionType.reflect,
-                content: '深度思考模式：$phaseTag 阶段引导',
-                reason: '$phaseTag Phase guidance triggered.',
+                content: '深度思考模式强制：$phaseTag',
+                reason: '$phaseTag 强制执行',
               ));
               
               steps++;
               continue;
             }
             
-            // 深度思考模式下，所有阶段都已完成或跳过，允许回答
-            // （不再触发普通反馈或置信度检查，因为深度模式有自己的检查体系）
+            // 检查反思评估结果，如果通过则标记
+            if (hasQualityReview && reviewPassed) {
+              debugPrint('✅ DEEP THINK: Quality review PASSED');
+              // 已通过反思评估，允许输出
+            }
+            
+            // 深度思考流程完成或已达到重试上限
           }
           // ========== 普通模式：使用常规反馈 ==========
           else if (!_deepReasoningMode) {
