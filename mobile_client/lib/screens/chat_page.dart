@@ -2528,6 +2528,7 @@ ONLY output JSON. No explanation.''';
       final generatedRefs = sessionRefs.where((r) => r.sourceType == 'generated').toList();
       final knowledgeRefs = sessionRefs.where((r) => r.sourceType == 'knowledge').toList();
       final knowledgeSearchRefs = sessionRefs.where((r) => r.sourceType == 'knowledge_search').toList();
+      final agentNoteRefs = sessionRefs.where((r) => r.sourceType == 'agent_note').toList();
       final thinkingRefs = sessionRefs.where((r) => 
         r.sourceType == 'reflection' || r.sourceType == 'hypothesis' || r.sourceType == 'system' || r.sourceType == 'system_note'
       ).toList();
@@ -2544,7 +2545,8 @@ ONLY output JSON. No explanation.''';
         r.sourceType != 'reflection' && r.sourceType != 'hypothesis' && 
         r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis' &&
         r.sourceType != 'knowledge' && r.sourceType != 'knowledge_search' && r.sourceType != 'url_content' &&
-        r.sourceType != 'feedback' && r.sourceType != 'ocr' && r.sourceType != 'pending_image'
+        r.sourceType != 'feedback' && r.sourceType != 'ocr' && r.sourceType != 'pending_image' &&
+        r.sourceType != 'agent_note'
       ).toList();
       
       // LIMIT CONTEXT: Keep only recent/relevant references to prevent context explosion
@@ -2651,6 +2653,16 @@ ONLY output JSON. No explanation.''';
           if (snippet.length > 3000) snippet = '${snippet.substring(0, 3000)}...[截断]';
           refsBuffer.writeln('  $idx. ${r.title}');
           refsBuffer.writeln('$snippet');
+          idx++;
+        }
+      }
+      
+      // Agent notes (from take_note tool)
+      if (agentNoteRefs.isNotEmpty) {
+        refsBuffer.writeln('📝 [你的笔记 - 你之前记录的信息]');
+        for (var r in agentNoteRefs) {
+          refsBuffer.writeln('  $idx. ${r.title}');
+          refsBuffer.writeln('     ${r.snippet}');
           idx++;
         }
       }
@@ -4811,6 +4823,16 @@ $intentHint
             stepResult = 'Image generation failed';
             
             final failedPrompt = decision.content ?? '';
+            
+            // 添加错误反馈让Agent知道失败原因
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 图片生成失败',
+              url: 'internal://error/draw/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '图片生成失败。\n提示词: "${failedPrompt.length > 100 ? failedPrompt.substring(0, 100) + "..." : failedPrompt}"\n\n可能原因: 1) 提示词违规 2) API错误 3) 提示词不清晰\n建议: 修改提示词后重试，或告知用户无法生成',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.draw,
               content: decision.content,
@@ -5099,7 +5121,7 @@ $intentHint
             url: 'internal://notes/session/$noteCount',
             snippet: noteContent,
             sourceName: 'AgentNotes',
-            sourceType: 'system_note',
+            sourceType: 'agent_note',
           ));
           
           // 更新推理链
@@ -5150,6 +5172,15 @@ $intentHint
              // Failed or Cancelled
              stepSucceeded = false;
              stepResult = 'File save cancelled or failed';
+             
+             // 添加错误反馈让Agent知道失败原因
+             sessionRefs.add(ReferenceItem(
+               title: '⚠️ 文件保存失败',
+               url: 'internal://error/save_file/${DateTime.now().millisecondsSinceEpoch}',
+               snippet: '文件 "${decision.filename}" 保存失败或被取消。\n\n可能原因: 1) 用户取消 2) 存储权限不足 3) 磁盘空间不足\n建议: 询问用户是否重试，或检查存储权限',
+               sourceName: 'System',
+               sourceType: 'feedback',
+             ));
              
              sessionDecisions.last = AgentDecision(
                 type: AgentActionType.save_file,
@@ -5278,7 +5309,15 @@ $intentHint
                 sourceName: 'SystemControl',
                 sourceType: 'system',
              ));
-          } else {
+          } else if (actionResult != 'UNKNOWN') {
+             // 已知操作但执行失败 - 添加错误反馈
+             sessionRefs.add(ReferenceItem(
+               title: '⚠️ 系统操作失败',
+               url: 'internal://error/system_control/${DateTime.now().millisecondsSinceEpoch}',
+               snippet: '系统操作 "$action" 执行失败。\n\n可能原因: 1) 权限不足 2) 系统限制 3) 操作不可用\n建议: 告知用户操作未能完成',
+               sourceName: 'System',
+               sourceType: 'feedback',
+             ));
              // 🔴 PLAN SELF-ADJUSTMENT for failed system control
              if (isFromPlan && _currentPlan != null) {
                debugPrint('🔄 Plan step failed (system_control failed), triggering REPLAN...');
@@ -5382,6 +5421,15 @@ $intentHint
             debugPrint('Vision analysis failed: $visionError');
             stepSucceeded = false;
             stepResult = 'Vision exception: $visionError';
+            
+            // 添加错误反馈让Agent知道失败原因
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ Vision分析失败',
+              url: 'internal://error/vision/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '图片分析异常: $visionError\n\n可能原因: API配置问题、图片格式不支持、网络错误\n建议: 1) 重试 2) 换提示词 3) 使用OCR提取文字',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
             
             sessionDecisions.last = AgentDecision(
               type: AgentActionType.vision,
