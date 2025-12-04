@@ -5984,89 +5984,10 @@ $intentHint
             d.reason?.contains('[FEEDBACK]') == true
           ).length;
           
-          // Determine if we should provide feedback or allow the answer
-          final shouldProvideToolFeedback = !isSimpleGreeting && 
-            !hasRealToolsUsed && 
-            !hasRealData && 
-            feedbackAttempts < 2 &&  // Only give feedback twice max
-            steps < maxSteps - 2;
-          
-          if (shouldProvideToolFeedback) {
-            // 🧠 FEEDBACK MODE: Tell Agent what we observed, let it decide
-            debugPrint('💡 FEEDBACK: Agent chose answer without tools. Providing observation for reconsideration.');
-            setState(() => _loadingStatus = '🧠 Agent 正在重新评估...');
-            
-            // Provide observation feedback - NOT a command, just information
-            sessionRefs.add(ReferenceItem(
-              title: '💡 系统观察反馈 (非强制)',
-              url: 'internal://feedback/observation/${DateTime.now().millisecondsSinceEpoch}',
-              snippet: '''[OBSERVATION - Agent 请自行判断]
-
-你选择了直接回答，但系统观察到：
-• 当前 <current_observations> 中没有来自工具的真实数据
-• 用户问题: "$content"
-
-可能的情况分析：
-1. 如果这是一个需要实时信息的问题（新闻、价格、天气等）→ search 可能更好
-2. 如果这是一个创作请求（画图等）→ draw 是正确选择
-3. 如果这确实是一个可以直接回答的问题（常识、简单计算等）→ 继续 answer 是合理的
-4. 如果问题复杂需要思考 → reflect 可以帮助理清思路
-
-请根据你对用户问题的理解，自行决定：
-- 坚持使用 "answer"（如果你确信不需要工具）
-- 或改用其他工具（如果你认为工具能提供更好的回答）
-
-这不是强制命令，是帮助你做出更好决策的反馈。''',
-              sourceName: 'SystemFeedback',
-              sourceType: 'feedback',
-            ));
-            
-            // Record this as a feedback (not a block/override)
-            sessionDecisions.add(AgentDecision(
-              type: AgentActionType.reflect,
-              content: '系统提供了观察反馈，Agent 正在重新评估决策',
-              reason: '[FEEDBACK] Observation provided. Agent will reconsider. User: "$content"',
-            ));
-            
-            steps++;
-            continue;
-          }
-          
-          // Deep Think: Check confidence before answering
-          if (decision.needsMoreWork && steps < maxSteps - 2) {
-            // Confidence too low - provide feedback instead of forcing
-            debugPrint('💡 FEEDBACK: Confidence ${decision.confidence} is low.');
-            setState(() => _loadingStatus = '🧠 Agent 置信度较低，正在重新评估...');
-            
-            // Provide confidence feedback
-            sessionRefs.add(ReferenceItem(
-              title: '💡 置信度反馈',
-              url: 'internal://feedback/confidence/${DateTime.now().millisecondsSinceEpoch}',
-              snippet: '''[CONFIDENCE OBSERVATION]
-
-你的回答置信度为 ${((decision.confidence ?? 0.5) * 100).toInt()}%，系统观察到这可能不够确定。
-
-不确定性: ${decision.uncertainties?.join(", ") ?? "未明确指出"}
-
-建议（非强制）：
-• 如果不确定事实 → search 可以获取更可靠的信息
-• 如果逻辑复杂 → reflect 可以帮助理清思路
-• 如果你认为当前置信度已足够 → 继续 answer 也可以
-
-请自行判断是否需要额外的工具来提高回答质量。''',
-              sourceName: 'SystemFeedback',
-              sourceType: 'feedback',
-            ));
-            
-            // Continue loop to let Agent reconsider
-            steps++;
-            continue;
-          }
-          
-          // 🧠 DEEP THINKING MODE: Enforce quality standards with Diverge-Converge pattern
+          // ========== 深度思考模式：优先处理 ==========
+          // 深度思考模式有自己的三阶段检查系统，不使用普通反馈
           if (_deepReasoningMode && steps < maxSteps - 2 && !isSimpleGreeting) {
             // Track thinking phases - ONLY count Agent's actual tool calls, NOT system feedback/auto-inferred
-            // System-added records have reason starting with: [FEEDBACK], [DEEP_PHASE_*], [AUTO-INFERRED], [PLAN...], etc.
             bool isAgentDecision(AgentDecision d) {
               final reason = d.reason ?? '';
               // Exclude system-generated decisions
@@ -6199,6 +6120,90 @@ $intentHint
                 reason: '$phaseTag Phase guidance triggered.',
               ));
               
+              steps++;
+              continue;
+            }
+            
+            // 深度思考模式下，所有阶段都已完成或跳过，允许回答
+            // （不再触发普通反馈或置信度检查，因为深度模式有自己的检查体系）
+          }
+          // ========== 普通模式：使用常规反馈 ==========
+          else if (!_deepReasoningMode) {
+            // Determine if we should provide feedback or allow the answer
+            final shouldProvideToolFeedback = !isSimpleGreeting && 
+              !hasRealToolsUsed && 
+              !hasRealData && 
+              feedbackAttempts < 2 &&  // Only give feedback twice max
+              steps < maxSteps - 2;
+            
+            if (shouldProvideToolFeedback) {
+              // 🧠 FEEDBACK MODE: Tell Agent what we observed, let it decide
+              debugPrint('💡 FEEDBACK: Agent chose answer without tools. Providing observation for reconsideration.');
+              setState(() => _loadingStatus = '🧠 Agent 正在重新评估...');
+              
+              // Provide observation feedback - NOT a command, just information
+              sessionRefs.add(ReferenceItem(
+                title: '💡 系统观察反馈 (非强制)',
+                url: 'internal://feedback/observation/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '''[OBSERVATION - Agent 请自行判断]
+
+你选择了直接回答，但系统观察到：
+• 当前 <current_observations> 中没有来自工具的真实数据
+• 用户问题: "$content"
+
+可能的情况分析：
+1. 如果这是一个需要实时信息的问题（新闻、价格、天气等）→ search 可能更好
+2. 如果这是一个创作请求（画图等）→ draw 是正确选择
+3. 如果这确实是一个可以直接回答的问题（常识、简单计算等）→ 继续 answer 是合理的
+4. 如果问题复杂需要思考 → reflect 可以帮助理清思路
+
+请根据你对用户问题的理解，自行决定：
+- 坚持使用 "answer"（如果你确信不需要工具）
+- 或改用其他工具（如果你认为工具能提供更好的回答）
+
+这不是强制命令，是帮助你做出更好决策的反馈。''',
+                sourceName: 'SystemFeedback',
+                sourceType: 'feedback',
+              ));
+              
+              // Record this as a feedback (not a block/override)
+              sessionDecisions.add(AgentDecision(
+                type: AgentActionType.reflect,
+                content: '系统提供了观察反馈，Agent 正在重新评估决策',
+                reason: '[FEEDBACK] Observation provided. Agent will reconsider. User: "$content"',
+              ));
+              
+              steps++;
+              continue;
+            }
+            
+            // 普通模式: Check confidence before answering
+            if (decision.needsMoreWork && steps < maxSteps - 2) {
+              // Confidence too low - provide feedback instead of forcing
+              debugPrint('💡 FEEDBACK: Confidence ${decision.confidence} is low.');
+              setState(() => _loadingStatus = '🧠 Agent 置信度较低，正在重新评估...');
+              
+              // Provide confidence feedback
+              sessionRefs.add(ReferenceItem(
+                title: '💡 置信度反馈',
+                url: 'internal://feedback/confidence/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '''[CONFIDENCE OBSERVATION]
+
+你的回答置信度为 ${((decision.confidence ?? 0.5) * 100).toInt()}%，系统观察到这可能不够确定。
+
+不确定性: ${decision.uncertainties?.join(", ") ?? "未明确指出"}
+
+建议（非强制）：
+• 如果不确定事实 → search 可以获取更可靠的信息
+• 如果逻辑复杂 → reflect 可以帮助理清思路
+• 如果你认为当前置信度已足够 → 继续 answer 也可以
+
+请自行判断是否需要额外的工具来提高回答质量。''',
+                sourceName: 'SystemFeedback',
+                sourceType: 'feedback',
+              ));
+              
+              // Continue loop to let Agent reconsider
               steps++;
               continue;
             }
