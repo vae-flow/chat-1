@@ -2579,6 +2579,22 @@ ONLY output JSON. No explanation.''';
     final hasKnowledge = _knowledgeService.hasKnowledge;
     final knowledgeOverview = hasKnowledge ? _knowledgeService.getKnowledgeOverview() : '';
 
+    // Auto-trigger hints to push tool usage proactively
+    final lowerUser = userText.toLowerCase();
+    final autoHints = <String>[];
+    if (RegExp(r'(数据|统计|趋势|来源|权威|最新|市场|指标|分析)').hasMatch(userText)) {
+      autoHints.add('检测到数据/趋势诉求 → 先 search/read_url 获取权威来源，再结合 search_knowledge/read_knowledge；缺来源禁止直接 answer。');
+    }
+    if (RegExp(r'(pdf|扫描|图片|截图|ocr)', caseSensitive: false).hasMatch(lowerUser)) {
+      autoHints.add('检测到文件/图片/扫描 → 使用 vision 或 OCR 获取内容（PDF 优先 OCR）。');
+    }
+    if (RegExp(r'(计划|步骤|路线图|时间表|里程碑|方案|任务|进度|风险|预算|成本|资源)').hasMatch(userText)) {
+      autoHints.add('检测到规划/执行诉求 → 先 search/knowledge 收集信息，再用 take_note 记录计划/风险，必要时 save_file 导出。');
+    }
+    final autoTriggerSection = autoHints.isNotEmpty
+        ? 'AUTO_TRIGGER_HINTS:\\n- ${autoHints.join('\\n- ')}'
+        : '';
+
     final toolbelt = '''
 ### TOOLBELT (what you can call)
 
@@ -2737,6 +2753,16 @@ Example: "P1:用户想了解最新动态 | P2:search可获实时数据,已添加
 3. Does user want an image? → draw is the right choice
 4. Is this a complex question? → reflect can help, then maybe search
 5. ONLY for simple greetings (你好/hi/谢谢) → answer directly is fine
+
+### HARD TRIGGERS (必须先用工具)
+- 出现“数据/趋势/统计/来源/权威/最新/市场/指标/分析” → 先 search 或 read_url 拿权威来源；有文件/知识库则 search_knowledge/read_knowledge 结合引用。
+- 出现“PDF/图片/扫描/文档截图” → 用 vision 或 OCR（PDF 优先 OCR）。
+- 出现“计划/步骤/路线图/时间表/里程碑/方案/任务/进度/风险/预算/成本/资源” → 先 search/knowledge 收集信息，再用 take_note 记录计划/风险；必要时 save_file 导出。
+- 不知道就去搜，禁止凭空编造或直接 answer。
+
+### 结构化输出要求（当使用 answer 时）
+- 必须包含：来源/证据（标注搜索或知识来源）、洞察/趋势、行动项（含负责人或下一步）、指标/衡量方式、风险与缓解。缺少来源时必须先调用 search 或 knowledge。
+- 关键要点用 take_note 保存；需要文件输出时用 save_file 生成 markdown（如计划/风险/指标表）。
 
 **SYSTEM FEEDBACK:**
 - If you choose "answer" without tool usage, system will provide OBSERVATIONS (not commands)
@@ -2978,6 +3004,12 @@ ${_activePersona.prompt}
 <current_time>
 $timeString
 </current_time>
+
+${autoTriggerSection.isNotEmpty ? '''
+<auto_triggers>
+$autoTriggerSection
+</auto_triggers>
+''' : ''}
 
 <user_profile>
 $memoryContent
@@ -3318,31 +3350,33 @@ Output your decision as JSON:
                 debugPrint('   Step ${step.stepNumber}: ${step.action.name} - ${step.purpose}');
               }
               
-              // Return the first step as AgentDecision
-              if (plan.steps.isNotEmpty) {
-                final firstStep = plan.steps[0];
-                return AgentDecision(
-                  type: firstStep.action,
-                  query: firstStep.query,
-                  content: firstStep.content,
-                  filename: firstStep.filename,
-                  reason: '[PLAN Step 1/${plan.steps.length}] ${firstStep.purpose} | P1:${plan.userIntent} | P2:${plan.capabilityReview} | P3:${plan.expectedOutcome}',
-                  confidence: plan.overallConfidence,
-                  continueAfter: plan.steps.length > 1, // Continue if more steps
-                );
+                // Return the first step as AgentDecision
+                if (plan.steps.isNotEmpty) {
+                  final firstStep = plan.steps[0];
+                  final rawDecision = AgentDecision(
+                    type: firstStep.action,
+                    query: firstStep.query,
+                    content: firstStep.content,
+                    filename: firstStep.filename,
+                    reason: '[PLAN Step 1/${plan.steps.length}] ${firstStep.purpose} | P1:${plan.userIntent} | P2:${plan.capabilityReview} | P3:${plan.expectedOutcome}',
+                    confidence: plan.overallConfidence,
+                    continueAfter: plan.steps.length > 1, // Continue if more steps
+                  );
+                  return _enforceToolPolicy(userText, rawDecision, hasKnowledge: hasKnowledge);
+                }
               }
+              
+              // ===== SINGLE MODE or legacy format =====
+              debugPrint('✅ Successfully parsed JSON (single mode), type: ${parsed['type']}');
+              _currentPlan = null; // Clear any previous plan
+              _currentPlanStep = 0;
+              final singleDecision = AgentDecision.fromJson(parsed);
+              return _enforceToolPolicy(userText, singleDecision, hasKnowledge: hasKnowledge);
+            } catch (jsonError) {
+              debugPrint('❌ JSON parse failed: $jsonError');
+              // Continue to Strategy 2
             }
-            
-            // ===== SINGLE MODE or legacy format =====
-            debugPrint('✅ Successfully parsed JSON (single mode), type: ${parsed['type']}');
-            _currentPlan = null; // Clear any previous plan
-            _currentPlanStep = 0;
-            return AgentDecision.fromJson(parsed);
-          } catch (jsonError) {
-            debugPrint('❌ JSON parse failed: $jsonError');
-            // Continue to Strategy 2
           }
-        }
         
         // Strategy 2: Use Worker API to semantically parse natural language into structured intent
         // IMPORTANT: Worker parses model's "thinking" text, not user input
@@ -3351,18 +3385,18 @@ Output your decision as JSON:
         
         try {
           final workerDecision = await _parseIntentWithWorker(content);
-          if (workerDecision != null) {
-            // 🔴 CRITICAL: If Worker returns "answer", it means model just rambled text
-            // In this case, we should NOT trust it and fall through to regex on USER input
-            if (workerDecision.type == AgentActionType.answer) {
-              debugPrint('⚠️ Worker returned "answer" (model rambling). Falling through to regex on USER input.');
-              // Don't return - fall through to Strategy 3
-            } else {
-              debugPrint('✅ Worker extracted ACTION: ${workerDecision.type}');
-              _currentPlan = null; // Clear plan for worker-parsed decisions
-              return workerDecision;
+            if (workerDecision != null) {
+              // 🔴 CRITICAL: If Worker returns "answer", it means model just rambled text
+              // In this case, we should NOT trust it and fall through to regex on USER input
+              if (workerDecision.type == AgentActionType.answer) {
+                debugPrint('⚠️ Worker returned "answer" (model rambling). Falling through to regex on USER input.');
+                // Don't return - fall through to Strategy 3
+              } else {
+                debugPrint('✅ Worker extracted ACTION: ${workerDecision.type}');
+                _currentPlan = null; // Clear plan for worker-parsed decisions
+                return _enforceToolPolicy(userText, workerDecision, hasKnowledge: hasKnowledge);
+              }
             }
-          }
         } catch (workerError) {
           debugPrint('⚠️ Worker intent parsing failed: $workerError, falling back to regex');
         }
@@ -7205,6 +7239,121 @@ Output your decision as JSON:
         );
       },
     );
+  }
+  /// Enforce tool-first policy: when the model tries to直接回答, force a tool action if patterns are detected.
+  AgentDecision _enforceToolPolicy(String userText, AgentDecision decision, {required bool hasKnowledge}) {
+    if (decision.type != AgentActionType.answer) return decision;
+
+    final dataRegex = RegExp(r'(数据|统计|趋势|来源|权威|最新|市场|指标|分析)');
+    final planRegex = RegExp(r'(计划|步骤|路线图|时间表|里程碑|方案|任务|进度|风险|预算|成本|资源)');
+    final visionRegex = RegExp(r'(pdf|扫描|图片|截图|ocr)', caseSensitive: false);
+
+    final needsData = dataRegex.hasMatch(userText);
+    final needsPlan = planRegex.hasMatch(userText);
+    final needsVision = visionRegex.hasMatch(userText);
+
+    // Vision/OCR trigger
+    if (needsVision) {
+      return AgentDecision(
+        type: AgentActionType.vision,
+        content: decision.content ?? '请分析上传的文件/图片（若为PDF请先OCR）并提取关键信息。',
+        reason: '${decision.reason ?? ''} [AUTO-TOOL] 检测到PDF/图片/扫描，先用 vision/OCR 获取内容。',
+        confidence: decision.confidence ?? 0.6,
+        continueAfter: true,
+      );
+    }
+
+    // Data/plan trigger → search first (prefer knowledge search for规划类)
+    if (needsData || needsPlan) {
+      final query = _buildQueryFromUser(userText);
+      final preferKnowledge = hasKnowledge && needsPlan && !needsData;
+      final actionType = preferKnowledge ? AgentActionType.search_knowledge : AgentActionType.search;
+      return AgentDecision(
+        type: actionType,
+        query: query,
+        reason: '${decision.reason ?? ''} [AUTO-TOOL] 触发${needsData ? '数据/趋势' : '规划'}场景，先${preferKnowledge ? 'search_knowledge' : 'search'}获取依据。',
+        confidence: decision.confidence ?? 0.7,
+        continueAfter: true,
+      );
+    }
+
+    return decision;
+  }
+
+  /// Build a concise query from user text (limit length, strip newlines)
+  String _buildQueryFromUser(String userText) {
+    final normalized = userText.replaceAll('\n', ' ').trim();
+    if (normalized.isEmpty) return '查询';
+    if (normalized.length <= 80) return normalized;
+    return normalized.substring(0, 80);
+  }
+
+  /// Finalize a decision: enforce tool policy, fill missing fields with safe defaults
+  AgentDecision _finalizeDecision(String userText, AgentDecision decision, {required bool hasKnowledge}) {
+    final enforced = _enforceToolPolicy(userText, decision, hasKnowledge: hasKnowledge);
+    
+    // Fill required fields per tool
+    switch (enforced.type) {
+      case AgentActionType.search:
+      case AgentActionType.search_knowledge:
+        final safeQuery = (enforced.query ?? _buildQueryFromUser(userText)).trim();
+        final safeReason = enforced.reason?.isNotEmpty == true ? enforced.reason! : '[AUTO-FIX] 填充默认原因';
+        return enforced.copyWith(
+          query: safeQuery.isEmpty ? _buildQueryFromUser(userText) : safeQuery,
+          reason: safeReason,
+          confidence: enforced.confidence ?? 0.7,
+          continueAfter: true,
+        );
+      case AgentActionType.vision:
+        final safeContent = enforced.content?.isNotEmpty == true
+            ? enforced.content!
+            : '请分析上传的文件/图片（若为PDF请先OCR）并提取关键信息。';
+        return enforced.copyWith(
+          content: safeContent,
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.6,
+          continueAfter: true,
+        );
+      case AgentActionType.draw:
+        final safePrompt = enforced.content?.isNotEmpty == true ? enforced.content! : 'user requested image';
+        return enforced.copyWith(
+          content: safePrompt,
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.8,
+          continueAfter: false,
+        );
+      case AgentActionType.read_url:
+        final safeQuery = enforced.query?.isNotEmpty == true ? enforced.query! : _buildQueryFromUser(userText);
+        return enforced.copyWith(
+          query: safeQuery,
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.7,
+          continueAfter: true,
+        );
+      case AgentActionType.save_file:
+        final safeName = enforced.filename?.isNotEmpty == true ? enforced.filename! : 'output_${DateTime.now().millisecondsSinceEpoch}.md';
+        final safeContent = enforced.content?.isNotEmpty == true ? enforced.content! : '# 输出内容\n';
+        return enforced.copyWith(
+          filename: safeName,
+          content: safeContent,
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.8,
+          continueAfter: false,
+        );
+      case AgentActionType.take_note:
+        final safeNote = enforced.content?.isNotEmpty == true ? enforced.content! : '待记录要点';
+        return enforced.copyWith(
+          content: safeNote,
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.8,
+          continueAfter: true,
+        );
+      default:
+        return enforced.copyWith(
+          reason: enforced.reason ?? '[AUTO-FIX] 填充默认原因',
+          confidence: enforced.confidence ?? 0.7,
+        );
+    }
   }
 }
 

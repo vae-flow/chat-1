@@ -221,6 +221,40 @@ class AgentDecision {
       'task_assessment': taskAssessment?.toJson(),
     };
   }
+
+  AgentDecision copyWith({
+    AgentActionType? type,
+    String? content,
+    String? query,
+    String? filename,
+    String? reason,
+    List<Map<String, dynamic>>? reminders,
+    bool? continueAfter,
+    double? confidence,
+    List<String>? uncertainties,
+    List<String>? hypotheses,
+    String? selectedHypothesis,
+    InfoSufficiency? infoSufficiency,
+    List<String>? sourceCaveats,
+    TaskAssessment? taskAssessment,
+  }) {
+    return AgentDecision(
+      type: type ?? this.type,
+      content: content ?? this.content,
+      query: query ?? this.query,
+      filename: filename ?? this.filename,
+      reason: reason ?? this.reason,
+      reminders: reminders ?? this.reminders,
+      continueAfter: continueAfter ?? this.continueAfter,
+      confidence: confidence ?? this.confidence,
+      uncertainties: uncertainties ?? this.uncertainties,
+      hypotheses: hypotheses ?? this.hypotheses,
+      selectedHypothesis: selectedHypothesis ?? this.selectedHypothesis,
+      infoSufficiency: infoSufficiency ?? this.infoSufficiency,
+      sourceCaveats: sourceCaveats ?? this.sourceCaveats,
+      taskAssessment: taskAssessment ?? this.taskAssessment,
+    );
+  }
 }
 
 /// A complete execution plan with multiple steps
