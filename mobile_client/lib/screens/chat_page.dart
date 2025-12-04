@@ -2601,10 +2601,11 @@ ONLY output JSON. No explanation.''';
     final deepReasoningSection = _deepReasoningMode
         ? '''
 ## DEEP REASONING MODE (已开启)
-- 必做：假设/疑问 → search/read_url/search_knowledge 验证 → 生成多方案/对比 → 指标与风险 → 行动项。
-- 至少一次 reflect 或 hypothesize；至少一次 search 或 search_knowledge（除非明确是闲聊）。
-- 输出必须包含：来源/证据、洞察/趋势、方案对比或行动项、指标、风险与缓解。
-- 信息不足时先用工具，不得直接 answer 凭空编造。
+- 上下文要求：推理必须结合 <user_profile>、<chat_history>、<current_observations>，不可只看当前输入。
+- 流程：假设/疑问 → search/read_url/search_knowledge 验证 → 生成多方案 A/B/C（每个给可行性/成本/风险评分，0-1）→ 选择方案并给行动项 → 指标与风险。
+- 验证：至少一次 reflect 或 hypothesize；至少一次 search 或 search_knowledge（除非明确闲聊）；结论前再做一次校验（search/knowledge，或给出需要补充的信息）。
+- 输出：来源/证据、洞察/趋势、方案对比（含评分）、最终选择理由、行动项、指标、风险与缓解。重要要点用 take_note，必要时 save_file。
+- 禁止凭空编造，缺信息时主动说明并提出获取路径（搜索/追问）。
 '''
         : '';
 
