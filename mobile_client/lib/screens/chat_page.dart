@@ -2905,13 +2905,57 @@ ONLY output JSON. No explanation.''';
         : '';
     final deepReasoningSection = _deepReasoningMode
         ? '''
-## DEEP REASONING MODE (已开启)
-- 上下文要求：推理必须结合 <user_profile>、<chat_history>、<current_observations>，不可只看当前输入。
-- 流程：假设/疑问 → search/read_url/search_knowledge 验证 → 生成多方案 A/B/C（每个给可行性/成本/风险评分，0-1）→ 选择方案并给行动项 → 指标与风险。
-- 验证：至少一次 reflect 或 hypothesize；至少一次 search 或 search_knowledge（除非明确闲聊）；结论前再做一次校验（search/knowledge，或给出需要补充的信息）。
-- 输出：来源/证据、洞察/趋势、方案对比（含评分）、最终选择理由、行动项、指标、风险与缓解。重要要点用 take_note，必要时 save_file。
-- 迭代：必须回顾 <action_history> 和 <current_observations> 里的已有方案/评分/未解决点，先总结再迭代，禁止忽视前序信息。
-- 禁止凭空编造，缺信息时主动说明并提出获取路径（搜索/追问）。
+## 🧠 DEEP THINKING MODE (深度思考模式)
+
+### 核心理念：思维深度 > 思维长度
+不是做更多步骤，而是每一步都更深入。
+
+### 第一层：问题解构 (Problem Deconstruction)
+在任何行动之前，先用 reflect 回答：
+1. **表层问题**：用户字面上问了什么？
+2. **真实意图**：用户实际想解决什么问题？（往往藏在表层之下）
+3. **隐含假设**：用户和我各有什么假设？这些假设可靠吗？
+4. **问题边界**：这个问题的范围在哪里？什么不在范围内？
+5. **成功标准**：怎样才算真正回答好这个问题？
+
+### 第二层：多维度分析 (Multi-Dimensional Analysis)
+用 hypothesize 生成至少3个不同维度的思考角度：
+- **时间维度**：短期/中期/长期影响是什么？
+- **利益相关者**：不同角色（用户/公司/社会）怎么看？
+- **因果链条**：根本原因是什么？这会导致什么后续影响？
+- **反事实思考**：如果情况相反会怎样？什么条件下结论会改变？
+- **类比迁移**：有没有类似问题？别的领域怎么解决的？
+
+### 第三层：证据与验证 (Evidence & Validation)
+- 每个重要断言必须有支撑：search/knowledge 获取事实
+- 区分事实(fact)、推断(inference)、观点(opinion)
+- 主动寻找**反面证据**：什么证据能推翻我的结论？
+- 标注信息的**时效性**和**可信度**
+
+### 第四层：综合与涌现 (Synthesis & Emergence)
+不是简单罗列信息，而是创造新的洞察：
+- 多个信息源交叉验证后，有什么**新发现**？
+- 把碎片信息连接起来，能看到什么**模式**？
+- 用 take_note 记录关键洞察，防止后续遗忘
+
+### 第五层：元认知检查 (Meta-Cognitive Check)
+最终回答前，自问：
+- 我的推理有漏洞吗？哪里最薄弱？
+- 我是否陷入了确认偏误（只找支持自己的证据）？
+- 这个回答的**置信度**真的有我声称的那么高吗？
+- 我还有什么**不知道的**需要诚实说明？
+
+### 输出要求
+- **结构化**：问题理解 → 分析框架 → 证据/数据 → 综合洞察 → 行动建议 → 局限性
+- **透明推理**：让用户看到你是怎么想的，而不只是结论
+- **诚实局限**：明确说明不确定的地方和推理的边界
+- **可行落地**：如果有建议，必须具体可执行
+
+### ⚠️ 禁止
+- 禁止假装知道不知道的事（承认无知是深度思考的一部分）
+- 禁止跳过论证直接给结论
+- 禁止忽视反面证据
+- 禁止用术语堆砌代替真正的分析
 '''
         : '';
 
@@ -3083,23 +3127,25 @@ search_knowledge / read_knowledge / delete_knowledge 均不可用
 ---
 ## 🧠 思考工具
 
-### reflect ✅ 始终可用
+### reflect ✅ 始终可用 ${_deepReasoningMode ? "⭐ 深度思考核心工具" : ""}
 | 项目 | 说明 |
 |------|------|
-| **输入** | {"type":"reflect", "content":"我的分析思考...", ...} |
-| **能力** | 暂停并自我分析，整理思路，评估当前方向 |
+| **输入** | {"type":"reflect", "content":"结构化的深度分析...", ...} |
+| **能力** | 深度自我分析，解构问题，多维度思考 |
 | **输出** | 思考过程被记录到 <current_observations>，帮助下一步决策 |
-| **失败** | 不会失败，但反思后应有下一步行动 |
-| **场景** | 复杂问题、卡住时、需要多角度分析、评估置信度 |
+| **失败** | 不会失败，但反思后应有明确的下一步行动 |
+| **深度模板** | 问题解构(表层/真实意图/假设) → 多维分析(时间/利益相关者/因果) → 识别知识缺口 → 确定下一步 |
+| **场景** | 复杂问题开始前、信息收集后整合、回答前最终检查 |
 
-### hypothesize ✅ 始终可用
+### hypothesize ✅ 始终可用 ${_deepReasoningMode ? "⭐ 深度思考核心工具" : ""}
 | 项目 | 说明 |
 |------|------|
-| **输入** | {"type":"hypothesize", "hypotheses":["方案A","方案B"], "selected_hypothesis":"选择A因为...", ...} |
-| **能力** | 生成多个备选方案，比较并选择最佳 |
+| **输入** | {"type":"hypothesize", "hypotheses":["维度1视角","维度2视角","反面视角"], "selected_hypothesis":"综合分析后...", ...} |
+| **能力** | 生成多个不同维度的分析视角，对比评估后综合 |
 | **输出** | 方案列表和选择理由被记录到 <current_observations> |
-| **失败** | 不会失败，但选择后应执行该方案 |
-| **场景** | 前一个方法失败、需要换思路、多种可能性需比较 |
+| **失败** | 不会失败，但选择后应有验证行动 |
+| **深度要求** | 假设必须涵盖：正面论证、反面论证、边界条件、替代解释 |
+| **场景** | 需要多角度分析、检验自己的偏见、探索反事实 |
 
 ### clarify ✅ 始终可用
 | 项目 | 说明 |
@@ -5973,6 +6019,75 @@ $intentHint
             // Continue loop to let Agent reconsider
             steps++;
             continue;
+          }
+          
+          // 🧠 DEEP THINKING MODE: Enforce quality standards
+          if (_deepReasoningMode && steps < maxSteps - 2) {
+            // Check if Agent has done proper deep thinking
+            final hasReflected = sessionDecisions.any((d) => d.type == AgentActionType.reflect);
+            final hasHypothesized = sessionDecisions.any((d) => d.type == AgentActionType.hypothesize);
+            final hasSearched = sessionDecisions.any((d) => 
+              d.type == AgentActionType.search || 
+              d.type == AgentActionType.search_knowledge ||
+              d.type == AgentActionType.read_url);
+            
+            // Count deep thinking feedback attempts
+            final deepThinkFeedbackCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_THINK_FEEDBACK]') == true
+            ).length;
+            
+            // Only enforce once to avoid infinite loop
+            if (deepThinkFeedbackCount < 1 && !isSimpleGreeting) {
+              final missingSteps = <String>[];
+              if (!hasReflected && !hasHypothesized) {
+                missingSteps.add('未进行问题解构或多维度分析（建议先 reflect 或 hypothesize）');
+              }
+              if (!hasSearched && !hasRealData) {
+                missingSteps.add('未收集外部证据（建议 search 或 knowledge 验证）');
+              }
+              
+              if (missingSteps.isNotEmpty) {
+                debugPrint('🧠 DEEP THINK: Missing steps - \${missingSteps.join(", ")}');
+                setState(() => _loadingStatus = '🧠 深度思考模式：检查思维质量...');
+                
+                sessionRefs.add(ReferenceItem(
+                  title: '🧠 深度思考质量检查',
+                  url: 'internal://feedback/deep-think/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: '''[DEEP THINKING MODE - 质量检查]
+
+你选择了直接回答，但深度思考模式期望更深入的分析过程。
+
+⚠️ 当前缺少的思维层次：
+${missingSteps.map((s) => '• $s').join('\n')}
+
+深度思考的五层框架：
+1️⃣ 问题解构：表层问题 vs 真实意图？隐含假设是什么？
+2️⃣ 多维分析：时间维度？利益相关者？因果链条？反事实？
+3️⃣ 证据验证：每个断言有支撑吗？有反面证据吗？
+4️⃣ 综合涌现：多个信息源交叉后有什么新发现？
+5️⃣ 元认知检查：推理有漏洞吗？我诚实说明了不确定性吗？
+
+你可以：
+• 使用 reflect 进行问题解构和多维分析
+• 使用 hypothesize 探索不同视角（包括反面观点）
+• 使用 search/knowledge 收集证据
+• 或者如果你认为当前分析已足够深入，继续 answer
+
+这不是强制，是帮助你展现思维深度的提醒。''',
+                  sourceName: 'DeepThinkMode',
+                  sourceType: 'feedback',
+                ));
+                
+                sessionDecisions.add(AgentDecision(
+                  type: AgentActionType.reflect,
+                  content: '深度思考模式：系统建议增加思维深度',
+                  reason: '[DEEP_THINK_FEEDBACK] Quality check triggered. Missing: ${missingSteps.join(", ")}',
+                ));
+                
+                steps++;
+                continue;
+              }
+            }
           }
           
           // Agent decided to answer - execute it
