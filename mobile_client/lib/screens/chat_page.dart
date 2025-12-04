@@ -5858,6 +5858,7 @@ $intentHint
             reason: '${decision.reason} [CLARIFY: Awaiting user input]',
             confidence: decision.confidence,
             infoSufficiency: decision.infoSufficiency,
+            continueAfter: false, // Clarify always stops to wait for user
           );
           
           // Build a user-friendly clarification message
@@ -6256,10 +6257,19 @@ $intentHint
               missingParams = missing.join(', ');
               break;
             case AgentActionType.hypothesize:
-              if (decision.hypotheses == null) missingParams = 'hypotheses';
+              // hypothesize has default values, so reaching here means unexpected state
+              missingParams = 'hypotheses (or unexpected branch reached)';
               break;
-            default:
-              missingParams = 'unknown';
+            case AgentActionType.reflect:
+            case AgentActionType.clarify:
+            case AgentActionType.ocr:
+              // These tools have no required params, should not reach else branch
+              missingParams = 'none (unexpected: these tools have no required params)';
+              break;
+            case AgentActionType.answer:
+              // answer is handled separately above, should not reach here
+              missingParams = 'none (unexpected: answer should be handled above)';
+              break;
           }
           
           debugPrint('⚠️ Tool $toolName called with missing params: $missingParams');
