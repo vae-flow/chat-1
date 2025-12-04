@@ -1939,7 +1939,15 @@ OUTPUT REQUIREMENTS:
       if (resp.statusCode == 200) {
         final decodedBody = utf8.decode(resp.bodyBytes);
         final data = json.decode(decodedBody);
-        return data['choices'][0]['message']['content'] ?? _fallbackSummary(chunk, ext);
+        final summary = data['choices'][0]['message']['content'] ?? '';
+        
+        // 质量检查：确保摘要有实际内容，而不只是模板格式
+        if (summary.isNotEmpty && _isValidSummary(summary, chunk)) {
+          return summary;
+        } else {
+          debugPrint('Knowledge summary quality check failed, using fallback');
+          return _fallbackSummary(chunk, ext);
+        }
       } else {
         debugPrint('Knowledge summary API error: ${resp.statusCode}');
       }
@@ -1947,6 +1955,49 @@ OUTPUT REQUIREMENTS:
       debugPrint('Knowledge summary failed: $e');
     }
     return _fallbackSummary(chunk, ext);
+  }
+
+  /// 检查摘要质量是否合格
+  /// 确保摘要有实际内容，而不只是空模板或太短
+  bool _isValidSummary(String summary, String originalChunk) {
+    // 移除 markdown 格式符号后检查实际内容
+    final cleanedSummary = summary
+        .replaceAll(RegExp(r'\*\*'), '')  // 移除 **粗体**
+        .replaceAll(RegExp(r'[-•]\s*'), '')  // 移除列表符号
+        .replaceAll(RegExp(r'[#\s]+'), ' ')  // 移除标题符号
+        .trim();
+    
+    // 检查1：清理后内容至少50字符（太短说明可能只有模板）
+    if (cleanedSummary.length < 50) {
+      debugPrint('Summary too short: ${cleanedSummary.length} chars');
+      return false;
+    }
+    
+    // 检查2：摘要应该包含原文中的一些关键词
+    // 提取原文前500字符中的中文词或英文单词
+    final sampleText = originalChunk.substring(0, originalChunk.length.clamp(0, 500));
+    final chineseWords = RegExp(r'[\u4e00-\u9fa5]{2,4}').allMatches(sampleText).map((m) => m.group(0)!).toSet();
+    final englishWords = RegExp(r'[a-zA-Z]{4,}').allMatches(sampleText).map((m) => m.group(0)!.toLowerCase()).toSet();
+    
+    // 至少有2个原文关键词出现在摘要中
+    int matchCount = 0;
+    for (final word in chineseWords) {
+      if (summary.contains(word)) matchCount++;
+      if (matchCount >= 2) break;
+    }
+    if (matchCount < 2) {
+      for (final word in englishWords) {
+        if (summary.toLowerCase().contains(word)) matchCount++;
+        if (matchCount >= 2) break;
+      }
+    }
+    
+    if (matchCount < 2) {
+      debugPrint('Summary lacks original keywords, only $matchCount matches');
+      return false;
+    }
+    
+    return true;
   }
 
   /// Fallback summary when API fails - extract key patterns
