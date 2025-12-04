@@ -861,4 +861,87 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
     final all = await getExternalReferences();
     return all.where((r) => r.imageId == imageId).toList();
   }
+  
+  // ========== recall_search: 历史搜索查询功能 ==========
+  
+  /// 保存搜索结果并标记 persona 和时间
+  Future<void> saveSearchResults(List<ReferenceItem> refs, String query, String? personaId) async {
+    if (refs.isEmpty) return;
+    final now = DateTime.now();
+    final taggedRefs = refs.map((r) => r.copyWith(
+      personaId: personaId,
+      searchTime: now,
+      searchQuery: query,
+    )).toList();
+    await addExternalReferences(taggedRefs);
+  }
+  
+  /// 查询历史搜索结果
+  /// [query] 搜索关键词（模糊匹配标题、摘要、原搜索词）
+  /// [personaId] 当前角色 ID
+  /// [scope] 'current' = 仅当前角色, 'all' = 所有角色
+  /// [limit] 最大返回数量
+  Future<List<ReferenceItem>> recallSearch({
+    required String query,
+    String? personaId,
+    String scope = 'current',
+    int limit = 10,
+  }) async {
+    final all = await getExternalReferences();
+    
+    // 只保留有搜索时间的（真正的搜索结果）
+    var candidates = all.where((r) => r.searchTime != null).toList();
+    
+    // 按 scope 过滤
+    if (scope == 'current' && personaId != null) {
+      candidates = candidates.where((r) => r.personaId == personaId).toList();
+    }
+    
+    // 模糊匹配
+    final queryLower = query.toLowerCase();
+    final matched = candidates.where((r) {
+      final titleMatch = r.title.toLowerCase().contains(queryLower);
+      final snippetMatch = r.snippet.toLowerCase().contains(queryLower);
+      final queryMatch = r.searchQuery?.toLowerCase().contains(queryLower) ?? false;
+      return titleMatch || snippetMatch || queryMatch;
+    }).toList();
+    
+    // 按时间倒序（最近的优先）
+    matched.sort((a, b) => (b.searchTime ?? DateTime(1970)).compareTo(a.searchTime ?? DateTime(1970)));
+    
+    // 限制数量
+    return matched.take(limit).toList();
+  }
+  
+  /// 获取历史搜索的摘要信息（用于 Agent 判断是否需要查询）
+  Future<String> getSearchHistorySummary(String? personaId) async {
+    final all = await getExternalReferences();
+    final searches = all.where((r) => r.searchTime != null).toList();
+    
+    if (searches.isEmpty) return '无历史搜索记录';
+    
+    // 按 persona 分组统计
+    final currentPersonaCount = personaId != null 
+        ? searches.where((r) => r.personaId == personaId).length 
+        : 0;
+    final otherPersonaCount = searches.length - currentPersonaCount;
+    
+    // 获取最近的搜索词
+    final recentQueries = searches
+        .where((r) => r.searchQuery != null)
+        .map((r) => r.searchQuery!)
+        .toSet()
+        .take(5)
+        .toList();
+    
+    final buffer = StringBuffer();
+    buffer.writeln('当前角色历史: $currentPersonaCount 条');
+    if (otherPersonaCount > 0) {
+      buffer.writeln('其他角色历史: $otherPersonaCount 条');
+    }
+    if (recentQueries.isNotEmpty) {
+      buffer.writeln('最近搜索词: ${recentQueries.join(", ")}');
+    }
+    return buffer.toString();
+  }
 }

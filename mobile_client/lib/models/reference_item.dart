@@ -19,6 +19,14 @@ class ReferenceItem {
   final bool isVerified;
   // Potential issues or caveats with this source
   final List<String>? caveats;
+  
+  // === Cross-session tracking ===
+  // Which persona this reference belongs to (for isolation)
+  final String? personaId;
+  // When this search was performed
+  final DateTime? searchTime;
+  // Original search query that produced this result
+  final String? searchQuery;
 
   ReferenceItem({
     required this.title,
@@ -32,6 +40,9 @@ class ReferenceItem {
     this.contentDate,
     this.isVerified = false,
     this.caveats,
+    this.personaId,
+    this.searchTime,
+    this.searchQuery,
   });
 
   Map<String, dynamic> toJson() => {
@@ -46,6 +57,9 @@ class ReferenceItem {
         'contentDate': contentDate?.toIso8601String(),
         'isVerified': isVerified,
         'caveats': caveats,
+        'personaId': personaId,
+        'searchTime': searchTime?.toIso8601String(),
+        'searchQuery': searchQuery,
       };
 
   factory ReferenceItem.fromJson(Map<String, dynamic> json) {
@@ -61,6 +75,33 @@ class ReferenceItem {
       contentDate: json['contentDate'] != null ? DateTime.tryParse(json['contentDate']) : null,
       isVerified: json['isVerified'] ?? false,
       caveats: json['caveats'] != null ? List<String>.from(json['caveats']) : null,
+      personaId: json['personaId'],
+      searchTime: json['searchTime'] != null ? DateTime.tryParse(json['searchTime']) : null,
+      searchQuery: json['searchQuery'],
+    );
+  }
+  
+  /// Create a copy with additional fields
+  ReferenceItem copyWith({
+    String? personaId,
+    DateTime? searchTime,
+    String? searchQuery,
+  }) {
+    return ReferenceItem(
+      title: title,
+      url: url,
+      snippet: snippet,
+      sourceName: sourceName,
+      imageId: imageId,
+      sourceType: sourceType,
+      reliability: reliability,
+      authorityLevel: authorityLevel,
+      contentDate: contentDate,
+      isVerified: isVerified,
+      caveats: caveats,
+      personaId: personaId ?? this.personaId,
+      searchTime: searchTime ?? this.searchTime,
+      searchQuery: searchQuery ?? this.searchQuery,
     );
   }
   

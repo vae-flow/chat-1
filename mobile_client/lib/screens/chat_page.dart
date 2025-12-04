@@ -3097,6 +3097,18 @@ $deepReasoningSection
 | **失败** | 返回0结果→换关键词；API错误→检查<action_history>后重试 |
 | **边界** | 只返回摘要，详细内容需配合 read_url |
 
+### recall_search ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"recall_search", "content":"关键词", "reason":"用户提到之前搜过...", ...} |
+| **能力** | 查询历史搜索结果（跨会话），避免重复搜索 |
+| **输出** | 过去搜索过的匹配结果（标注来源角色和时间） |
+| **失败** | 无历史匹配→使用 search 进行新搜索 |
+| **边界** | 默认只查当前角色；reason含"跨角色/其他角色"时查所有角色 |
+| **场景** | 用户说"之前搜过"、"上次查的"、"我记得问过" |
+
+**⚠️ 跨角色查询注意**: 默认隔离不同角色的历史，仅当用户明确提到"跟XX聊过"时才跨角色查询。
+
 ### read_url ${searchAvailable ? "✅ 可用" : "❌ 不可用"}
 | 项目 | 说明 |
 |------|------|
@@ -3345,7 +3357,7 @@ Example: "P1:用户想了解最新动态 | P2:search可获实时数据,已添加
 - This is YOUR decision - system just provides information to help you think
 
 - The user installed this app FOR THE TOOLS. Consider if tools add value.
-- Review your available tools: search, draw, vision, read_url, save_file, system_control, search_knowledge, read_knowledge, reflect, hypothesize, clarify, take_note
+- Review your available tools: search, recall_search, draw, vision, read_url, save_file, system_control, search_knowledge, read_knowledge, reflect, hypothesize, clarify, take_note
 
 ## 🔄 ITERATIVE DECISION LOOP
 You are called MULTIPLE times in a loop. Each time you see:
@@ -4642,6 +4654,9 @@ $intentHint
                 sessionRefs.addAll(uniqueNewRefs);
                 debugPrint('Added ${uniqueNewRefs.length} unique refs (${newRefs.length - uniqueNewRefs.length} duplicates skipped)');
                 
+                // 保存搜索结果到历史（用于 recall_search）
+                await _refManager.saveSearchResults(uniqueNewRefs, decision.query!, _currentPersonaId);
+                
                 // Record success with result summary (if not already set by synthesis)
                 if (sessionDecisions.last.reason?.contains('Blind spots') != true) {
                   final topTitles = uniqueNewRefs.take(3).map((r) => r.title).join(', ');
@@ -4777,6 +4792,103 @@ $intentHint
             }
             
             // Continue loop - let Agent try alternative approach
+            steps++;
+            continue;
+          }
+        }
+        else if (decision.type == AgentActionType.recall_search && decision.content != null) {
+          // Action: Recall historical search results
+          final query = decision.content!.trim();
+          // 默认只查当前角色，除非用户明确提到"其他角色"或"之前跟XX聊过"
+          final scope = decision.reason?.contains('跨角色') == true || 
+                        decision.reason?.contains('其他角色') == true ||
+                        decision.reason?.contains('cross') == true ? 'all' : 'current';
+          
+          setState(() {
+            _loadingStatus = '正在查询历史搜索...';
+            _currentReasoning = '回溯: $query (scope: $scope)';
+          });
+          debugPrint('Agent recalling search history: $query (scope: $scope)');
+          
+          try {
+            final historicalRefs = await _refManager.recallSearch(
+              query: query,
+              personaId: _currentPersonaId,
+              scope: scope,
+              limit: 10,
+            );
+            
+            if (historicalRefs.isNotEmpty) {
+              stepSucceeded = true;
+              stepResult = 'Found ${historicalRefs.length} historical results';
+              
+              setState(() {
+                _reasoningSteps.add('✅ 历史搜索 "$query" 找到 ${historicalRefs.length} 条记录');
+              });
+              
+              // Add historical refs to session
+              for (final ref in historicalRefs) {
+                sessionRefs.add(ReferenceItem(
+                  title: '📚 [历史] ${ref.title}',
+                  url: ref.url,
+                  snippet: '${ref.snippet}\n\n---\n原搜索词: ${ref.searchQuery ?? "未知"}\n搜索时间: ${ref.searchTime?.toString().substring(0, 16) ?? "未知"}\n来源角色: ${ref.personaId == _currentPersonaId ? "当前角色" : "其他角色"}',
+                  sourceName: ref.sourceName,
+                  sourceType: 'historical',
+                  reliability: ref.reliability,
+                  contentDate: ref.contentDate,
+                ));
+              }
+              
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.recall_search,
+                content: query,
+                reason: '${decision.reason} [RESULT: Found ${historicalRefs.length} historical results from ${scope == "all" ? "all personas" : "current persona"}]',
+                continueAfter: decision.continueAfter,
+              );
+            } else {
+              stepSucceeded = false;
+              stepResult = 'No historical results found';
+              
+              setState(() {
+                _reasoningSteps.add('❌ 历史搜索 "$query" 无结果');
+              });
+              
+              sessionRefs.add(ReferenceItem(
+                title: '📭 历史搜索无结果',
+                url: 'internal://recall/empty/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '未找到与 "$query" 相关的历史搜索记录。\n建议: 使用 search 工具进行新搜索。',
+                sourceName: 'System',
+                sourceType: 'system_note',
+              ));
+              
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.recall_search,
+                content: query,
+                reason: '${decision.reason} [RESULT: No historical results found. Agent should try fresh search.]',
+                continueAfter: decision.continueAfter,
+              );
+            }
+            
+            if (!decision.continueAfter) {
+              setState(() => _loadingStatus = '正在生成回答...');
+              await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
+              break;
+            }
+            steps++;
+            continue;
+          } catch (recallError) {
+            debugPrint('Recall search failed: $recallError');
+            stepSucceeded = false;
+            stepResult = 'Recall error: $recallError';
+            
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 历史搜索失败',
+              url: 'internal://error/recall/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '查询历史失败: $recallError\n建议: 使用 search 工具进行新搜索。',
+              sourceName: 'System',
+              sourceType: 'system_note',
+            ));
+            
             steps++;
             continue;
           }
@@ -6314,6 +6426,7 @@ $intentHint
             case AgentActionType.search:
               if (decision.query == null) missingParams = 'query';
               break;
+            case AgentActionType.recall_search:
             case AgentActionType.read_url:
             case AgentActionType.draw:
             case AgentActionType.vision:
@@ -6419,6 +6532,8 @@ $intentHint
     switch (type) {
       case AgentActionType.search:
         return '{"type":"search","query":"搜索关键词","continue":true}';
+      case AgentActionType.recall_search:
+        return '{"type":"recall_search","content":"之前搜索过的关键词","reason":"用户提到之前搜过","continue":true}';
       case AgentActionType.read_url:
         return '{"type":"read_url","content":"https://example.com","continue":true}';
       case AgentActionType.draw:

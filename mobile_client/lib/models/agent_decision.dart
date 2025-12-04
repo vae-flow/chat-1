@@ -1,4 +1,4 @@
-enum AgentActionType { answer, search, read_url, draw, vision, ocr, reflect, hypothesize, clarify, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note }
+enum AgentActionType { answer, search, recall_search, read_url, draw, vision, ocr, reflect, hypothesize, clarify, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note }
 
 /// Information sufficiency assessment
 class InfoSufficiency {
