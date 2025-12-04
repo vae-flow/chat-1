@@ -38,6 +38,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _ocrBaseCtrl = TextEditingController();
   final _ocrKeyCtrl = TextEditingController();
   final _ocrModelCtrl = TextEditingController();
+  bool _deepReasoningMode = false;
 
   // Router
   final _routerBaseCtrl = TextEditingController();
@@ -140,6 +141,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _ocrBaseCtrl.text = prefs.getString('ocr_base') ?? '';
       _ocrKeyCtrl.text = prefs.getString('ocr_key') ?? '';
       _ocrModelCtrl.text = prefs.getString('ocr_model') ?? 'gpt-4o-mini';
+      _deepReasoningMode = prefs.getBool('deep_reasoning_mode') ?? false;
 
       _routerBaseCtrl.text = prefs.getString('router_base') ?? 'https://your-oneapi-host/v1';
       _routerKeyCtrl.text = prefs.getString('router_key') ?? '';
@@ -193,6 +195,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('ocr_base', _ocrBaseCtrl.text.trim());
     await prefs.setString('ocr_key', _ocrKeyCtrl.text.trim());
     await prefs.setString('ocr_model', _ocrModelCtrl.text.trim());
+    await prefs.setBool('deep_reasoning_mode', _deepReasoningMode);
 
     await prefs.setString('router_base', _routerBaseCtrl.text.trim());
     await prefs.setString('router_key', _routerKeyCtrl.text.trim());
@@ -285,6 +288,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
 
   Widget _buildConfigTab(String label, TextEditingController base, TextEditingController key, TextEditingController model, {TextEditingController? summaryModel}) {
     final isImageTab = label == '生图';
+    final isChatTab = label == '聊天';
     
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -374,6 +378,15 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             subtitle: const Text('开启后，回复将逐字显示，体验更流畅。'),
             value: _enableStream,
             onChanged: (val) => setState(() => _enableStream = val),
+          ),
+        ],
+        if (isChatTab) ...[
+          const SizedBox(height: 8),
+          SwitchListTile(
+            title: const Text('深度思考模式'),
+            subtitle: const Text('开启后强制假设→查证→多方案对比→指标/风险输出，尽量避免直接回答。'),
+            value: _deepReasoningMode,
+            onChanged: (val) => setState(() => _deepReasoningMode = val),
           ),
         ],
       ],

@@ -165,6 +165,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   String _ocrBase = '';
   String _ocrKey = '';
   String _ocrModel = 'gpt-4o-mini';
+  // Deep reasoning mode
+  bool _deepReasoningMode = false;
   // Router
   String _routerBase = 'https://your-oneapi-host/v1';
   String _routerKey = '';
@@ -560,6 +562,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     _ocrBase = prefs.getString('ocr_base') ?? '';
     _ocrKey = prefs.getString('ocr_key') ?? '';
     _ocrModel = prefs.getString('ocr_model') ?? 'gpt-4o-mini';
+    _deepReasoningMode = prefs.getBool('deep_reasoning_mode') ?? false;
 
       _routerBase = prefs.getString('router_base') ?? 'https://your-oneapi-host/v1';
       _routerKey = prefs.getString('router_key') ?? '';
@@ -2578,6 +2581,7 @@ ONLY output JSON. No explanation.''';
     // Check if knowledge base has content
     final hasKnowledge = _knowledgeService.hasKnowledge;
     final knowledgeOverview = hasKnowledge ? _knowledgeService.getKnowledgeOverview() : '';
+    AgentDecision finalizeDecision(AgentDecision d) => _finalizeDecision(userText, d, hasKnowledge: hasKnowledge);
 
     // Auto-trigger hints to push tool usage proactively
     final lowerUser = userText.toLowerCase();
@@ -2594,9 +2598,19 @@ ONLY output JSON. No explanation.''';
     final autoTriggerSection = autoHints.isNotEmpty
         ? 'AUTO_TRIGGER_HINTS:\\n- ${autoHints.join('\\n- ')}'
         : '';
+    final deepReasoningSection = _deepReasoningMode
+        ? '''
+## DEEP REASONING MODE (已开启)
+- 必做：假设/疑问 → search/read_url/search_knowledge 验证 → 生成多方案/对比 → 指标与风险 → 行动项。
+- 至少一次 reflect 或 hypothesize；至少一次 search 或 search_knowledge（除非明确是闲聊）。
+- 输出必须包含：来源/证据、洞察/趋势、方案对比或行动项、指标、风险与缓解。
+- 信息不足时先用工具，不得直接 answer 凭空编造。
+'''
+        : '';
 
     final toolbelt = '''
 ### TOOLBELT (what you can call)
+$deepReasoningSection
 
 ## ⚠️ REQUIRED JSON FIELDS FOR ALL TOOLS:
 Every tool output MUST include: type, reason, confidence(0-1), continue(true/false)
@@ -2719,6 +2733,8 @@ WRONG OUTPUT (system ignores this):
 
 CORRECT OUTPUT (system executes this):
 {"type":"search","query":"topic name 2024","reason":"Need latest info","confidence":0.7,"continue":true}
+
+$deepReasoningSection
 
 ## 🧠 THREE-PASS DECISION PROCESS (CRITICAL!)
 Before outputting your JSON decision, you MUST internally perform THREE rounds of thinking:
@@ -3362,7 +3378,7 @@ Output your decision as JSON:
                     confidence: plan.overallConfidence,
                     continueAfter: plan.steps.length > 1, // Continue if more steps
                   );
-                  return _enforceToolPolicy(userText, rawDecision, hasKnowledge: hasKnowledge);
+                  return finalizeDecision(rawDecision);
                 }
               }
               
@@ -3371,7 +3387,7 @@ Output your decision as JSON:
               _currentPlan = null; // Clear any previous plan
               _currentPlanStep = 0;
               final singleDecision = AgentDecision.fromJson(parsed);
-              return _enforceToolPolicy(userText, singleDecision, hasKnowledge: hasKnowledge);
+              return finalizeDecision(singleDecision);
             } catch (jsonError) {
               debugPrint('❌ JSON parse failed: $jsonError');
               // Continue to Strategy 2
@@ -3394,7 +3410,7 @@ Output your decision as JSON:
               } else {
                 debugPrint('✅ Worker extracted ACTION: ${workerDecision.type}');
                 _currentPlan = null; // Clear plan for worker-parsed decisions
-                return _enforceToolPolicy(userText, workerDecision, hasKnowledge: hasKnowledge);
+                return finalizeDecision(workerDecision);
               }
             }
         } catch (workerError) {
@@ -3425,12 +3441,12 @@ Output your decision as JSON:
             if (query.length > 80) query = query.substring(0, 80);
             if (query.isEmpty) query = userText.split(' ').first;
             debugPrint('🔍 Regex inferred SEARCH from user input: "$query"');
-            return AgentDecision(
+            return finalizeDecision(AgentDecision(
               type: AgentActionType.search,
               query: query.isNotEmpty ? query : userText,
               reason: '[REGEX-FALLBACK] Detected search intent in user query.',
               continueAfter: true,
-            );
+            ));
           }
         }
         
@@ -3448,12 +3464,12 @@ Output your decision as JSON:
               prompt = quoteMatch?.group(1) ?? userText.replaceAll(RegExp(r'(画|绘制|生成|帮我|请)'), '').trim();
             }
             debugPrint('🎨 Inferred DRAW from user input: "$prompt"');
-            return AgentDecision(
+            return finalizeDecision(AgentDecision(
               type: AgentActionType.draw,
               content: prompt.isNotEmpty ? prompt : 'user requested image',
               reason: '[AUTO-INFERRED] Detected draw intent in user query.',
               continueAfter: false,
-            );
+            ));
           }
         }
         
@@ -3465,13 +3481,13 @@ Output your decision as JSON:
           final filenameMatch = RegExp(r'[\w\-]+\.(txt|md|py|js|json|html|css|csv)').firstMatch(userText);
           final filename = filenameMatch?.group(0) ?? 'output.txt';
           debugPrint('💾 Inferred SAVE_FILE: $filename');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.save_file,
             filename: filename,
             content: userText,
             reason: '[AUTO-INFERRED] Detected save intent.',
             continueAfter: false,
-          );
+          ));
         }
         
         // ====== SYSTEM CONTROL INTENT ======
@@ -3487,12 +3503,12 @@ Output your decision as JSON:
           for (var keyword in entry.value) {
             if (lowerUserText.contains(keyword.toLowerCase())) {
               debugPrint('📱 Inferred SYSTEM_CONTROL: ${entry.key}');
-              return AgentDecision(
+              return finalizeDecision(AgentDecision(
                 type: AgentActionType.system_control,
                 content: entry.key,
                 reason: '[AUTO-INFERRED] Detected system control intent.',
                 continueAfter: false,
-              );
+              ));
             }
           }
         }
@@ -3502,12 +3518,12 @@ Output your decision as JSON:
             lowerUserText.contains('分析') || lowerUserText.contains('reflect') ||
             lowerUserText.contains('think') || lowerUserText.contains('consider')) {
           debugPrint('🤔 Inferred REFLECT');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.reflect,
             content: userText.length > 300 ? userText.substring(0, 300) : userText,
             reason: '[AUTO-INFERRED] Detected reflection/thinking intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== CLARIFY INTENT ======
@@ -3521,12 +3537,12 @@ Output your decision as JSON:
               lowerUserText.contains('为什么') || lowerUserText.contains('哪里')) {
             // This is a factual question, use search
             debugPrint('🔍 Question detected, using SEARCH');
-            return AgentDecision(
+            return finalizeDecision(AgentDecision(
               type: AgentActionType.search,
               query: userText.replaceAll(RegExp(r'[\?？]'), '').trim(),
               reason: '[AUTO-INFERRED] User question detected, searching for answer.',
               continueAfter: true,
-            );
+            ));
           }
         }
         
@@ -3536,12 +3552,12 @@ Output your decision as JSON:
           final keywordMatch = RegExp('["\'“”]([^"\'“”]+)["\'“”]').firstMatch(userText);
           final keywords = keywordMatch?.group(1) ?? userText.split('\n').first;
           debugPrint('📚 Inferred SEARCH_KNOWLEDGE: $keywords');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.search_knowledge,
             content: keywords,
             reason: '[AUTO-INFERRED] Detected knowledge base search intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== READ URL INTENT ======
@@ -3549,12 +3565,12 @@ Output your decision as JSON:
         if (urlMatch != null) {
           final url = urlMatch.group(0)!;
           debugPrint('🌐 Inferred READ_URL: $url');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.read_url,
             content: url,
             reason: '[AUTO-INFERRED] URL detected in user input.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== VISION INTENT ======
@@ -3563,12 +3579,12 @@ Output your decision as JSON:
             lowerUserText.contains('analyze image') || lowerUserText.contains('看看图') ||
             lowerUserText.contains('这张图') || lowerUserText.contains('图片')) {
           debugPrint('👁️ Inferred VISION');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.vision,
             content: userText,
             reason: '[AUTO-INFERRED] Detected image analysis intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== READ KNOWLEDGE INTENT ======
@@ -3576,12 +3592,12 @@ Output your decision as JSON:
         if (chunkIdMatch != null || lowerUserText.contains('读取知识') || lowerUserText.contains('获取块')) {
           final chunkId = chunkIdMatch?.group(0)?.replaceAll('读取', '').trim() ?? '';
           debugPrint('📖 Inferred READ_KNOWLEDGE: $chunkId');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.read_knowledge,
             content: chunkId.isNotEmpty ? chunkId : userText,
             reason: '[AUTO-INFERRED] Detected knowledge reading intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== DELETE KNOWLEDGE INTENT ======
@@ -3589,24 +3605,24 @@ Output your decision as JSON:
             lowerUserText.contains('delete knowledge') || lowerUserText.contains('remove file')) {
           final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|docx?)').firstMatch(userText);
           debugPrint('🗑️ Inferred DELETE_KNOWLEDGE');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.delete_knowledge,
             content: idMatch?.group(0) ?? userText,
             reason: '[AUTO-INFERRED] Detected knowledge deletion intent.',
             continueAfter: false,
-          );
+          ));
         }
         
         // ====== TAKE NOTE INTENT ======
         if (lowerUserText.contains('记下') || lowerUserText.contains('记录') || 
             lowerUserText.contains('note') || lowerUserText.contains('记住')) {
           debugPrint('📝 Inferred TAKE_NOTE');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.take_note,
             content: userText,
             reason: '[AUTO-INFERRED] Detected note-taking intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== HYPOTHESIZE INTENT ======
@@ -3614,14 +3630,14 @@ Output your decision as JSON:
             lowerUserText.contains('几种方法') || lowerUserText.contains('hypothes') ||
             lowerUserText.contains('alternatives') || lowerUserText.contains('options')) {
           debugPrint('💡 Inferred HYPOTHESIZE');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.hypothesize,
             content: userText,
             hypotheses: ['方案1', '方案2'], // Placeholder
             selectedHypothesis: '方案1',
             reason: '[AUTO-INFERRED] Detected hypothesis generation intent.',
             continueAfter: true,
-          );
+          ));
         }
         
         // ====== DEFAULT: Force SEARCH for any non-trivial query ======
@@ -3633,11 +3649,11 @@ Output your decision as JSON:
         
         if (isSimpleGreeting) {
           debugPrint('👋 Simple greeting detected');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.answer,
             content: '',
             reason: '[GREETING] Simple greeting, no tools needed.',
-          );
+          ));
         }
         
         // Check if search is available before forcing it
@@ -3648,21 +3664,21 @@ Output your decision as JSON:
           if (searchQuery.isEmpty) searchQuery = userText.split(' ').take(5).join(' ');
           
           debugPrint('🔍 Default fallback: SEARCH with "$searchQuery"');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.search,
             query: searchQuery,
             reason: '[DEFAULT FALLBACK] No specific intent matched, using search.',
             continueAfter: true,
-          );
+          ));
         } else {
           // No search available, fall back to direct answer
           debugPrint('📝 Default fallback: No search available, using answer');
-          return AgentDecision(
+          return finalizeDecision(AgentDecision(
             type: AgentActionType.answer,
             content: '',
             reason: '[DEFAULT FALLBACK] No search API configured, using direct answer.',
             continueAfter: false,
-          );
+          ));
         }
         
       } else {
@@ -3679,20 +3695,20 @@ Output your decision as JSON:
       String fallbackQuery = userText.replaceAll(RegExp(r'[？\?]'), '').trim();
       if (fallbackQuery.length > 60) fallbackQuery = fallbackQuery.substring(0, 60);
       
-      return AgentDecision(
+      return finalizeDecision(AgentDecision(
         type: AgentActionType.search,
         query: fallbackQuery.isNotEmpty ? fallbackQuery : 'user question',
         reason: '[API FALLBACK] API error, attempting search.',
         continueAfter: true,
-      );
+      ));
     } else {
       debugPrint('⚠️ API failed and no search available, using direct answer');
-      return AgentDecision(
+      return finalizeDecision(AgentDecision(
         type: AgentActionType.answer,
         content: '',
         reason: '[API FALLBACK] API error and no search configured, using direct answer.',
         continueAfter: false,
-      );
+      ));
     }
   }
 
