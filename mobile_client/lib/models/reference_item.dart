@@ -86,7 +86,7 @@ class ReferenceItem {
   
   /// Check if source might be outdated (>30 days old)
   bool get mightBeOutdated {
-    if (contentDate == null) return true; // Unknown date = potentially outdated
+    if (contentDate == null) return false; // Unknown date = don't warn
     return DateTime.now().difference(contentDate!).inDays > 30;
   }
   

@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import textwrap
 from pathlib import Path
@@ -177,30 +176,16 @@ def update_memory(
     save_json(memory_path, memory)
 
 
-def get_env_config():
-    """从环境变量获取配置（优先级高于 config.json）"""
-    return {
-        "api_base": os.environ.get("AI_PARTNER_API_BASE"),
-        "api_key": os.environ.get("AI_PARTNER_API_KEY"),
-        "model": os.environ.get("AI_PARTNER_MODEL"),
-    }
-
-
 def main():
     base_dir = Path(__file__).parent
     config_path = base_dir / "config.json"
-    
-    # 支持从环境变量读取配置
-    env_cfg = get_env_config()
     if not config_path.exists():
         raise FileNotFoundError(
             "请先复制 config.example.json 为 config.json 并填写 api_base/api_key/model。"
         )
     cfg = load_json(config_path)
-    
-    # 环境变量优先级高于配置文件
-    api_base = env_cfg["api_base"] or cfg["api_base"]
-    api_key = env_cfg["api_key"] or cfg["api_key"]
+    api_base = cfg["api_base"]
+    api_key = cfg["api_key"]
     model_cfg = cfg.get("model", "").strip()
     if model_cfg.lower() == "auto" or not model_cfg:
         available_models = fetch_models(api_base, api_key)

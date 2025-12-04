@@ -3280,11 +3280,6 @@ ${hasUnanalyzedImage ? """
 检查 <current_observations> 查看已有分析结果
 """ : ""}
 ''';
-""" : hasSessionImage ? """
-
-⚠️ **IMAGE ALREADY ANALYZED**: Check <current_observations> for vision/OCR results.
-""" : ""}
-''';
 
     // 2. Construct System Prompt with XML Tags for strict separation
     final systemPrompt = '''
