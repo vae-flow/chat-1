@@ -776,10 +776,15 @@ ${blindSpots.isNotEmpty ? '❓ **知识盲区**: $blindSpots' : ''}
         buffer.writeln('${i + 1}. [已生成图片] ${ref.title}');
         buffer.writeln('   描述: ${ref.snippet}');
       } else {
-        // Web search result
+        // Web search result - 使用可信度和权威性指标
         buffer.writeln('${i + 1}. ${ref.title} (${ref.sourceName})');
+        buffer.writeln('   ${ref.reliabilityIndicator} | ${ref.authorityBadge} | ${ref.freshnessIndicator}');
         buffer.writeln('   摘要: ${ref.snippet}');
         buffer.writeln('   链接: ${ref.url}');
+        // 标注过期警告
+        if (ref.mightBeOutdated) {
+          buffer.writeln('   ⚠️ 注意：此来源可能已过时');
+        }
       }
     }
     return buffer.toString();

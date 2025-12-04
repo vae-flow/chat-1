@@ -1,7 +1,7 @@
 name: aicai_assistant
 description: AI财 - 智能AI助手，你的互联网嘴替
 publish_to: "none"
-version: 3.0.0+1
+version: 3.1.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

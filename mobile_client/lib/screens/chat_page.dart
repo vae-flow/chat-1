@@ -809,6 +809,45 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       });
       _scrollToBottom();
       
+      // 提供导出到相册的选项（使用 FileSaver.saveBinaryFile）
+      if (mounted) {
+        final shouldExport = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('导出图片'),
+            content: const Text('是否将生成的图片导出到相册？'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('稍后'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('导出'),
+              ),
+            ],
+          ),
+        );
+        
+        if (shouldExport == true) {
+          try {
+            final imageFile = File(localPath);
+            final bytes = await imageFile.readAsBytes();
+            final exportPath = await FileSaver.saveBinaryFile(
+              'ai_generated_${DateTime.now().millisecondsSinceEpoch}.png',
+              bytes,
+            );
+            if (exportPath != null && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('图片已导出: $exportPath')),
+              );
+            }
+          } catch (e) {
+            debugPrint('Export image error: $e');
+          }
+        }
+      }
+      
       return localPath; // Return path for tool chaining
 
     } catch (e) {
@@ -3913,9 +3952,15 @@ Output your decision as JSON:
               
               // ===== SINGLE MODE or legacy format =====
               debugPrint('✅ Successfully parsed JSON (single mode), type: ${parsed['type']}');
-              _currentPlan = null; // Clear any previous plan
-              _currentPlanStep = 0;
               final singleDecision = AgentDecision.fromJson(parsed);
+              
+              // 使用 fromSingleDecision 将单步决策包装为计划，便于统一处理
+              // 同时利用 isMultiStep 和 totalApiCalls 属性进行日志记录
+              final wrappedPlan = AgentPlan.fromSingleDecision(singleDecision);
+              debugPrint('📊 Plan stats: isMultiStep=${wrappedPlan.isMultiStep}, totalApiCalls=${wrappedPlan.totalApiCalls}');
+              
+              _currentPlan = null; // Clear any previous plan (single mode doesn't use plan tracking)
+              _currentPlanStep = 0;
               return finalizeDecision(singleDecision);
             } catch (jsonError) {
               debugPrint('❌ JSON parse failed: $jsonError');
@@ -4405,7 +4450,9 @@ $intentHint
               _reasoningSteps.add('执行: ${step.action.name}');
             }
           });
-          debugPrint('📋 Executing plan step ${planStepIndex + 1}: ${step.action.name}');
+          // 使用 AgentStep.requiresApi 判断是否需要 API 调用
+          final requiresApiCall = step.requiresApi;
+          debugPrint('📋 Executing plan step ${planStepIndex + 1}: ${step.action.name} (requiresApi: $requiresApiCall)');
           
           // Check dependencies - verify that dependent steps succeeded
           bool dependenciesMet = true;
@@ -4459,15 +4506,10 @@ $intentHint
               isFromPlan = false;
             }
           } else {
-            // Dependencies met, create decision from plan step
-            decision = AgentDecision(
-              type: step.action,
-              query: step.query,
-              content: step.content,
-              filename: step.filename,
+            // Dependencies met, use AgentStep.toDecision() to create decision from plan step
+            decision = step.toDecision().copyWith(
               reason: '[PLAN ${planStepIndex + 1}/${_currentPlan!.steps.length}] ${step.purpose}',
               confidence: _currentPlan!.overallConfidence,
-              continueAfter: true, // Let plan control continuation
             );
             
             _currentPlanStep++;
@@ -4488,6 +4530,26 @@ $intentHint
         }
         
         sessionDecisions.add(decision); // Record decision
+        
+        // 使用 AgentDecision 的诊断 getter 进行日志记录
+        if (decision.needsMoreWork) {
+          debugPrint('⚠️ Decision confidence low (${decision.confidence}), may need more work');
+        }
+        if (decision.hasCriticalUncertainties) {
+          debugPrint('⚠️ Decision has critical uncertainties: ${decision.uncertainties}');
+        }
+        if (decision.shouldAskUser) {
+          debugPrint('💬 Decision suggests asking user: ${decision.infoSufficiency?.clarifyQuestion}');
+        }
+        if (decision.hasUnreliableSources) {
+          debugPrint('⚠️ Decision has unreliable sources: ${decision.infoSufficiency?.unreliableSources}');
+        }
+        if (decision.isComplexTask) {
+          debugPrint('📊 Complex task detected: ${decision.taskAssessment?.complexity}');
+        }
+        if (decision.isMultiPhaseTask) {
+          debugPrint('📊 Multi-phase task: ${decision.taskAssessment?.progressString}');
+        }
         
         // Handle Reminders (Side Effect)
         if (decision.reminders != null) {
@@ -7381,31 +7443,47 @@ $intentHint
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            ScaleTransition(
-              scale: _pulseAnimation,
-              child: Container(
-                padding: const EdgeInsets.all(28),
-                decoration: BoxDecoration(
-                  gradient: AppColors.primaryGradient,
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.primaryStart.withOpacity(0.4),
-                      blurRadius: 30,
-                      offset: const Offset(0, 10),
+            // 外层发光效果 - 使用 glowGradient
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                gradient: AppColors.glowGradient,
+                shape: BoxShape.circle,
+              ),
+              child: ScaleTransition(
+                scale: _pulseAnimation,
+                child: Container(
+                  padding: const EdgeInsets.all(28),
+                  decoration: BoxDecoration(
+                    // 使用 accentStart 和 accentEnd 渐变
+                    gradient: LinearGradient(
+                      colors: [AppColors.accentStart, AppColors.accentEnd],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
                     ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.auto_awesome_rounded,
-                  size: 48,
-                  color: Colors.white,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: AppColors.glassBorder, width: 2),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.accentEnd.withOpacity(0.4),
+                        blurRadius: 30,
+                        offset: const Offset(0, 10),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 48,
+                    color: Colors.white,
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 32),
             ShaderMask(
-              shaderCallback: (bounds) => AppColors.primaryGradient.createShader(bounds),
+              shaderCallback: (bounds) => LinearGradient(
+                colors: [AppColors.accentStart, AppColors.accentEnd],
+              ).createShader(bounds),
               child: const Text(
                 '开始新的对话',
                 style: TextStyle(
@@ -7419,11 +7497,12 @@ $intentHint
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.8),
+                color: AppColors.glassWhite,
                 borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: AppColors.glassBorder),
                 boxShadow: [
                   BoxShadow(
-                    color: AppColors.shadowLight,
+                    color: AppColors.shadowMedium,
                     blurRadius: 10,
                   ),
                 ],
@@ -7435,7 +7514,9 @@ $intentHint
                     width: 8,
                     height: 8,
                     decoration: BoxDecoration(
-                      gradient: AppColors.primaryGradient,
+                      gradient: LinearGradient(
+                        colors: [AppColors.accentStart, AppColors.accentEnd],
+                      ),
                       shape: BoxShape.circle,
                     ),
                   ),

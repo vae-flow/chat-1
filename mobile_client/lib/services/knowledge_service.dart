@@ -30,6 +30,9 @@ class KnowledgeService {
   }
 
   String get currentPersonaId => _currentPersonaId;
+  
+  /// 检查服务是否已初始化
+  bool get isInitialized => _initialized;
 
   Future<void> _load() async {
     if (_currentPersonaId.isEmpty) {

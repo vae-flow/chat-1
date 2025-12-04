@@ -28,6 +28,14 @@ class KnowledgeChunk {
       index: json['index'],
     );
   }
+  
+  /// 序列化为 JSON 字符串（用于持久化或日志）
+  String toJsonString() => json.encode(toJson());
+  
+  /// 从 JSON 字符串反序列化
+  static KnowledgeChunk fromJsonString(String jsonStr) {
+    return KnowledgeChunk.fromJson(json.decode(jsonStr));
+  }
 }
 
 class KnowledgeFile {
@@ -63,5 +71,13 @@ class KnowledgeFile {
           .toList(),
       globalSummary: json['global_summary'],
     );
+  }
+  
+  /// 序列化为 JSON 字符串（用于持久化或日志）
+  String toJsonString() => json.encode(toJson());
+  
+  /// 从 JSON 字符串反序列化
+  static KnowledgeFile fromJsonString(String jsonStr) {
+    return KnowledgeFile.fromJson(json.decode(jsonStr));
   }
 }
