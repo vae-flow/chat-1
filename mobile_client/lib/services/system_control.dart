@@ -28,6 +28,8 @@ class SystemControl {
   static Future<bool> goBack() => performGlobalAction(1);
   static Future<bool> showRecents() => performGlobalAction(3);
   static Future<bool> showNotifications() => performGlobalAction(4);
+  static Future<bool> showQuickSettings() => performGlobalAction(5);
+  static Future<bool> toggleSplitScreen() => performGlobalAction(7);
   static Future<bool> lockScreen() => performGlobalAction(8);
   static Future<bool> takeScreenshot() => performGlobalAction(9);
 

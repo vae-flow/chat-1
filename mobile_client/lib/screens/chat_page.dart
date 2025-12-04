@@ -3228,10 +3228,11 @@ search_knowledge / read_knowledge / delete_knowledge 均不可用
 | 项目 | 说明 |
 |------|------|
 | **输入** | {"type":"system_control", "content":"动作名", ...} |
-| **能力** | 执行系统级操作：home(主屏), back(返回), recents(最近), notifications(通知), lock(锁屏), screenshot(截图) |
+| **能力** | 执行系统级操作 |
 | **输出** | 执行成功/失败状态 |
 | **失败** | 无障碍服务未开启→提示用户在设置中开启 |
-| **场景** | "回桌面"、"返回"、"锁屏"、"截图"、"打开最近任务" |
+| **支持的动作** | home(主屏), back(返回), recents(最近任务), notifications(通知栏), quick_settings(快速设置), split_screen(分屏), lock(锁屏), screenshot(截图) |
+| **场景** | "回桌面"、"返回"、"锁屏"、"截图"、"打开快捷设置"、"分屏" |
 
 ---
 ## 🧠 思考工具
@@ -3456,7 +3457,7 @@ If you write anything other than JSON, the system cannot understand you!
 1. "最新/今天/天气/新闻/股价/多少钱" → search (实时数据)
 2. "画/生成图/设计图" → draw (创意生成)
 3. "保存/导出/下载" → save_file (文件操作)
-4. "回桌面/返回/锁屏/截图/通知" → system_control (设备控制)
+4. "回桌面/返回/锁屏/截图/通知/快捷设置/分屏" → system_control (设备控制)
 5. "分析/思考/复杂问题" → reflect (深度推理)
 6. "换个角度/试试别的" → hypothesize (策略调整)
 7. "你好/谢谢/再见" AND no complex question → answer (社交对话)
@@ -4075,6 +4076,8 @@ Output your decision as JSON:
           'screenshot': ['截图', '截屏', 'screenshot'],
           'notifications': ['通知', '通知栏', 'notifications'],
           'recents': ['最近任务', '多任务', 'recents', 'recent apps'],
+          'quick_settings': ['快捷设置', '快速设置', '控制中心', 'quick settings'],
+          'split_screen': ['分屏', '分割屏幕', 'split screen'],
         };
         for (var entry in controlMap.entries) {
           for (var keyword in entry.value) {
@@ -5609,6 +5612,8 @@ $intentHint
             case 'back': success = await SystemControl.goBack(); actionResult = 'back'; break;
             case 'recents': success = await SystemControl.showRecents(); actionResult = 'recents'; break;
             case 'notifications': success = await SystemControl.showNotifications(); actionResult = 'notifications'; break;
+            case 'quick_settings': success = await SystemControl.showQuickSettings(); actionResult = 'quick_settings'; break;
+            case 'split_screen': success = await SystemControl.toggleSplitScreen(); actionResult = 'split_screen'; break;
             case 'lock': success = await SystemControl.lockScreen(); actionResult = 'lock'; break;
             case 'screenshot': success = await SystemControl.takeScreenshot(); actionResult = 'screenshot'; break;
             default: 
@@ -5619,7 +5624,7 @@ $intentHint
               sessionRefs.add(ReferenceItem(
                 title: '❓ 未知的系统操作',
                 url: 'internal://system/unknown-action',
-                snippet: '操作 "$action" 不支持。\n支持的操作有: home, back, recents, notifications, lock, screenshot\n请使用支持的操作或改用其他工具。',
+                snippet: '操作 "$action" 不支持。\n支持的操作有: home, back, recents, notifications, quick_settings, split_screen, lock, screenshot\n请使用支持的操作或改用其他工具。',
                 sourceName: 'SystemControl',
                 sourceType: 'system_note',
               ));
