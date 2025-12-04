@@ -22,6 +22,7 @@ import '../services/image_service.dart';
 import '../services/file_saver.dart';
 import '../services/system_control.dart';
 import '../services/knowledge_service.dart';
+import '../services/document_parser.dart';
 import '../utils/constants.dart';
 import 'package:file_picker/file_picker.dart';
 import 'settings_page.dart';
@@ -160,6 +161,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   String _visionBase = 'https://your-oneapi-host/v1';
   String _visionKey = '';
   String _visionModel = 'gpt-4-vision-preview';
+  // OCR (Dedicated, do not reuse Vision/Chat)
+  String _ocrBase = '';
+  String _ocrKey = '';
+  String _ocrModel = 'gpt-4o-mini';
   // Router
   String _routerBase = 'https://your-oneapi-host/v1';
   String _routerKey = '';
@@ -544,14 +549,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       _summaryModel = prefs.getString('summary_model') ?? 'gpt-3.5-turbo';
       _enableStream = prefs.getBool('enable_stream') ?? true;
 
-      _imgBase = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
-      _imgKey = prefs.getString('img_key') ?? '';
-      _imgModel = prefs.getString('img_model') ?? 'dall-e-3';
-      _useChatApiForImage = prefs.getBool('use_chat_api_for_image') ?? false;
+    _imgBase = prefs.getString('img_base') ?? 'https://your-oneapi-host/v1';
+    _imgKey = prefs.getString('img_key') ?? '';
+    _imgModel = prefs.getString('img_model') ?? 'dall-e-3';
+    _useChatApiForImage = prefs.getBool('use_chat_api_for_image') ?? false;
 
-      _visionBase = prefs.getString('vision_base') ?? 'https://your-oneapi-host/v1';
-      _visionKey = prefs.getString('vision_key') ?? '';
-      _visionModel = prefs.getString('vision_model') ?? 'gpt-4-vision-preview';
+    _visionBase = prefs.getString('vision_base') ?? 'https://your-oneapi-host/v1';
+    _visionKey = prefs.getString('vision_key') ?? '';
+    _visionModel = prefs.getString('vision_model') ?? 'gpt-4-vision-preview';
+    _ocrBase = prefs.getString('ocr_base') ?? '';
+    _ocrKey = prefs.getString('ocr_key') ?? '';
+    _ocrModel = prefs.getString('ocr_model') ?? 'gpt-4o-mini';
 
       _routerBase = prefs.getString('router_base') ?? 'https://your-oneapi-host/v1';
       _routerKey = prefs.getString('router_key') ?? '';
@@ -587,7 +595,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         type: FileType.custom,
         allowedExtensions: [
           // Text & Documents
-          'txt', 'md', 'markdown', 'rst', 'log', 'csv', 'tsv',
+          'txt', 'md', 'markdown', 'rst', 'log', 'csv', 'tsv', 'pdf', 'docx',
           // Code - Common
           'json', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
           // Code - Web
@@ -617,10 +625,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         final file = File(result.files.single.path!);
         final filename = result.files.single.name;
         
-        // Check size (limit to 10MB for text files)
+        // Check size (raised limit to 50MB to allow larger documents)
         final size = await file.length();
-        if (size > 10 * 1024 * 1024) {
-          _showError('文件过大 (限制10MB)');
+        if (size > 50 * 1024 * 1024) {
+          _showError('文件过大 (限制50MB)');
           return;
         }
 
@@ -630,14 +638,35 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         });
 
         try {
-          // Try to read as UTF-8, fallback to Latin1 if fails
+          final ext = filename.split('.').last.toLowerCase();
           String content;
           try {
-            content = await file.readAsString(encoding: utf8);
+            content = await DocumentParser.readText(file, extension: ext);
           } catch (e) {
-            // Fallback for non-UTF8 files
-            final bytes = await file.readAsBytes();
-            content = latin1.decode(bytes);
+            _showError('无法解析${ext.toUpperCase()} 文件: $e');
+            return;
+          }
+          
+          if (content.trim().isEmpty) {
+            // Fallback: OCR for scanned PDFs via OpenAI-compatible vision API
+            if (ext == 'pdf') {
+              setState(() => _loadingStatus = '文本提取为空，正在尝试 OCR...');
+              try {
+                final ocrText = await _runPdfOcr(file);
+                if (ocrText != null && ocrText.trim().isNotEmpty) {
+                  content = ocrText;
+                } else {
+                  _showError('文件内容为空，OCR 也未能提取文本');
+                  return;
+                }
+              } catch (e) {
+                _showError('文件内容为空，OCR 失败: $e');
+                return;
+              }
+            } else {
+              _showError('文件内容为空，或未能提取文本');
+              return;
+            }
           }
           
           await _knowledgeService.ingestFile(
@@ -1414,6 +1443,66 @@ $text
     return text; // Fallback
   }
 
+  /// OCR a PDF using an OpenAI-compatible vision/chat endpoint (e.g., DeepSeek-OCR proxy)
+  /// Uses Vision config first, falls back to Chat config if Vision is not set.
+  Future<String?> _runPdfOcr(File file, {String? prompt}) async {
+    // Use dedicated OCR config only
+    if (_ocrBase.isEmpty || _ocrKey.isEmpty || _ocrBase.contains('your-oneapi-host')) {
+      debugPrint('OCR skipped: no OCR API configured');
+      return null;
+    }
+    final base = _ocrBase;
+    final key = _ocrKey;
+    final model = _ocrModel;
+
+    final cleanBase = base.replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse('$cleanBase/chat/completions');
+    final bytes = await file.readAsBytes();
+    final b64 = base64Encode(bytes);
+
+    final userPrompt = prompt ??
+        '<image>\n<|grounding|>Convert the document to markdown.';
+
+    final body = json.encode({
+      'model': model,
+      'messages': [
+        {
+          'role': 'user',
+          'content': [
+            {
+              'type': 'image_url',
+              'image_url': {
+                'url': 'data:application/pdf;base64,$b64',
+              }
+            },
+            {'type': 'text', 'text': userPrompt}
+          ]
+        }
+      ],
+      'stream': false,
+    });
+
+    final resp = await http
+        .post(
+          uri,
+          headers: {
+            'Authorization': 'Bearer $key',
+            'Content-Type': 'application/json',
+          },
+          body: body,
+        )
+        .timeout(const Duration(minutes: 3));
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final content =
+          data['choices']?[0]?['message']?['content']?.toString() ?? '';
+      return content.isNotEmpty ? content : null;
+    }
+
+    throw Exception('OCR API ${resp.statusCode}: ${resp.body}');
+  }
+
   /// Generate file-type aware summary for knowledge base indexing
   Future<String> _generateKnowledgeSummary(String chunk, String filename) async {
     final config = await _getWorkerConfig();
@@ -1444,7 +1533,7 @@ Format: Use bullet points. Be technical and precise.''';
 Format: Hierarchical bullet points showing structure.''';
     }
     // Documentation/Text
-    else if (['md', 'markdown', 'rst', 'txt', 'log'].contains(ext)) {
+    else if (['md', 'markdown', 'rst', 'txt', 'log', 'pdf', 'docx'].contains(ext)) {
       typeHint = 'This is DOCUMENTATION/TEXT';
       extractionFocus = '''Extract and list:
 1. Main topics/headings
@@ -3464,7 +3553,7 @@ Output your decision as JSON:
         // ====== DELETE KNOWLEDGE INTENT ======
         if (lowerUserText.contains('删除知识') || lowerUserText.contains('移除') ||
             lowerUserText.contains('delete knowledge') || lowerUserText.contains('remove file')) {
-          final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|doc)').firstMatch(userText);
+          final idMatch = RegExp(r'[\w_-]+\.(txt|md|pdf|docx?)').firstMatch(userText);
           debugPrint('🗑️ Inferred DELETE_KNOWLEDGE');
           return AgentDecision(
             type: AgentActionType.delete_knowledge,

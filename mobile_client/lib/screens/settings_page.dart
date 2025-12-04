@@ -34,6 +34,10 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   final _visionBaseCtrl = TextEditingController();
   final _visionKeyCtrl = TextEditingController();
   final _visionModelCtrl = TextEditingController();
+  // OCR (Dedicated, do not reuse Vision/Chat)
+  final _ocrBaseCtrl = TextEditingController();
+  final _ocrKeyCtrl = TextEditingController();
+  final _ocrModelCtrl = TextEditingController();
 
   // Router
   final _routerBaseCtrl = TextEditingController();
@@ -74,7 +78,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 7, vsync: this); // 增加 Worker 标签
+    _tabController = TabController(length: 8, vsync: this); // 增加 OCR 标签
     _load();
   }
 
@@ -91,6 +95,9 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     _visionBaseCtrl.dispose();
     _visionKeyCtrl.dispose();
     _visionModelCtrl.dispose();
+    _ocrBaseCtrl.dispose();
+    _ocrKeyCtrl.dispose();
+    _ocrModelCtrl.dispose();
     _routerBaseCtrl.dispose();
     _routerKeyCtrl.dispose();
     _routerModelCtrl.dispose();
@@ -130,6 +137,9 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
       _visionBaseCtrl.text = prefs.getString('vision_base') ?? 'https://your-oneapi-host/v1';
       _visionKeyCtrl.text = prefs.getString('vision_key') ?? '';
       _visionModelCtrl.text = prefs.getString('vision_model') ?? 'gpt-4-vision-preview';
+      _ocrBaseCtrl.text = prefs.getString('ocr_base') ?? '';
+      _ocrKeyCtrl.text = prefs.getString('ocr_key') ?? '';
+      _ocrModelCtrl.text = prefs.getString('ocr_model') ?? 'gpt-4o-mini';
 
       _routerBaseCtrl.text = prefs.getString('router_base') ?? 'https://your-oneapi-host/v1';
       _routerKeyCtrl.text = prefs.getString('router_key') ?? '';
@@ -180,6 +190,9 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
     await prefs.setString('vision_base', _visionBaseCtrl.text.trim());
     await prefs.setString('vision_key', _visionKeyCtrl.text.trim());
     await prefs.setString('vision_model', _visionModelCtrl.text.trim());
+    await prefs.setString('ocr_base', _ocrBaseCtrl.text.trim());
+    await prefs.setString('ocr_key', _ocrKeyCtrl.text.trim());
+    await prefs.setString('ocr_model', _ocrModelCtrl.text.trim());
 
     await prefs.setString('router_base', _routerBaseCtrl.text.trim());
     await prefs.setString('router_key', _routerKeyCtrl.text.trim());
@@ -803,6 +816,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
             Tab(text: '聊天', icon: Icon(Icons.chat)),
             Tab(text: '生图', icon: Icon(Icons.palette)),
             Tab(text: '识图', icon: Icon(Icons.image)),
+            Tab(text: 'OCR', icon: Icon(Icons.document_scanner)),
             Tab(text: '分流', icon: Icon(Icons.alt_route)),
             Tab(text: '搜索', icon: Icon(Icons.search)),
             Tab(text: 'Worker', icon: Icon(Icons.settings_suggest)),
@@ -816,6 +830,7 @@ class _SettingsPageState extends State<SettingsPage> with SingleTickerProviderSt
           _buildConfigTab('聊天', _chatBaseCtrl, _chatKeyCtrl, _chatModelCtrl, summaryModel: _summaryModelCtrl),
           _buildConfigTab('生图', _imgBaseCtrl, _imgKeyCtrl, _imgModelCtrl),
           _buildConfigTab('识图', _visionBaseCtrl, _visionKeyCtrl, _visionModelCtrl),
+          _buildConfigTab('OCR (扫描件专用)', _ocrBaseCtrl, _ocrKeyCtrl, _ocrModelCtrl),
           _buildConfigTab('分流 (Router)', _routerBaseCtrl, _routerKeyCtrl, _routerModelCtrl),
           _buildSearchTab(),
           _buildWorkerTab(),
