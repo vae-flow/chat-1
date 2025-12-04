@@ -1642,6 +1642,82 @@ $text
     throw Exception('OCR API 错误 ${resp.statusCode}: $errorDetail');
   }
 
+  /// OCR for images (png/jpg/etc) - simplified version for Agent tool
+  /// Supports both local files and data URLs
+  Future<String?> _runImageOcr(File imageFile, {String? prompt}) async {
+    if (_ocrBase.isEmpty || _ocrKey.isEmpty || _ocrBase.contains('your-oneapi-host')) {
+      throw Exception('OCR API 未配置');
+    }
+    
+    final bytes = await imageFile.readAsBytes();
+    final ext = imageFile.path.toLowerCase().split('.').last;
+    
+    // Determine MIME type
+    String mimeType;
+    switch (ext) {
+      case 'png': mimeType = 'image/png'; break;
+      case 'jpg':
+      case 'jpeg': mimeType = 'image/jpeg'; break;
+      case 'gif': mimeType = 'image/gif'; break;
+      case 'webp': mimeType = 'image/webp'; break;
+      case 'bmp': mimeType = 'image/bmp'; break;
+      default: mimeType = 'image/png'; // Default to PNG
+    }
+    
+    final b64 = base64Encode(bytes);
+    final dataUrl = 'data:$mimeType;base64,$b64';
+    
+    final cleanBase = _ocrBase.replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse('$cleanBase/chat/completions');
+    
+    final userPrompt = prompt ?? '<|grounding|>OCR this image. Extract all visible text.';
+    
+    final body = json.encode({
+      'model': _ocrModel,
+      'messages': [
+        {
+          'role': 'user',
+          'content': [
+            {
+              'type': 'image_url',
+              'image_url': {
+                'url': dataUrl,
+              }
+            },
+            {'type': 'text', 'text': userPrompt}
+          ]
+        }
+      ],
+      'stream': false,
+    });
+
+    final resp = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $_ocrKey',
+        'Content-Type': 'application/json',
+      },
+      body: body,
+    ).timeout(const Duration(minutes: 2));
+
+    if (resp.statusCode == 200) {
+      final data = json.decode(utf8.decode(resp.bodyBytes));
+      final content = data['choices']?[0]?['message']?['content']?.toString() ?? '';
+      return content.isNotEmpty ? content : null;
+    }
+
+    // Parse error for better message
+    String errorDetail = resp.body;
+    try {
+      final errorJson = json.decode(resp.body);
+      if (errorJson['error'] != null) {
+        errorDetail = errorJson['error']['message'] ?? errorJson['error'].toString();
+      }
+    } catch (_) {}
+    
+    throw Exception('OCR API 错误 ${resp.statusCode}: $errorDetail');
+  }
+
   /// Generate file-type aware summary for knowledge base indexing
   Future<String> _generateKnowledgeSummary(String chunk, String filename) async {
     final config = await _getWorkerConfig();
@@ -2710,9 +2786,13 @@ ONLY output JSON. No explanation.''';
     final searchAvailable = resolvedSearchProvider != null;
     final drawAvailable = !_imgBase.contains('your-oneapi-host') && _imgKey.isNotEmpty;
     final visionAvailable = !_visionBase.contains('your-oneapi-host') && _visionKey.isNotEmpty;
+    final ocrAvailable = !_ocrBase.contains('your-oneapi-host') && _ocrKey.isNotEmpty;
 
-    // Check if we have an active image in this session
-    final hasSessionImage = sessionRefs.any((r) => r.sourceType == 'vision');
+    // Check if we have an active image in this session (either vision or ocr analyzed)
+    final hasSessionImage = sessionRefs.any((r) => r.sourceType == 'vision' || r.sourceType == 'ocr');
+    // Check if user just uploaded an image that hasn't been analyzed yet
+    final hasUnanalyzedImage = currentSessionImagePath.isNotEmpty && 
+        !sessionRefs.any((r) => r.imageId == currentSessionImagePath);
 
     // Check if knowledge base has content
     final hasKnowledge = _knowledgeService.hasKnowledge;
@@ -2766,10 +2846,24 @@ Every tool output MUST include: type, reason, confidence(0-1), continue(true/fal
   * content: Full image prompt (REQUIRED)
   * continue: false (image is shown to user) or true (if you want to comment)
 
-- vision: ${visionAvailable ? "AVAILABLE (image analysis)" : "UNAVAILABLE (vision API not configured)"}
+- vision: ${visionAvailable ? "AVAILABLE (image understanding/description)" : "UNAVAILABLE (vision API not configured)"}
   * **JSON**: {"type":"vision","content":"custom analysis prompt","reason":"...","confidence":0.85,"continue":true}
   * content: What to analyze in the image (REQUIRED)
+  * USE FOR: Understanding image content, describing scenes, analyzing charts/diagrams, identifying objects
   * NOTE: If user already uploaded image, check <current_observations> first - it may already be analyzed!
+
+- ocr: ${ocrAvailable ? "AVAILABLE (extract text from images)" : "UNAVAILABLE (OCR API not configured)"}
+  * **JSON**: {"type":"ocr","content":"optional custom prompt","reason":"...","confidence":0.9,"continue":true}
+  * content: Optional - custom OCR prompt (default: extract all text)
+  * USE FOR: Extracting TEXT from images - documents, screenshots, photos of text, scanned pages
+  * PREFER OCR OVER VISION when user wants to READ/EXTRACT/COPY text from an image!
+  * Returns: Extracted text in markdown format
+
+⚠️ **VISION vs OCR - CHOOSE WISELY:**
+- User says "识别/提取/读取文字" or "OCR" or "扫描" → Use **ocr**
+- User says "这是什么" or "分析/描述图片" → Use **vision**
+- Image contains TEXT user wants to extract → Use **ocr**
+- Image is a scene/photo user wants described → Use **vision**
 
 - read_url: ${searchAvailable ? "AVAILABLE - Deep read a webpage for full content" : "UNAVAILABLE (no network access)"}
   * **JSON**: {"type":"read_url","content":"https://example.com/article","reason":"...","confidence":0.85,"continue":true}
@@ -2851,9 +2945,15 @@ Example: search returns [doc1_0, doc1_3000] → read_knowledge with "doc1_0, doc
   * content: Your natural language response (REQUIRED)
   * continue: Usually false (conversation ends)
   * ⚠️ Use ONLY after gathering info with tools, or for simple greetings
-${hasSessionImage ? """
+${hasUnanalyzedImage ? """
 
-⚠️ **IMAGE UPLOADED**: Check <current_observations> for vision analysis.
+⚠️ **IMAGE PENDING ANALYSIS**: User uploaded an image that needs processing!
+- Check <current_observations> for the pending image marker
+- You MUST choose either **ocr** (to extract text) or **vision** (to understand content)
+- Base your choice on user's request and the image context
+""" : hasSessionImage ? """
+
+⚠️ **IMAGE ALREADY ANALYZED**: Check <current_observations> for vision/OCR results.
 """ : ""}
 ''';
 
@@ -3873,7 +3973,7 @@ Output your decision as JSON:
       _currentReasoning = '正在分析意图...';
     });
 
-    // 1. Handle Image Input (Analyze & Prepare)
+    // 1. Handle Image Input - DON'T auto-analyze, let Agent decide between Vision and OCR
     if (_selectedImage != null) {
       // Persist the picked image
       currentSessionImagePath = await savePickedImage(_selectedImage!);
@@ -3884,9 +3984,11 @@ Output your decision as JSON:
         _inputCtrl.clear();
         _selectedImage = null;
         _sending = true;
-        _loadingStatus = '正在分析图片...';
+        _loadingStatus = '准备处理图片...';
       });
       _scrollToBottom();
+      
+      _addReasoningStep('📷 检测到图片上传');
 
       // Check if we have historical analysis for this image
       final historicalRefs = await _refManager.getReferencesByImageId(currentSessionImagePath);
@@ -3894,47 +3996,46 @@ Output your decision as JSON:
         // Found historical analysis - use it as context
         debugPrint('Found ${historicalRefs.length} historical analysis for image');
         sessionRefs.addAll(historicalRefs);
-        // Still do a fresh analysis to capture any new aspects the user might ask about
+        _addReasoningStep('📚 找到历史分析记录: ${historicalRefs.length} 条');
       }
 
-      // Analyze the image to produce vision references
-      try {
-        final visionRefs = await analyzeImage(
-          imagePath: currentSessionImagePath,
-          baseUrl: _visionBase,
-          apiKey: _visionKey,
-          model: _visionModel,
-          // Fallback to Chat API if Vision fails
-          fallbackBaseUrl: _chatBase,
-          fallbackApiKey: _chatKey,
-          fallbackModel: _chatModel,
-        );
-        if (visionRefs.isNotEmpty) {
-          await _refManager.addExternalReferences(visionRefs);
-          sessionRefs.addAll(visionRefs);
-        } else {
-          // Analysis returned empty - add placeholder so Agent knows there's an image
-          sessionRefs.add(ReferenceItem(
-            title: '用户上传的图片',
-            url: currentSessionImagePath,
-            snippet: '⚠️ 图片分析未返回内容，可能需要重新分析',
-            sourceName: 'VisionAPI',
-            imageId: currentSessionImagePath,
-            sourceType: 'vision',
-          ));
-        }
-      } catch (e) {
-        debugPrint('Vision analyze error: $e');
-        // Add error placeholder so Agent knows there's an unanalyzed image
-        sessionRefs.add(ReferenceItem(
-          title: '用户上传的图片',
-          url: currentSessionImagePath,
-          snippet: '⚠️ 图片分析失败: $e - 可使用VISION工具重试',
-          sourceName: 'VisionAPI',
-          imageId: currentSessionImagePath,
-          sourceType: 'vision',
-        ));
+      // Determine user intent from text to help Agent decide
+      final lowerContent = content.toLowerCase();
+      final wantsOcr = RegExp(r'(ocr|识别|提取|读取|扫描|文字|文本|内容|转|翻译|复制)').hasMatch(lowerContent);
+      final wantsVision = RegExp(r'(描述|分析|看|什么|这是|里面|场景|图片|识图|解释|理解)').hasMatch(lowerContent);
+      
+      // Add a pending image placeholder - Agent will decide how to analyze
+      String intentHint = '';
+      if (wantsOcr && !wantsVision) {
+        intentHint = '💡 用户意图: 提取文字 → 建议使用 OCR';
+        _addReasoningStep(intentHint);
+      } else if (wantsVision && !wantsOcr) {
+        intentHint = '💡 用户意图: 理解图片 → 建议使用 Vision';
+        _addReasoningStep(intentHint);
+      } else if (content.isEmpty) {
+        intentHint = '💡 用户未说明意图 → 等待 Agent 根据图片内容决策';
+        _addReasoningStep('⏳ 等待 Agent 决定分析方式 (Vision/OCR)');
+      } else {
+        intentHint = '💡 意图不明确 → Agent 将智能判断';
+        _addReasoningStep(intentHint);
       }
+      
+      // Add unanalyzed image marker so Agent knows there's a pending image
+      sessionRefs.add(ReferenceItem(
+        title: '📷 待处理图片',
+        url: currentSessionImagePath,
+        snippet: '''⚠️ 图片已上传但尚未分析。
+$intentHint
+
+请选择分析方式:
+- 如需 **提取文字**(文档/截图/扫描件) → 使用 **ocr** 工具
+- 如需 **理解内容**(描述场景/分析图表) → 使用 **vision** 工具
+
+用户消息: ${content.isEmpty ? "(无)" : content}''',
+        sourceName: 'System',
+        imageId: currentSessionImagePath,
+        sourceType: 'pending_image',
+      ));
     } else {
       // Text Only Input
       setState(() {
@@ -5151,6 +5252,110 @@ Output your decision as JSON:
           }
           steps++;
           continue; // Always continue after vision to let Agent decide next action
+        }
+        else if (decision.type == AgentActionType.ocr) {
+          // Action: OCR - Extract text from image
+          _addReasoningStep('📝 执行 OCR 文字提取...');
+          
+          if (currentSessionImagePath.isEmpty) {
+            _addReasoningStep('❌ OCR 失败: 没有待处理的图片');
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ OCR 失败',
+              url: 'internal://error/ocr-no-image/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '没有待处理的图片。请先上传图片再使用 OCR。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.ocr,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: FAILED - No image to OCR]',
+            );
+            steps++;
+            continue;
+          }
+          
+          if (_ocrBase.contains('your-oneapi-host') || _ocrKey.isEmpty) {
+            _addReasoningStep('❌ OCR 失败: 未配置 OCR API');
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ OCR 未配置',
+              url: 'internal://error/ocr-no-api/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '无法执行 OCR：未配置 OCR API。\n请在设置中配置 OCR 服务。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.ocr,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: FAILED - No OCR API configured]',
+            );
+            steps++;
+            continue;
+          }
+          
+          setState(() => _loadingStatus = '正在 OCR 提取文字...');
+          try {
+            final customPrompt = decision.content ?? '<|grounding|>OCR this image. Extract all text.';
+            final imageFile = File(currentSessionImagePath);
+            final ocrText = await _runImageOcr(imageFile, prompt: customPrompt);
+            
+            if (ocrText != null && ocrText.trim().isNotEmpty) {
+              _addReasoningStep('✅ OCR 成功: 提取到 ${ocrText.length} 字符');
+              
+              // Remove pending_image marker
+              sessionRefs.removeWhere((r) => r.sourceType == 'pending_image' && r.imageId == currentSessionImagePath);
+              
+              // Add OCR result as reference
+              sessionRefs.add(ReferenceItem(
+                title: '📝 OCR 文字提取结果',
+                url: currentSessionImagePath,
+                snippet: ocrText,
+                sourceName: 'OCR',
+                imageId: currentSessionImagePath,
+                sourceType: 'ocr',
+              ));
+              await _refManager.addExternalReferences([sessionRefs.last]);
+              
+              final previewText = ocrText.length > 150 ? '${ocrText.substring(0, 150)}...' : ocrText;
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.ocr,
+                content: customPrompt,
+                reason: '${decision.reason} [RESULT: OCR success. Extracted text preview: $previewText]',
+              );
+            } else {
+              _addReasoningStep('⚠️ OCR 未提取到文字');
+              sessionRefs.add(ReferenceItem(
+                title: '⚠️ OCR 无结果',
+                url: 'internal://ocr-empty/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: 'OCR 未能从图片中提取到文字。可能原因:\n1. 图片中没有文字\n2. 图片质量太低\n3. 文字不清晰\n\n建议: 尝试使用 vision 工具来理解图片内容。',
+                sourceName: 'System',
+                sourceType: 'feedback',
+              ));
+              sessionDecisions.last = AgentDecision(
+                type: AgentActionType.ocr,
+                content: customPrompt,
+                reason: '${decision.reason} [RESULT: OCR returned empty - image may not contain readable text. Try vision instead.]',
+              );
+            }
+          } catch (ocrError) {
+            _addReasoningStep('❌ OCR 失败: $ocrError');
+            debugPrint('OCR failed: $ocrError');
+            
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ OCR 异常',
+              url: 'internal://error/ocr/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: 'OCR 处理失败: $ocrError\n\n建议: 检查图片格式是否支持，或尝试使用 vision 工具。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.ocr,
+              content: decision.content,
+              reason: '${decision.reason} [RESULT: FAILED - OCR error: $ocrError. Consider using vision instead.]',
+            );
+          }
+          steps++;
+          continue; // Always continue after OCR to let Agent process the result
         }
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)

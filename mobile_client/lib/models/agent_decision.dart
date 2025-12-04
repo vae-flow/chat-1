@@ -1,4 +1,4 @@
-enum AgentActionType { answer, search, read_url, draw, vision, reflect, hypothesize, clarify, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note }
+enum AgentActionType { answer, search, read_url, draw, vision, ocr, reflect, hypothesize, clarify, save_file, system_control, search_knowledge, read_knowledge, delete_knowledge, take_note }
 
 /// Information sufficiency assessment
 class InfoSufficiency {
@@ -124,6 +124,7 @@ class AgentDecision {
       case 'read_url': type = AgentActionType.read_url; break;
       case 'draw': type = AgentActionType.draw; break;
       case 'vision': type = AgentActionType.vision; break;
+      case 'ocr': type = AgentActionType.ocr; break;
       case 'reflect': type = AgentActionType.reflect; break;
       case 'hypothesize': type = AgentActionType.hypothesize; break;
       case 'clarify': type = AgentActionType.clarify; break;
@@ -359,6 +360,7 @@ class AgentStep {
       case 'read_url': action = AgentActionType.read_url; break;
       case 'draw': action = AgentActionType.draw; break;
       case 'vision': action = AgentActionType.vision; break;
+      case 'ocr': action = AgentActionType.ocr; break;
       case 'reflect': action = AgentActionType.reflect; break;
       case 'hypothesize': action = AgentActionType.hypothesize; break;
       case 'clarify': action = AgentActionType.clarify; break;
@@ -404,5 +406,6 @@ class AgentStep {
     action == AgentActionType.search ||
     action == AgentActionType.draw ||
     action == AgentActionType.read_url ||
-    action == AgentActionType.vision;
+    action == AgentActionType.vision ||
+    action == AgentActionType.ocr;
 }
