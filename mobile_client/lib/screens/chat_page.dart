@@ -2907,52 +2907,94 @@ ONLY output JSON. No explanation.''';
         ? '''
 ## 🧠 DEEP THINKING MODE (深度思考模式)
 
-### 核心理念：思维深度 > 思维长度
-不是做更多步骤，而是每一步都更深入。
+### 核心理念：发散-验证-收敛 (Diverge-Validate-Converge)
+像钻石一样思考：先向外扩展，再用证据填充，最后精炼成形。
 
-### 第一层：问题解构 (Problem Deconstruction)
-在任何行动之前，先用 reflect 回答：
-1. **表层问题**：用户字面上问了什么？
-2. **真实意图**：用户实际想解决什么问题？（往往藏在表层之下）
-3. **隐含假设**：用户和我各有什么假设？这些假设可靠吗？
-4. **问题边界**：这个问题的范围在哪里？什么不在范围内？
-5. **成功标准**：怎样才算真正回答好这个问题？
+```
+    Phase 1: 发散/上采样 🔺
+         /  |  \\
+       多个视角和可能性
+              ↓
+    Phase 2: 验证/采集 📊
+       证据填充每个分支
+              ↓
+    Phase 3: 收敛/下采样 🔻
+         \\  |  /
+       精炼的结构化回答
+```
 
-### 第二层：多维度分析 (Multi-Dimensional Analysis)
-用 hypothesize 生成至少3个不同维度的思考角度：
-- **时间维度**：短期/中期/长期影响是什么？
-- **利益相关者**：不同角色（用户/公司/社会）怎么看？
-- **因果链条**：根本原因是什么？这会导致什么后续影响？
-- **反事实思考**：如果情况相反会怎样？什么条件下结论会改变？
-- **类比迁移**：有没有类似问题？别的领域怎么解决的？
+---
 
-### 第三层：证据与验证 (Evidence & Validation)
-- 每个重要断言必须有支撑：search/knowledge 获取事实
-- 区分事实(fact)、推断(inference)、观点(opinion)
-- 主动寻找**反面证据**：什么证据能推翻我的结论？
-- 标注信息的**时效性**和**可信度**
+### Phase 1: 发散/上采样 🔺 (使用 reflect + hypothesize)
 
-### 第四层：综合与涌现 (Synthesis & Emergence)
-不是简单罗列信息，而是创造新的洞察：
+**目标**：把问题"放大"，发现更多维度
+
+**问题解构** (reflect)：
+1. **表层 vs 深层**：用户字面问了什么？实际想解决什么？
+2. **隐含假设**：用户和我各有什么假设？这些假设可靠吗？
+3. **问题边界**：什么在范围内？什么不在？
+4. **成功标准**：怎样才算真正回答好？
+
+**多维度展开** (hypothesize)：
+- 生成至少3个不同视角
+- **时间维度**：短期/中期/长期影响
+- **利益相关者**：不同角色怎么看？
+- **因果链条**：根本原因 → 当前问题 → 后续影响
+- **反事实思考**：如果情况相反会怎样？
+- **魔鬼代言人**：最强的反对观点是什么？
+
+💡 宁可多想几个方向，也不要过早收敛。
+
+---
+
+### Phase 2: 验证/采集 📊 (使用 search + knowledge)
+
+**目标**：用事实填充发散出的框架
+
+**证据收集**：
+- 每个重要断言必须有支撑
+- 主动搜索**反面证据**
+- 区分：事实(fact) / 推断(inference) / 观点(opinion)
+
+**质量把控**：
+- 信息的**时效性**：多久之前的？还有效吗？
+- 信息的**可信度**：来源可靠吗？有交叉验证吗？
+- 信息的**完整性**：有遗漏的重要方面吗？
+
+💡 让发散出的框架有血有肉，而非凭空推理。
+
+---
+
+### Phase 3: 收敛/下采样 🔻 (使用 take_note + reflect)
+
+**目标**：把发散的信息"压缩"成结构化洞察
+
+**综合涌现** (take_note)：
+- 最重要的3个洞察是什么？
 - 多个信息源交叉验证后，有什么**新发现**？
-- 把碎片信息连接起来，能看到什么**模式**？
-- 用 take_note 记录关键洞察，防止后续遗忘
+- 碎片信息连接起来，能看到什么**模式**？
 
-### 第五层：元认知检查 (Meta-Cognitive Check)
-最终回答前，自问：
+**元认知检查** (reflect)：
 - 我的推理有漏洞吗？哪里最薄弱？
-- 我是否陷入了确认偏误（只找支持自己的证据）？
-- 这个回答的**置信度**真的有我声称的那么高吗？
-- 我还有什么**不知道的**需要诚实说明？
+- 我是否陷入了确认偏误？
+- 置信度真的有我声称的那么高吗？
+- 还有什么**不知道的**需要诚实说明？
 
-### 输出要求
-- **结构化**：问题理解 → 分析框架 → 证据/数据 → 综合洞察 → 行动建议 → 局限性
-- **透明推理**：让用户看到你是怎么想的，而不只是结论
-- **诚实局限**：明确说明不确定的地方和推理的边界
-- **可行落地**：如果有建议，必须具体可执行
+💡 提炼精华，剔除冗余，准备输出。
+
+---
+
+### 输出结构
+深度思考的回答应该包含：
+1. **问题理解**：我理解你实际想要的是...
+2. **分析框架**：我从X/Y/Z三个角度分析...
+3. **证据/数据**：根据[来源]...
+4. **综合洞察**：综合来看，关键发现是...
+5. **行动建议**：具体建议是...（如适用）
+6. **局限性**：需要说明的是...
 
 ### ⚠️ 禁止
-- 禁止假装知道不知道的事（承认无知是深度思考的一部分）
+- 禁止假装知道不知道的事
 - 禁止跳过论证直接给结论
 - 禁止忽视反面证据
 - 禁止用术语堆砌代替真正的分析
@@ -6021,72 +6063,121 @@ $intentHint
             continue;
           }
           
-          // 🧠 DEEP THINKING MODE: Enforce quality standards
-          if (_deepReasoningMode && steps < maxSteps - 2) {
-            // Check if Agent has done proper deep thinking
-            final hasReflected = sessionDecisions.any((d) => d.type == AgentActionType.reflect);
-            final hasHypothesized = sessionDecisions.any((d) => d.type == AgentActionType.hypothesize);
-            final hasSearched = sessionDecisions.any((d) => 
+          // 🧠 DEEP THINKING MODE: Enforce quality standards with Diverge-Converge pattern
+          if (_deepReasoningMode && steps < maxSteps - 2 && !isSimpleGreeting) {
+            // Track thinking phases
+            final reflectCount = sessionDecisions.where((d) => d.type == AgentActionType.reflect).length;
+            final hypothesizeCount = sessionDecisions.where((d) => d.type == AgentActionType.hypothesize).length;
+            final searchCount = sessionDecisions.where((d) => 
               d.type == AgentActionType.search || 
               d.type == AgentActionType.search_knowledge ||
-              d.type == AgentActionType.read_url);
+              d.type == AgentActionType.read_url).length;
+            final noteCount = sessionDecisions.where((d) => d.type == AgentActionType.take_note).length;
             
-            // Count deep thinking feedback attempts
-            final deepThinkFeedbackCount = sessionDecisions.where((d) => 
-              d.reason?.contains('[DEEP_THINK_FEEDBACK]') == true
-            ).length;
+            // Count phase feedback attempts to avoid infinite loops
+            final phase1FeedbackCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_PHASE_1]') == true).length;
+            final phase2FeedbackCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_PHASE_2]') == true).length;
+            final phase3FeedbackCount = sessionDecisions.where((d) => 
+              d.reason?.contains('[DEEP_PHASE_3]') == true).length;
             
-            // Only enforce once to avoid infinite loop
-            if (deepThinkFeedbackCount < 1 && !isSimpleGreeting) {
-              final missingSteps = <String>[];
-              if (!hasReflected && !hasHypothesized) {
-                missingSteps.add('未进行问题解构或多维度分析（建议先 reflect 或 hypothesize）');
-              }
-              if (!hasSearched && !hasRealData) {
-                missingSteps.add('未收集外部证据（建议 search 或 knowledge 验证）');
-              }
+            String? phaseFeedback;
+            String phaseTag = '';
+            
+            // Phase 1: 发散/上采样 (Diverge/Upsample) - 扩展思维空间
+            if (reflectCount == 0 && phase1FeedbackCount < 1) {
+              phaseTag = '[DEEP_PHASE_1]';
+              phaseFeedback = '''[深度思考 Phase 1/3: 发散/上采样 🔺]
+
+你准备直接回答，但深度思考模式建议先**扩展思维空间**。
+
+📌 当前状态：尚未进行问题解构
+🎯 Phase 1 目标：把问题"放大"，发现更多维度
+
+建议动作：
+1. 使用 **reflect** 进行问题解构：
+   - 表层问题 vs 真实意图
+   - 隐含假设有哪些？
+   - 问题的边界在哪？
+   - 成功标准是什么？
+
+2. 使用 **hypothesize** 生成多个视角：
+   - 至少3个不同角度
+   - 包括一个"魔鬼代言人"视角（反对观点）
+   - 考虑时间/人物/因果等维度
+
+💡 这是"上采样"阶段：宁可多想几个方向，也不要过早收敛。
+⚠️ 如果问题确实简单，可以跳过此阶段直接 answer。''';
+            }
+            // Phase 2: 验证/采集 (Validate/Collect) - 用证据填充
+            else if (reflectCount > 0 && searchCount == 0 && !hasRealData && phase2FeedbackCount < 1) {
+              phaseTag = '[DEEP_PHASE_2]';
+              phaseFeedback = '''[深度思考 Phase 2/3: 验证/采集 📊]
+
+你已完成问题解构，现在建议**收集证据**支撑你的分析。
+
+📌 当前状态：已反思${reflectCount}次，假设${hypothesizeCount}次，但无外部数据
+🎯 Phase 2 目标：用事实验证假设，而非凭空推理
+
+建议动作：
+1. 使用 **search** 搜索关键信息
+2. 使用 **search_knowledge** 查找相关知识
+3. 使用 **read_url** 深入阅读重要来源
+
+验证清单：
+• 你的每个重要断言有证据支撑吗？
+• 有没有**反面证据**你还没考虑？
+• 信息的时效性和可信度如何？
+
+💡 这是"填充"阶段：让发散出的框架有血有肉。
+⚠️ 如果你有足够的先验知识，可以跳过此阶段。''';
+            }
+            // Phase 3: 收敛/下采样 (Converge/Downsample) - 综合整理
+            else if (reflectCount > 0 && (searchCount > 0 || hasRealData) && noteCount == 0 && phase3FeedbackCount < 1) {
+              phaseTag = '[DEEP_PHASE_3]';
+              phaseFeedback = '''[深度思考 Phase 3/3: 收敛/下采样 🔻]
+
+你已完成发散和验证，现在建议**收敛整合**再回答。
+
+📌 当前状态：反思${reflectCount}次，假设${hypothesizeCount}次，搜索${searchCount}次
+🎯 Phase 3 目标：把发散的信息"压缩"成结构化洞察
+
+建议动作：
+1. 使用 **take_note** 记录关键发现：
+   - 最重要的3个洞察是什么？
+   - 各信息源之间有什么交叉验证？
+   - 有什么意外发现或模式？
+
+2. 使用 **reflect** 进行元认知检查：
+   - 我的推理有漏洞吗？
+   - 哪些是确定的？哪些是推测的？
+   - 置信度真的有那么高吗？
+
+💡 这是"下采样"阶段：提炼精华，剔除冗余，准备输出。
+⚠️ 如果你已经心中有数，可以直接 answer。''';
+            }
+            
+            if (phaseFeedback != null) {
+              debugPrint('🧠 DEEP THINK: $phaseTag triggered');
+              setState(() => _loadingStatus = '🧠 深度思考：${phaseTag.replaceAll(RegExp(r'[\[\]]'), '')}');
               
-              if (missingSteps.isNotEmpty) {
-                debugPrint('🧠 DEEP THINK: Missing steps - \${missingSteps.join(", ")}');
-                setState(() => _loadingStatus = '🧠 深度思考模式：检查思维质量...');
-                
-                sessionRefs.add(ReferenceItem(
-                  title: '🧠 深度思考质量检查',
-                  url: 'internal://feedback/deep-think/${DateTime.now().millisecondsSinceEpoch}',
-                  snippet: '''[DEEP THINKING MODE - 质量检查]
-
-你选择了直接回答，但深度思考模式期望更深入的分析过程。
-
-⚠️ 当前缺少的思维层次：
-${missingSteps.map((s) => '• $s').join('\n')}
-
-深度思考的五层框架：
-1️⃣ 问题解构：表层问题 vs 真实意图？隐含假设是什么？
-2️⃣ 多维分析：时间维度？利益相关者？因果链条？反事实？
-3️⃣ 证据验证：每个断言有支撑吗？有反面证据吗？
-4️⃣ 综合涌现：多个信息源交叉后有什么新发现？
-5️⃣ 元认知检查：推理有漏洞吗？我诚实说明了不确定性吗？
-
-你可以：
-• 使用 reflect 进行问题解构和多维分析
-• 使用 hypothesize 探索不同视角（包括反面观点）
-• 使用 search/knowledge 收集证据
-• 或者如果你认为当前分析已足够深入，继续 answer
-
-这不是强制，是帮助你展现思维深度的提醒。''',
-                  sourceName: 'DeepThinkMode',
-                  sourceType: 'feedback',
-                ));
-                
-                sessionDecisions.add(AgentDecision(
-                  type: AgentActionType.reflect,
-                  content: '深度思考模式：系统建议增加思维深度',
-                  reason: '[DEEP_THINK_FEEDBACK] Quality check triggered. Missing: ${missingSteps.join(", ")}',
-                ));
-                
-                steps++;
-                continue;
-              }
+              sessionRefs.add(ReferenceItem(
+                title: '🧠 深度思考阶段引导',
+                url: 'internal://feedback/deep-think/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: phaseFeedback,
+                sourceName: 'DeepThinkMode',
+                sourceType: 'feedback',
+              ));
+              
+              sessionDecisions.add(AgentDecision(
+                type: AgentActionType.reflect,
+                content: '深度思考模式：$phaseTag 阶段引导',
+                reason: '$phaseTag Phase guidance triggered.',
+              ));
+              
+              steps++;
+              continue;
             }
           }
           
