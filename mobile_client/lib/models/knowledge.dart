@@ -5,12 +5,14 @@ class KnowledgeChunk {
   final String summary;
   final String content;
   final int index;
+  final bool needsResummary; // 标记是否需要重新摘要（摘要失败时为 true）
 
   KnowledgeChunk({
     required this.id,
     required this.summary,
     required this.content,
     required this.index,
+    this.needsResummary = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -18,6 +20,7 @@ class KnowledgeChunk {
     'summary': summary,
     'content': content,
     'index': index,
+    'needs_resummary': needsResummary,
   };
 
   factory KnowledgeChunk.fromJson(Map<String, dynamic> json) {
@@ -26,6 +29,7 @@ class KnowledgeChunk {
       summary: json['summary'],
       content: json['content'],
       index: json['index'],
+      needsResummary: json['needs_resummary'] ?? false,
     );
   }
   

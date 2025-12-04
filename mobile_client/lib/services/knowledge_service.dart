@@ -86,11 +86,15 @@ class KnowledgeService {
       // 2. Summarize Chunk
       final summary = await summarizer(chunkText);
       
+      // 检测是否是 fallback 摘要（API 摘要失败时生成的）
+      final isFallback = summary.startsWith('[Fallback Summary');
+      
       chunks.add(KnowledgeChunk(
         id: '${DateTime.now().millisecondsSinceEpoch}_$i',
         summary: summary,
         content: chunkText,
         index: chunks.length,
+        needsResummary: isFallback, // 标记需要重新摘要
       ));
     }
 
@@ -178,6 +182,65 @@ class KnowledgeService {
   Future<void> clearAll() async {
     _files.clear();
     await _save();
+  }
+
+  /// 获取需要重新摘要的 chunk 列表
+  List<Map<String, dynamic>> getPendingResummaryChunks() {
+    final pending = <Map<String, dynamic>>[];
+    for (var file in _files) {
+      for (var chunk in file.chunks) {
+        if (chunk.needsResummary) {
+          pending.add({
+            'fileId': file.id,
+            'filename': file.filename,
+            'chunkId': chunk.id,
+            'chunkIndex': chunk.index,
+          });
+        }
+      }
+    }
+    return pending;
+  }
+
+  /// 重新摘要单个 chunk
+  Future<bool> resummaryChunk({
+    required String chunkId,
+    required Future<String> Function(String chunk) summarizer,
+  }) async {
+    for (var i = 0; i < _files.length; i++) {
+      final file = _files[i];
+      final chunkIndex = file.chunks.indexWhere((c) => c.id == chunkId);
+      if (chunkIndex != -1) {
+        final chunk = file.chunks[chunkIndex];
+        final newSummary = await summarizer(chunk.content);
+        final isFallback = newSummary.startsWith('[Fallback Summary');
+        
+        // 创建更新后的 chunk
+        final updatedChunk = KnowledgeChunk(
+          id: chunk.id,
+          summary: newSummary,
+          content: chunk.content,
+          index: chunk.index,
+          needsResummary: isFallback,
+        );
+        
+        // 更新 chunks 列表
+        final newChunks = List<KnowledgeChunk>.from(file.chunks);
+        newChunks[chunkIndex] = updatedChunk;
+        
+        _files[i] = KnowledgeFile(
+          id: file.id,
+          filename: file.filename,
+          uploadTime: file.uploadTime,
+          chunks: newChunks,
+          globalSummary: file.globalSummary,
+        );
+        
+        await _save();
+        return !isFallback; // 返回是否成功（非 fallback）
+      }
+    }
+    return false;
   }
 
   /// Get all summaries formatted for the Agent's context

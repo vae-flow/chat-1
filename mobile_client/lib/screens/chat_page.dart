@@ -5727,7 +5727,7 @@ $intentHint
               url: 'internal://knowledge/deleted/$targetId',
               snippet: '已删除 $deleteType: $targetId\n当前知识库: ${stats['fileCount']} 个文件, ${stats['chunkCount']} 个知识块',
               sourceName: 'KnowledgeBase',
-              sourceType: 'system',
+              sourceType: 'system_note',
             ));
           } else {
             sessionDecisions.last = AgentDecision(
@@ -6068,7 +6068,7 @@ $intentHint
                 url: 'internal://system/action-performed',
                 snippet: '已执行操作: $action',
                 sourceName: 'SystemControl',
-                sourceType: 'system',
+                sourceType: 'system_control',
              ));
           } else if (actionResult != 'UNKNOWN') {
              // 已知操作但执行失败 - 添加错误反馈
