@@ -6366,7 +6366,7 @@ $intentHint
           debugPrint('Agent reflecting${isQualityReview ? " (QUALITY REVIEW)" : ""}: ${decision.content}');
           
           // Artificial delay to let user see the thinking state
-          await Future.delayed(const Duration(milliseconds: isQualityReview ? 800 : 1200));
+          await Future.delayed(Duration(milliseconds: isQualityReview ? 800 : 500));
           
           // Record reflection in action history with insights
           sessionDecisions.last = AgentDecision(
@@ -6377,6 +6377,44 @@ $intentHint
             uncertainties: decision.uncertainties,
             continueAfter: decision.continueAfter,
           );
+          
+          // ========== 关键：把反思结论注入到 sessionRefs，指导下一步决策 ==========
+          if (!isQualityReview) {
+            // 分析反思内容，提取关键结论
+            final hasInsight = reflectionSummary.length > 20;
+            final hasActionSuggestion = RegExp(r'(应该|需要|可以|建议|尝试|考虑|should|need|try|suggest)').hasMatch(reflectionSummary);
+            final hasProblemIdentified = RegExp(r'(问题|不足|缺少|错误|issue|problem|missing|lack)').hasMatch(reflectionSummary);
+            
+            String reflectGuidance = '';
+            if (hasProblemIdentified) {
+              reflectGuidance = '反思发现了问题，下一步应针对性解决';
+            } else if (hasActionSuggestion) {
+              reflectGuidance = '反思提出了行动建议，请按建议执行';
+            } else if (hasInsight) {
+              reflectGuidance = '反思产生了新的理解，请基于此继续';
+            }
+            
+            sessionRefs.add(ReferenceItem(
+              title: '💭 反思结论',
+              url: 'internal://reflect/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '''【反思内容】
+$reflectionSummary
+
+【指导意义】
+$reflectGuidance
+
+【下一步建议】
+基于这个反思，你应该：
+${hasProblemIdentified ? '1. 先解决反思中发现的问题' : ''}
+${hasActionSuggestion ? '${hasProblemIdentified ? "2" : "1"}. 按反思中的建议行动' : ''}
+${!hasProblemIdentified && !hasActionSuggestion ? '1. 将反思的洞察应用到后续决策中' : ''}
+''',
+              sourceName: 'ReflectionInsight',
+              sourceType: 'reflection_insight',
+            ));
+            
+            _addReasoningStep('💭 反思完成: ${reflectionSummary.length > 30 ? reflectionSummary.substring(0, 30) + "..." : reflectionSummary}');
+          }
           
           // 检测是否为质量评估（Phase 4）
           if (isQualityReview) {
@@ -6492,6 +6530,15 @@ $intentHint
             hypothesesBuffer.writeln('  ${i + 1}. ${isSelected ? "✅" : "○"} ${hypothesesList[i]}');
           }
           hypothesesBuffer.writeln('【选定方案】$selected');
+          
+          // 添加下一步指导
+          hypothesesBuffer.writeln('');
+          hypothesesBuffer.writeln('【下一步指导】');
+          hypothesesBuffer.writeln('你已生成 ${hypothesesList.length} 个假设并选择了方案。');
+          hypothesesBuffer.writeln('接下来应该：');
+          hypothesesBuffer.writeln('1. 使用 reflect 对比分析各方案优劣');
+          hypothesesBuffer.writeln('2. 或直接基于选定方案 "$selected" 继续推进');
+          hypothesesBuffer.writeln('3. 如需验证假设，可使用 search 获取支持/反驳证据');
           
           sessionRefs.add(ReferenceItem(
             title: '💡 假设分析',
@@ -6777,12 +6824,54 @@ $hypothesizeResults
 ❌ 直接 answer 将被拒绝，必须先完成此阶段。''';
             }
             // ====== Phase 3: 综合回答 ======
-            // 如果已完成P1+P2，允许answer（Phase 3）
-            // 此阶段不强制提示，Agent自然会answer
+            // 如果已完成P1+P2，且还没添加过 Phase 3 指导，则注入指导
+            final hasPhase3Guide = sessionRefs.any((r) => r.sourceType == 'deep_phase3_guide');
+            final shouldShowPhase3Guide = agentHypothesizeCount > 0 && agentReflectCount > 0 && !hasPhase3Guide && !reviewPassed;
             
-            // ====== Phase 4: 反思评估（强制，在answer之后） ======
-            // 需要 Phase 4 的条件：当前轮次完成了 P1+P2+P3(answer) 但还没有 pass 的 quality_review
-            else if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !reviewPassed && phase4PromptCount < 2) {
+            if (shouldShowPhase3Guide) {
+              // 获取之前的分析结论
+              final hypothesisResults = sessionRefs.where((r) => r.sourceType == 'hypothesis').map((r) => r.snippet).join('\n');
+              final reflectResults = sessionRefs.where((r) => r.sourceType == 'reflection_insight').map((r) => r.snippet).join('\n');
+              
+              // 注入 Phase 3 指导：必须综合利用之前分析
+              sessionRefs.add(ReferenceItem(
+                title: '📝 Phase 3: 综合回答指导',
+                url: 'internal://deep-think/phase3/${DateTime.now().millisecondsSinceEpoch}',
+                snippet: '''[DEEP THINK Phase 3/4: 综合回答]
+
+你已完成发散和收敛分析。现在必须基于之前的分析给出高质量回答。
+
+📌 **回答要求（必须满足）**：
+1. **必须引用** Phase 1 的候选维度中至少 2-3 个
+2. **必须基于** Phase 2 收敛后的核心视角
+3. **必须说明** 各视角如何影响你的结论
+4. **必须标注** 哪些是事实、哪些是推断
+
+📊 **之前的分析**（必须利用）：
+【Phase 1 假设维度】
+$hypothesisResults
+
+【Phase 2 收敛结论】
+$reflectResults
+
+⚠️ **回答质量检查点**：
+- 有没有综合多个视角？
+- 有没有忽视反面证据？
+- 结论是否有充分支撑？
+
+直接回答用户问题，但回答要体现深度思考的成果。''',
+                sourceName: 'DeepThinkPhase3',
+                sourceType: 'deep_phase3_guide',
+              ));
+              
+              _addReasoningStep('📝 Phase 3: 准备综合回答');
+              // 不设 forcePrompt，让 Agent 自然 answer，但有指导
+            }
+            
+            // ====== Phase 4: 反思评估（强制，在answer之后，质量评估之前） ======
+            // 条件：P1+P2+P3(answer) 都完成了，但还没有进行过质量评估
+            // 注意：这里用 if 而不是 else if，因为 Phase 3 只是添加指导，不阻断流程
+            if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !hasQualityReview && phase4PromptCount < 2 && forcePrompt == null) {
               // 获取之前的answer内容
               final lastAnswer = sessionDecisions.lastWhere(
                 (d) => d.type == AgentActionType.answer && isAgentDecision(d),
@@ -6792,23 +6881,35 @@ $hypothesizeResults
               phaseTag = '[DEEP_P4_FORCE]';
               forcePrompt = '''⚠️ [深度思考 Phase 4/4: 反思评估] - 必须执行
 
-你已给出回答，现在**必须**进行质量自评：
+你已给出回答，现在**必须**进行严格的质量自评。
 
-📌 评估清单（对照用户问题: "$content"）：
-1. 是否真正回答了用户的问题？（目标达成度）
-2. 推理过程有没有漏洞？最薄弱的环节在哪？
-3. 是否有确认偏误（只看支持自己观点的证据）？
-4. 哪些是确定的事实？哪些是推测？
-5. 如果我错了，最可能错在哪？
-6. 质量评分 1-10（7分以上为达标）
+📊 **评估维度（每项1-10分）**：
 
-🎯 输出格式（必须包含verdict字段）：
-{"type":"reflect","content":"【质量自评】\\n目标达成: .../10\\n推理漏洞: ...\\n确认偏误检查: ...\\n不确定性: ...\\n总分: X/10\\nverdict: pass/retry\\n如需retry的改进方向: ...","reason":"[QUALITY_REVIEW]...","continue":true}
+| 维度 | 评估问题 | 评分 |
+|------|----------|------|
+| **目标达成** | 直接回答了用户问题吗？ | /10 |
+| **分析利用** | 回答中引用了 Phase 1-2 的分析吗？有几个视角？ | /10 |
+| **证据支撑** | 结论有事实依据吗？推测标注了吗？ | /10 |
+| **反面考量** | 考虑过反对观点吗？有没有确认偏误？ | /10 |
+| **逻辑严密** | 推理链条完整吗？最薄弱环节在哪？ | /10 |
 
-⚠️ 如果verdict为retry，系统将带着你的反思重新执行Phase 1-4。''';
+📌 **硬性要求（任一不满足必须 retry）**：
+- [ ] 回答必须引用 Phase 1 至少 2 个维度
+- [ ] 回答必须体现 Phase 2 的收敛结论
+- [ ] 必须标注事实 vs 推测
+- [ ] 必须考虑至少 1 个反面观点
+
+📈 **评分标准**：
+- 总分 ≥ 35/50 且满足硬性要求 → verdict: pass
+- 总分 < 35 或任一硬性要求不满足 → verdict: retry
+
+🎯 输出格式：
+{"type":"reflect","content":"【质量自评】\\n目标达成: X/10\\n分析利用: X/10（引用了N个视角）\\n证据支撑: X/10\\n反面考量: X/10\\n逻辑严密: X/10\\n\\n硬性要求检查:\\n- 引用维度: ✓/✗\\n- 收敛结论: ✓/✗\\n- 事实标注: ✓/✗\\n- 反面观点: ✓/✗\\n\\n总分: XX/50\\nverdict: pass/retry\\n改进方向: ...","reason":"[QUALITY_REVIEW]...","continue":true}
+
+⚠️ 请严格评估，不要放水！retry 是提升质量的机会。''';
             }
             // ====== 反思打回机制 ======
-            else if (hasQualityReview && !reviewPassed && retryCount < 2) {
+            if (hasQualityReview && !reviewPassed && retryCount < 2 && forcePrompt == null) {
               // 获取反思中指出的问题
               final reviewContent = lastReviewRef.snippet;
               
