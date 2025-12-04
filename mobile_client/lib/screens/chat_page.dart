@@ -2923,26 +2923,30 @@ Every tool output MUST include: type, reason, confidence(0-1), continue(true/fal
   * content: Full image prompt (REQUIRED)
   * continue: false (image is shown to user) or true (if you want to comment)
 
-- vision: ${visionAvailable ? "AVAILABLE (image understanding/description)" : "UNAVAILABLE (vision API not configured)"}
-  * **JSON**: {"type":"vision","content":"custom analysis prompt","reason":"...","confidence":0.85,"continue":true}
-  * content: What to analyze in the image (REQUIRED)
-  * USE FOR: Understanding image content, describing scenes, analyzing charts/diagrams, identifying objects
-  * NOTE: If user already uploaded image, check <current_observations> first - it may already be analyzed!
+- vision: ${visionAvailable ? "AVAILABLE - 多模态理解模型 (GPT-4V/Gemini等)" : "UNAVAILABLE (vision API not configured)"}
+  * **JSON**: {"type":"vision","content":"analysis prompt","reason":"...","confidence":0.85,"continue":true}
+  * **API能力**: 理解图片整体内容、场景描述、物体识别、图表解读、情感分析
+  * **适用场景**: "这是什么"、"描述图片"、"分析这张图"、"图里有什么"
+  * **局限性**: 文字提取不精确，可能漏字或误识别
+  * NOTE: 如果 <current_observations> 已有分析结果，先看已有信息
 
-- ocr: ${ocrAvailable ? "AVAILABLE (extract text from images/PDF)" : "UNAVAILABLE (OCR API not configured)"}
-  * **JSON**: {"type":"ocr","content":"optional custom prompt","reason":"...","confidence":0.9,"continue":true}
-  * content: Optional - custom OCR prompt (default: extract all text)
-  * USE FOR: Extracting TEXT from images or PDFs - documents, screenshots, photos of text, scanned pages
-  * 📄 **PDF支持**: 用户上传PDF且需要OCR时，系统会自动将PDF拆分成图片逐页OCR！
-  * PREFER OCR OVER VISION when user wants to READ/EXTRACT/COPY text!
-  * Returns: Extracted text in markdown format (PDF: each page labeled)
+- ocr: ${ocrAvailable ? "AVAILABLE - 专业OCR模型 (精确文字提取)" : "UNAVAILABLE (OCR API not configured)"}
+  * **JSON**: {"type":"ocr","content":"optional prompt","reason":"...","confidence":0.9,"continue":true}
+  * **API能力**: 精确提取图片/PDF中的所有文字，保持格式
+  * **适用场景**: 文档扫描、截图文字、发票识别、表格数据、PDF转文字
+  * **优势**: 文字提取准确率远高于 vision，支持 PDF 自动拆页
+  * Returns: Markdown格式的提取文字
 
-⚠️ **VISION vs OCR - CHOOSE WISELY:**
-- User says "识别/提取/读取文字" or "OCR" or "扫描" → Use **ocr**
-- User says "这是什么" or "分析/描述图片" → Use **vision**
-- User uploaded **PDF** and wants text extraction → Use **ocr** (auto splits pages!)
-- Image contains TEXT user wants to extract → Use **ocr**
-- Image is a scene/photo user wants described → Use **vision**
+**🎯 VISION vs OCR 选择逻辑 (以用户目的为准):**
+用户目的是什么？
+├─ 需要**精确获取文字内容** (复制、引用、数据处理) → **ocr**
+├─ 需要**理解图片含义** (这是什么、描述、分析) → **vision**
+├─ 文档/PDF/截图 + 要提取信息 → **ocr** (更准确)
+├─ 照片/场景/图表 + 要理解内容 → **vision** (更智能)
+└─ 不确定？看图片类型：文档类→ocr，场景类→vision
+
+${!ocrAvailable && visionAvailable ? "⚠️ OCR未配置：vision 也能提取文字，但准确率较低，文档类建议用户配置OCR" : ""}
+${ocrAvailable && !visionAvailable ? "⚠️ Vision未配置：ocr 只能提取文字，无法理解图片内容/含义" : ""}
 
 - read_url: ${searchAvailable ? "AVAILABLE - Deep read a webpage for full content" : "UNAVAILABLE (no network access)"}
   * **JSON**: {"type":"read_url","content":"https://example.com/article","reason":"...","confidence":0.85,"continue":true}
@@ -4103,14 +4107,16 @@ Output your decision as JSON:
       sessionRefs.add(ReferenceItem(
         title: '📷 待处理图片',
         url: currentSessionImagePath,
-        snippet: '''⚠️ 图片已上传但尚未分析。
+        snippet: '''⚠️ 图片已上传，等待你决定如何处理。
 $intentHint
 
-请选择分析方式:
-- 如需 **提取文字**(文档/截图/扫描件) → 使用 **ocr** 工具
-- 如需 **理解内容**(描述场景/分析图表) → 使用 **vision** 工具
+根据用户目的选择工具:
+• 用户要**获取/复制/使用文字内容** → **ocr** (精确提取)
+• 用户要**理解/描述/分析图片** → **vision** (智能理解)
+• PDF/文档/截图类 → 通常 **ocr** 更合适
+• 照片/场景/图表类 → 通常 **vision** 更合适
 
-用户消息: ${content.isEmpty ? "(无)" : content}''',
+用户说: ${content.isEmpty ? "(未说明，请根据图片类型判断)" : content}''',
         sourceName: 'System',
         imageId: currentSessionImagePath,
         sourceType: 'pending_image',
