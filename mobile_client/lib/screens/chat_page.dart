@@ -6407,6 +6407,12 @@ $reviewContent
               debugPrint('🧠 DEEP THINK FORCE: $phaseTag');
               setState(() => _loadingStatus = '🧠 深度思考：${phaseTag.replaceAll(RegExp(r'[\[\]_]'), ' ').trim()}');
               
+              // ⚠️ 重要：移除之前添加的未执行决策，因为我们要拦截它
+              // 当前 decision 已在循环开始时被 add 到 sessionDecisions，需要移除
+              if (sessionDecisions.isNotEmpty) {
+                sessionDecisions.removeLast();
+              }
+              
               sessionRefs.add(ReferenceItem(
                 title: '🧠 深度思考强制阶段',
                 url: 'internal://deep-think/force/${DateTime.now().millisecondsSinceEpoch}',
@@ -6472,6 +6478,11 @@ $reviewContent
                 sourceType: 'feedback',
               ));
               
+              // ⚠️ 移除之前添加的未执行决策（当前 answer 被反馈拦截）
+              if (sessionDecisions.isNotEmpty) {
+                sessionDecisions.removeLast();
+              }
+              
               // Record this as a feedback (not a block/override)
               sessionDecisions.add(AgentDecision(
                 type: AgentActionType.reflect,
@@ -6508,6 +6519,11 @@ $reviewContent
                 sourceName: 'SystemFeedback',
                 sourceType: 'feedback',
               ));
+              
+              // ⚠️ 移除之前添加的未执行决策
+              if (sessionDecisions.isNotEmpty) {
+                sessionDecisions.removeLast();
+              }
               
               // Continue loop to let Agent reconsider
               steps++;
