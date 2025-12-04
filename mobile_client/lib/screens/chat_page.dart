@@ -2904,136 +2904,202 @@ ONLY output JSON. No explanation.''';
         : '';
 
     final toolbelt = '''
-### TOOLBELT (what you can call)
+### TOOLBELT - 你的能力清单
 $deepReasoningSection
 
-## ⚠️ REQUIRED JSON FIELDS FOR ALL TOOLS:
-Every tool output MUST include: type, reason, confidence(0-1), continue(true/false)
+## ⚠️ 统一输出格式
+每个工具调用必须是 JSON: {"type":"工具名", ...参数, "reason":"决策理由", "confidence":0-1, "continue":true/false}
 
-**🔧 ACTION TOOLS:**
+## 🔄 反馈循环机制
+你调用工具后，系统会在 <current_observations> 返回结果。
+- **成功**: 你会看到工具返回的数据，据此决定下一步
+- **失败**: 你会看到错误信息 [RESULT: FAILED - 原因]，请调整策略重试或换工具
+- **每一步决策后检查 <action_history>**: 看你之前做了什么、结果如何
 
-- search: ${searchAvailable ? "AVAILABLE via $resolvedSearchProvider" : "UNAVAILABLE (no search key configured; do NOT pick search)"}
-  * **JSON**: {"type":"search","query":"搜索关键词","reason":"P1:...|P2:...|P3:...","confidence":0.9,"continue":true}
-  * query: The search keywords (REQUIRED - NOT content!)
-  * Returns: Short references/snippets from web search
-  * continue: Usually true (you'll answer after seeing results)
+---
+## 🔧 信息获取工具
 
-- draw: ${drawAvailable ? "AVAILABLE (image generation)" : "UNAVAILABLE (image API not configured; do NOT pick draw)"}
-  * **JSON**: {"type":"draw","content":"detailed image prompt in English","reason":"...","confidence":0.95,"continue":false}
-  * content: Full image prompt (REQUIRED)
-  * continue: false (image is shown to user) or true (if you want to comment)
+### search ${searchAvailable ? "✅ 可用 ($resolvedSearchProvider)" : "❌ 不可用"}
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"search", "query":"搜索关键词", ...} |
+| **能力** | 联网搜索实时信息（新闻、价格、事件、知识） |
+| **输出** | 多条搜索结果摘要，包含标题、URL、片段 |
+| **失败** | 返回0结果→换关键词；API错误→检查<action_history>后重试 |
+| **边界** | 只返回摘要，详细内容需配合 read_url |
 
-- vision: ${visionAvailable ? "AVAILABLE - 多模态理解模型 (GPT-4V/Gemini等)" : "UNAVAILABLE (vision API not configured)"}
-  * **JSON**: {"type":"vision","content":"analysis prompt","reason":"...","confidence":0.85,"continue":true}
-  * **API能力**: 理解图片整体内容、场景描述、物体识别、图表解读、情感分析
-  * **适用场景**: "这是什么"、"描述图片"、"分析这张图"、"图里有什么"
-  * **局限性**: 文字提取不精确，可能漏字或误识别
-  * NOTE: 如果 <current_observations> 已有分析结果，先看已有信息
+### read_url ${searchAvailable ? "✅ 可用" : "❌ 不可用"}
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"read_url", "content":"https://完整URL", ...} |
+| **能力** | 深度读取网页全文，提取主要内容 |
+| **输出** | 标题 + 正文内容（最多8000字符） |
+| **失败** | URL无法访问→尝试其他URL；内容为空→换源 |
+| **边界** | 需要先有URL（通常来自search结果） |
 
-- ocr: ${ocrAvailable ? "AVAILABLE - 专业OCR模型 (精确文字提取)" : "UNAVAILABLE (OCR API not configured)"}
-  * **JSON**: {"type":"ocr","content":"optional prompt","reason":"...","confidence":0.9,"continue":true}
-  * **API能力**: 精确提取图片/PDF中的所有文字，保持格式
-  * **适用场景**: 文档扫描、截图文字、发票识别、表格数据、PDF转文字
-  * **优势**: 文字提取准确率远高于 vision，支持 PDF 自动拆页
-  * Returns: Markdown格式的提取文字
+---
+## 🖼️ 图像处理工具
 
-**🎯 VISION vs OCR 选择逻辑 (以用户目的为准):**
+### vision ${visionAvailable ? "✅ 可用" : "❌ 不可用"}
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"vision", "content":"分析提示词", ...} |
+| **能力** | 多模态理解：描述场景、识别物体、解读图表、情感分析 |
+| **输出** | 自然语言的图片分析描述 |
+| **失败** | API错误→检查配置；无图片→提示用户上传 |
+| **边界** | ⚠️ 文字提取不精确，可能漏字误识别→需精确文字用ocr |
+| **场景** | "这是什么"、"描述图片"、"图里有什么"、"分析这张图" |
+
+### ocr ${ocrAvailable ? "✅ 可用" : "❌ 不可用"}
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"ocr", "content":"可选提示", ...} |
+| **能力** | 精确提取图片/PDF中的所有文字，保持格式和结构 |
+| **输出** | Markdown格式的提取文字（PDF会标注页码） |
+| **失败** | 图片无文字→返回空；PDF太大→只处理前10页 |
+| **边界** | ⚠️ 只提取文字，不理解图片内容/含义→需理解用vision |
+| **场景** | 文档扫描、截图文字、发票、表格、PDF转文字 |
+
+**🎯 vision vs ocr 决策树:**
+\`\`\`
 用户目的是什么？
-├─ 需要**精确获取文字内容** (复制、引用、数据处理) → **ocr**
-├─ 需要**理解图片含义** (这是什么、描述、分析) → **vision**
-├─ 文档/PDF/截图 + 要提取信息 → **ocr** (更准确)
-├─ 照片/场景/图表 + 要理解内容 → **vision** (更智能)
-└─ 不确定？看图片类型：文档类→ocr，场景类→vision
+├─ 精确获取/复制/处理文字 → ocr
+├─ 理解/描述/分析图片内容 → vision  
+├─ 文档/PDF/截图类 → 通常 ocr
+├─ 照片/场景/图表类 → 通常 vision
+└─ 两者都需要？先 ocr 提取文字，再 vision 理解内容
+\`\`\`
+${!ocrAvailable && visionAvailable ? "⚠️ OCR未配置: vision可勉强提取文字但不精确" : ""}
+${ocrAvailable && !visionAvailable ? "⚠️ Vision未配置: ocr只能提文字，无法理解图片" : ""}
 
-${!ocrAvailable && visionAvailable ? "⚠️ OCR未配置：vision 也能提取文字，但准确率较低，文档类建议用户配置OCR" : ""}
-${ocrAvailable && !visionAvailable ? "⚠️ Vision未配置：ocr 只能提取文字，无法理解图片内容/含义" : ""}
+---
+## 🎨 创作工具
 
-- read_url: ${searchAvailable ? "AVAILABLE - Deep read a webpage for full content" : "UNAVAILABLE (no network access)"}
-  * **JSON**: {"type":"read_url","content":"https://example.com/article","reason":"...","confidence":0.85,"continue":true}
-  * content: The full URL to read (REQUIRED)
-  * Returns: Title + extracted main content (up to 8000 chars)
-  * USE WHEN: Search gave you a relevant URL but snippet is too short
-  * WORKFLOW: search → review results → read_url on promising link → answer
+### draw ${drawAvailable ? "✅ 可用" : "❌ 不可用"}
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"draw", "content":"detailed English prompt", ...} |
+| **能力** | AI生成图片（DALL-E等） |
+| **输出** | 生成的图片路径，自动展示给用户 |
+| **失败** | 提示词违规→修改后重试；API错误→告知用户 |
+| **边界** | 英文提示词效果更好；复杂场景可能需要多次尝试 |
 
-**📚 KNOWLEDGE BASE TOOLS (3-Step Retrieval Flow):**
+### save_file ✅ 始终可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"save_file", "filename":"文件名.扩展名", "content":"文件内容", ...} |
+| **能力** | 保存文本/代码到本地文件 |
+| **输出** | 保存成功的文件路径 |
+| **失败** | 权限问题→提示用户；内容过大→分割保存 |
+| **场景** | 用户说"保存"、"导出"、"下载"、"生成文件" |
+
+---
+## 📚 知识库工具
 ${hasKnowledge ? '''
-- search_knowledge: AVAILABLE - Search the knowledge base by keywords.
-  * **JSON**: {"type":"search_knowledge","content":"keyword1, keyword2","reason":"...","confidence":0.8,"continue":true}
-  * content: Comma-separated keywords (REQUIRED)
-  * Returns: Chunk summaries WITH CHUNK IDs (e.g., "file123_0", "file123_3000")
-  * ⚠️ IMPORTANT: Note down the Chunk IDs from results - you need them for read_knowledge!
-  
-- take_note: AVAILABLE - Save notes to temporary memory.
-  * **JSON**: {"type":"take_note","content":"your notes here","reason":"...","confidence":0.9,"continue":true}
-  * content: Your notes text (REQUIRED)
-  * 💡 TIP: Write down relevant Chunk IDs here! e.g., "file123_0 covers auth, file123_3000 covers tokens"
+### search_knowledge ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"search_knowledge", "content":"关键词1, 关键词2", ...} |
+| **能力** | 在用户上传的文档库中搜索相关内容 |
+| **输出** | 匹配的片段摘要 + **Chunk ID**（如 file123_0） |
+| **失败** | 无匹配→换关键词；返回多个→用take_note记录 |
+| **关键** | ⚠️ 必须记住返回的 Chunk ID，后续 read_knowledge 要用！ |
 
-- read_knowledge: AVAILABLE - Read full content of specific chunks.
-  * **JSON**: {"type":"read_knowledge","content":"file123_0, file123_3000","reason":"...","confidence":0.85,"continue":true}
-  * content: Comma-separated Chunk IDs from search results (REQUIRED)
-  * ⚠️ CRITICAL: Use the EXACT Chunk IDs returned by search_knowledge! Format: "fileId_offset"
-  * Returns: Full text content of the chunks (up to 15000 chars total)
+### read_knowledge ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"read_knowledge", "content":"file123_0, file123_3000", ...} |
+| **能力** | 读取指定 Chunk 的完整内容 |
+| **输出** | 完整文本内容（最多15000字符） |
+| **失败** | Chunk ID不存在→先用search_knowledge获取正确ID |
+| **关键** | ⚠️ 必须使用 search_knowledge 返回的精确 Chunk ID！ |
 
-- delete_knowledge: AVAILABLE - Delete content from knowledge base.
-  * **JSON**: {"type":"delete_knowledge","content":"file_id or chunk_id","reason":"...","confidence":0.9,"continue":false}
-  * content: file_id or chunk_id to delete (REQUIRED)
-  * NOTE: Irreversible. Confirm with user first.
+### take_note ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"take_note", "content":"笔记内容", ...} |
+| **能力** | 临时记录信息，供后续步骤参考 |
+| **输出** | 笔记被保存，出现在 <current_observations> |
+| **场景** | 记录 Chunk ID、中间结论、待办事项 |
 
-**⚠️ Knowledge Workflow - INDEX IS CRITICAL:**
-1. search_knowledge → Get Chunk IDs (e.g., "doc1_0", "doc1_3000")
-2. (optional) take_note → Record which Chunk IDs are relevant
-3. read_knowledge → Use EXACT Chunk IDs to fetch content
-4. answer → Synthesize information
-Example: search returns [doc1_0, doc1_3000] → read_knowledge with "doc1_0, doc1_3000"
+### delete_knowledge ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"delete_knowledge", "content":"file_id 或 chunk_id", ...} |
+| **能力** | 删除知识库中的文件或片段 |
+| **输出** | 删除确认 |
+| **关键** | ⚠️ 不可逆！先跟用户确认 |
+
+**📋 知识库工作流:**
+1. search_knowledge → 获取 Chunk ID 列表
+2. take_note → 记录相关 Chunk ID
+3. read_knowledge → 用精确 Chunk ID 读取内容
+4. answer → 综合信息回答
 ''' : '''
-- search_knowledge: UNAVAILABLE (knowledge base is empty - no files uploaded)
-- read_knowledge: UNAVAILABLE (knowledge base is empty)
-- delete_knowledge: UNAVAILABLE (knowledge base is empty)
+### 知识库工具 ❌ 不可用（无文件上传）
+search_knowledge / read_knowledge / delete_knowledge 均不可用
 '''}
 
-- save_file: ALWAYS AVAILABLE - Save text or code to a local file.
-  * **JSON**: {"type":"save_file","filename":"code.py","content":"file content here","reason":"...","confidence":1.0,"continue":false}
-  * filename: File name with extension (REQUIRED)
-  * content: File content to save (REQUIRED)
-  * Use when user asks to "save", "download", "create file", or "export"
+---
+## 📱 系统控制
 
-- system_control: AVAILABLE - Control device global actions.
-  * **JSON**: {"type":"system_control","content":"home","reason":"...","confidence":1.0,"continue":false}
-  * content: One of: "home", "back", "recents", "notifications", "lock", "screenshot" (REQUIRED)
-  * NOTE: Requires Accessibility Service. If action fails, ask user to enable it.
+### system_control ✅ 可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"system_control", "content":"动作名", ...} |
+| **动作** | home(主屏), back(返回), recents(最近), notifications(通知), lock(锁屏), screenshot(截图) |
+| **输出** | 执行成功/失败状态 |
+| **失败** | 无障碍服务未开启→提示用户开启 |
 
-**🧠 THINKING TOOLS:**
+---
+## 🧠 思考工具
 
-- reflect: Pause and self-critique. Use when confused or stuck.
-  * **JSON**: {"type":"reflect","content":"My analysis of this situation...","reason":"...","confidence":0.6,"continue":true}
-  * content: Your reflection/analysis text (REQUIRED)
-  * continue: Usually true (you'll take action after reflecting)
+### reflect ✅ 始终可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"reflect", "content":"我的分析思考...", ...} |
+| **能力** | 暂停并自我分析，整理思路 |
+| **输出** | 思考过程被记录，帮助下一步决策 |
+| **场景** | 复杂问题、卡住时、需要多角度分析 |
 
-- hypothesize: Generate 2-3 alternative approaches.
-  * **JSON**: {"type":"hypothesize","hypotheses":["approach A","approach B","approach C"],"selected_hypothesis":"approach A because...","reason":"...","confidence":0.7,"continue":true}
-  * hypotheses: Array of alternative approaches (REQUIRED)
-  * selected_hypothesis: Which one you chose and why (REQUIRED)
-  * Use when one path fails and you need new ideas
+### hypothesize ✅ 始终可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"hypothesize", "hypotheses":["方案A","方案B"], "selected_hypothesis":"选择A因为...", ...} |
+| **能力** | 生成多个备选方案并选择最佳 |
+| **输出** | 方案列表和选择理由被记录 |
+| **场景** | 前一个方法失败、需要换思路 |
 
-- clarify: Ask user for missing info.
-  * **JSON**: {"type":"clarify","content":"Your question to the user","reason":"...","confidence":0.5,"continue":false}
-  * content: The question to ask user (REQUIRED)
-  * continue: false (wait for user response)
-  * Use ONLY when you truly cannot proceed without user input
+### clarify ✅ 始终可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"clarify", "content":"请问您具体指...？", ...} |
+| **能力** | 向用户提问获取缺失信息 |
+| **输出** | 问题展示给用户，等待回复 |
+| **边界** | ⚠️ 只在真正无法继续时使用，不要过度追问 |
 
-**📝 OUTPUT:**
+---
+## 📝 最终输出
 
-- answer: Final response to user.
-  * **JSON**: {"type":"answer","content":"Your response here","reason":"...","confidence":0.95,"continue":false}
-  * content: Your natural language response (REQUIRED)
-  * continue: Usually false (conversation ends)
-  * ⚠️ Use ONLY after gathering info with tools, or for simple greetings
+### answer ✅ 始终可用
+| 项目 | 说明 |
+|------|------|
+| **输入** | {"type":"answer", "content":"你的回答内容", ...} |
+| **能力** | 生成最终回答给用户 |
+| **输出** | 自然语言回复 |
+| **关键** | ⚠️ 应在收集足够信息后使用，简单问候除外 |
+
+---
 ${hasUnanalyzedImage ? """
-
-⚠️ **IMAGE PENDING ANALYSIS**: User uploaded an image that needs processing!
-- Check <current_observations> for the pending image marker
-- You MUST choose either **ocr** (to extract text) or **vision** (to understand content)
-- Base your choice on user's request and the image context
+## ⚠️ 待处理图片提醒
+用户上传了图片尚未分析！请根据用户目的选择:
+- 需要文字内容 → **ocr**
+- 需要理解图片 → **vision**
+""" : hasSessionImage ? """
+## ℹ️ 图片已分析
+检查 <current_observations> 查看已有分析结果
+""" : ""}
+''';
 """ : hasSessionImage ? """
 
 ⚠️ **IMAGE ALREADY ANALYZED**: Check <current_observations> for vision/OCR results.
