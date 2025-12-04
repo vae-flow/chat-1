@@ -5879,12 +5879,17 @@ $intentHint
             d.type == AgentActionType.save_file ||
             d.type == AgentActionType.system_control);
           
-          // Check if we have real data from tools (not just system notes)
+          // Check if we have real data from tools (not just system notes or thinking artifacts)
           final hasRealData = sessionRefs.any((r) => 
             r.sourceType != 'system_note' && 
             r.sourceType != 'system_command' &&
             r.sourceType != 'system' &&
-            r.sourceType != 'feedback');
+            r.sourceType != 'feedback' &&
+            r.sourceType != 'reflection' &&
+            r.sourceType != 'hypothesis' &&
+            r.sourceType != 'agent_note' &&
+            r.sourceType != 'user_input' &&
+            r.sourceType != 'pending_image');
           
           // Count feedback attempts (not "blocks", just feedback)
           final feedbackAttempts = sessionDecisions.where((d) => 
