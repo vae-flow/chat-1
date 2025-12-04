@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ui';
+import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +10,8 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:pdf_render/pdf_render.dart' as pdf_render;
+import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -1494,7 +1497,7 @@ $text
   }
 
   /// OCR a file (PDF or image) using an OpenAI-compatible vision/chat endpoint
-  /// For PDF: Attempts direct PDF OCR first, falls back to image conversion if 400 error
+  /// For PDF: Attempts direct PDF OCR first, falls back to page-by-page image conversion
   /// For images: Sends directly with appropriate mime type
   Future<String?> _runPdfOcr(File file, {String? prompt}) async {
     // Use dedicated OCR config only
@@ -1514,36 +1517,10 @@ $text
     final uri = Uri.parse('$cleanBase/chat/completions');
     final bytes = await file.readAsBytes();
     
-    // Determine MIME type based on file extension
-    String mimeType;
-    switch (ext) {
-      case 'png':
-        mimeType = 'image/png';
-        break;
-      case 'jpg':
-      case 'jpeg':
-        mimeType = 'image/jpeg';
-        break;
-      case 'gif':
-        mimeType = 'image/gif';
-        break;
-      case 'webp':
-        mimeType = 'image/webp';
-        break;
-      case 'pdf':
-        mimeType = 'application/pdf';
-        break;
-      default:
-        // Treat unknown as image
-        mimeType = 'image/png';
-    }
-    
-    final b64 = base64Encode(bytes);
-    _addReasoningStep('文件大小: ${(bytes.length / 1024).toStringAsFixed(1)} KB, MIME: $mimeType');
-
     final userPrompt = prompt ??
         '<image>\n<|grounding|>Convert the document to markdown. Output in Chinese if the content is Chinese.';
 
+    // Helper function to send OCR request
     Future<http.Response> sendOcrRequest(String dataUrl) async {
       final body = json.encode({
         'model': model,
@@ -1553,9 +1530,7 @@ $text
             'content': [
               {
                 'type': 'image_url',
-                'image_url': {
-                  'url': dataUrl,
-                }
+                'image_url': {'url': dataUrl}
               },
               {'type': 'text', 'text': userPrompt}
             ]
@@ -1564,72 +1539,151 @@ $text
         'stream': false,
       });
 
-      return await http
-          .post(
-            uri,
-            headers: {
-              'Authorization': 'Bearer $key',
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
-          .timeout(const Duration(minutes: 3));
+      return await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $key',
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      ).timeout(const Duration(minutes: 3));
     }
-
-    // First attempt with detected mime type
-    _addReasoningStep('发送 OCR 请求到 $uri ...');
-    var resp = await sendOcrRequest('data:$mimeType;base64,$b64');
     
-    // If PDF fails with 400, it might mean the API doesn't support PDF directly
-    // Try common workarounds
-    if (resp.statusCode == 400 && mimeType == 'application/pdf') {
-      _addReasoningStep('PDF OCR 返回 400，尝试备选方案...');
-      
-      // Try 1: Send as generic image URL (some APIs parse this)
-      _addReasoningStep('尝试方案1: 作为通用图片发送');
-      resp = await sendOcrRequest('data:image/png;base64,$b64');
-      
-      if (resp.statusCode == 400) {
-        // Try 2: Some APIs want just the base64 without data URL prefix
-        // But most OpenAI-compatible APIs need the data URL format
-        _addReasoningStep('方案1失败，尝试方案2: image/jpeg 格式');
-        resp = await sendOcrRequest('data:image/jpeg;base64,$b64');
+    // Helper function to extract text from OCR response
+    String? extractOcrText(http.Response resp) {
+      if (resp.statusCode == 200) {
+        final data = json.decode(utf8.decode(resp.bodyBytes));
+        return data['choices']?[0]?['message']?['content']?.toString();
       }
-      
-      if (resp.statusCode == 400) {
-        // Provide helpful error message
-        final errorBody = resp.body;
-        String errorMsg = 'OCR API 不支持 PDF 直接识别。';
-        
-        try {
-          final errorJson = json.decode(errorBody);
-          if (errorJson['error'] != null) {
-            final errDetail = errorJson['error']['message'] ?? errorJson['error'].toString();
-            errorMsg += '\nAPI错误: $errDetail';
-          }
-        } catch (_) {
-          errorMsg += '\n原始响应: ${errorBody.length > 200 ? errorBody.substring(0, 200) : errorBody}';
-        }
-        
-        errorMsg += '\n\n建议: 您可以先将 PDF 转为图片(截图)再上传，或使用支持 PDF 的 OCR 服务。';
-        _addReasoningStep('OCR 失败: $errorMsg');
-        throw Exception(errorMsg);
-      }
-    }
-
-    if (resp.statusCode == 200) {
-      final data = json.decode(utf8.decode(resp.bodyBytes));
-      final content =
-          data['choices']?[0]?['message']?['content']?.toString() ?? '';
-      if (content.isNotEmpty) {
-        _addReasoningStep('OCR 成功，提取到 ${content.length} 字符');
-        return content;
-      }
-      _addReasoningStep('OCR 返回空内容');
       return null;
     }
 
-    // Parse error response for better feedback
+    // For images, send directly
+    if (ext != 'pdf') {
+      String mimeType;
+      switch (ext) {
+        case 'png': mimeType = 'image/png'; break;
+        case 'jpg':
+        case 'jpeg': mimeType = 'image/jpeg'; break;
+        case 'gif': mimeType = 'image/gif'; break;
+        case 'webp': mimeType = 'image/webp'; break;
+        default: mimeType = 'image/png';
+      }
+      
+      final b64 = base64Encode(bytes);
+      _addReasoningStep('图片大小: ${(bytes.length / 1024).toStringAsFixed(1)} KB');
+      
+      final resp = await sendOcrRequest('data:$mimeType;base64,$b64');
+      final text = extractOcrText(resp);
+      if (text != null && text.isNotEmpty) {
+        _addReasoningStep('OCR 成功，提取到 ${text.length} 字符');
+        return text;
+      }
+      
+      if (resp.statusCode != 200) {
+        throw Exception('OCR API 错误 ${resp.statusCode}: ${resp.body}');
+      }
+      return null;
+    }
+    
+    // For PDF: Try direct first, then page-by-page
+    _addReasoningStep('PDF 文件: ${(bytes.length / 1024).toStringAsFixed(1)} KB');
+    
+    // Attempt 1: Try direct PDF OCR
+    _addReasoningStep('尝试直接 PDF OCR...');
+    final b64 = base64Encode(bytes);
+    var resp = await sendOcrRequest('data:application/pdf;base64,$b64');
+    
+    if (resp.statusCode == 200) {
+      final text = extractOcrText(resp);
+      if (text != null && text.isNotEmpty) {
+        _addReasoningStep('直接 PDF OCR 成功，提取到 ${text.length} 字符');
+        return text;
+      }
+    }
+    
+    // Attempt 2: Convert PDF pages to images and OCR each
+    if (resp.statusCode == 400 || resp.statusCode == 422 || extractOcrText(resp)?.isEmpty == true) {
+      _addReasoningStep('直接 PDF OCR 失败，尝试逐页转图片...');
+      
+      try {
+        // Open PDF document
+        final pdfDoc = await pdf_render.PdfDocument.openData(bytes);
+        final pageCount = pdfDoc.pageCount;
+        _addReasoningStep('PDF 共 $pageCount 页，开始逐页 OCR...');
+        
+        final allText = StringBuffer();
+        int successPages = 0;
+        
+        // Process each page (limit to first 10 pages for performance)
+        final maxPages = pageCount > 10 ? 10 : pageCount;
+        
+        for (int i = 1; i <= maxPages; i++) {
+          try {
+            _addReasoningStep('处理第 $i/$pageCount 页...');
+            
+            final page = await pdfDoc.getPage(i);
+            // Render at 150 DPI for good quality/size balance
+            const scale = 150.0 / 72.0;
+            final width = (page.width * scale).toInt();
+            final height = (page.height * scale).toInt();
+            
+            final pageImage = await page.render(
+              width: width,
+              height: height,
+              fullWidth: width.toDouble(),
+              fullHeight: height.toDouble(),
+            );
+            
+            // Convert RGBA pixels to PNG
+            final image = img.Image.fromBytes(
+              width: pageImage.width,
+              height: pageImage.height,
+              bytes: pageImage.pixels.buffer,
+              numChannels: 4,
+            );
+            final pngBytes = img.encodePng(image);
+            final pageB64 = base64Encode(pngBytes);
+            
+            // OCR this page
+            final pageResp = await sendOcrRequest('data:image/png;base64,$pageB64');
+            final pageText = extractOcrText(pageResp);
+            
+            if (pageText != null && pageText.isNotEmpty) {
+              successPages++;
+              if (pageCount > 1) {
+                allText.writeln('\n--- 第 $i 页 ---\n');
+              }
+              allText.writeln(pageText);
+            }
+          } catch (pageError) {
+            debugPrint('Page $i OCR error: $pageError');
+            _addReasoningStep('第 $i 页处理失败: $pageError');
+          }
+        }
+        
+        pdfDoc.dispose();
+        
+        if (maxPages < pageCount) {
+          allText.writeln('\n--- (仅处理了前 $maxPages 页，共 $pageCount 页) ---');
+          _addReasoningStep('⚠️ PDF 较长，仅处理了前 $maxPages 页');
+        }
+        
+        if (successPages > 0) {
+          final result = allText.toString().trim();
+          _addReasoningStep('✅ PDF OCR 完成: $successPages 页成功，提取 ${result.length} 字符');
+          return result;
+        } else {
+          throw Exception('PDF 所有页面 OCR 都失败了');
+        }
+        
+      } catch (pdfError) {
+        _addReasoningStep('PDF 拆分 OCR 失败: $pdfError');
+        throw Exception('PDF OCR 失败: $pdfError\n\n建议: 尝试截图 PDF 页面后上传。');
+      }
+    }
+    
+    // Other errors
     String errorDetail = resp.body;
     try {
       final errorJson = json.decode(resp.body);
@@ -2490,7 +2544,7 @@ ONLY output JSON. No explanation.''';
         r.sourceType != 'reflection' && r.sourceType != 'hypothesis' && 
         r.sourceType != 'system' && r.sourceType != 'system_note' && r.sourceType != 'synthesis' &&
         r.sourceType != 'knowledge' && r.sourceType != 'knowledge_search' && r.sourceType != 'url_content' &&
-        r.sourceType != 'feedback'  // Don't mix feedback with web results
+        r.sourceType != 'feedback' && r.sourceType != 'ocr' && r.sourceType != 'pending_image'
       ).toList();
       
       // LIMIT CONTEXT: Keep only recent/relevant references to prevent context explosion
@@ -2584,6 +2638,29 @@ ONLY output JSON. No explanation.''';
           String snippet = r.snippet;
           if (snippet.length > 2000) snippet = '${snippet.substring(0, 2000)}...';
           refsBuffer.writeln('  $idx. ${r.title}: $snippet');
+          idx++;
+        }
+      }
+      
+      // OCR results
+      final ocrRefs = sessionRefs.where((r) => r.sourceType == 'ocr').toList();
+      if (ocrRefs.isNotEmpty) {
+        refsBuffer.writeln('📝 [OCR 文字提取结果]');
+        for (var r in ocrRefs) {
+          String snippet = r.snippet;
+          if (snippet.length > 3000) snippet = '${snippet.substring(0, 3000)}...[截断]';
+          refsBuffer.writeln('  $idx. ${r.title}');
+          refsBuffer.writeln('$snippet');
+          idx++;
+        }
+      }
+      
+      // Pending images (not yet analyzed)
+      final pendingImageRefs = sessionRefs.where((r) => r.sourceType == 'pending_image').toList();
+      if (pendingImageRefs.isNotEmpty) {
+        refsBuffer.writeln('📷 [待处理图片 - 需要你选择分析方式]');
+        for (var r in pendingImageRefs) {
+          refsBuffer.writeln('${r.snippet}');
           idx++;
         }
       }
@@ -2852,16 +2929,18 @@ Every tool output MUST include: type, reason, confidence(0-1), continue(true/fal
   * USE FOR: Understanding image content, describing scenes, analyzing charts/diagrams, identifying objects
   * NOTE: If user already uploaded image, check <current_observations> first - it may already be analyzed!
 
-- ocr: ${ocrAvailable ? "AVAILABLE (extract text from images)" : "UNAVAILABLE (OCR API not configured)"}
+- ocr: ${ocrAvailable ? "AVAILABLE (extract text from images/PDF)" : "UNAVAILABLE (OCR API not configured)"}
   * **JSON**: {"type":"ocr","content":"optional custom prompt","reason":"...","confidence":0.9,"continue":true}
   * content: Optional - custom OCR prompt (default: extract all text)
-  * USE FOR: Extracting TEXT from images - documents, screenshots, photos of text, scanned pages
-  * PREFER OCR OVER VISION when user wants to READ/EXTRACT/COPY text from an image!
-  * Returns: Extracted text in markdown format
+  * USE FOR: Extracting TEXT from images or PDFs - documents, screenshots, photos of text, scanned pages
+  * 📄 **PDF支持**: 用户上传PDF且需要OCR时，系统会自动将PDF拆分成图片逐页OCR！
+  * PREFER OCR OVER VISION when user wants to READ/EXTRACT/COPY text!
+  * Returns: Extracted text in markdown format (PDF: each page labeled)
 
 ⚠️ **VISION vs OCR - CHOOSE WISELY:**
 - User says "识别/提取/读取文字" or "OCR" or "扫描" → Use **ocr**
 - User says "这是什么" or "分析/描述图片" → Use **vision**
+- User uploaded **PDF** and wants text extraction → Use **ocr** (auto splits pages!)
 - Image contains TEXT user wants to extract → Use **ocr**
 - Image is a scene/photo user wants described → Use **vision**
 
@@ -5190,6 +5269,9 @@ $intentHint
               fallbackModel: _chatModel,
             );
             if (visionRefs.isNotEmpty) {
+              // Remove pending_image marker since we've analyzed it
+              sessionRefs.removeWhere((r) => r.sourceType == 'pending_image' && r.imageId == currentSessionImagePath);
+              
               // Mark as additional analysis with context
               for (var ref in visionRefs) {
                 // Enhance snippet with analysis context
@@ -5257,7 +5339,7 @@ $intentHint
           // Action: OCR - Extract text from image
           _addReasoningStep('📝 执行 OCR 文字提取...');
           
-          if (currentSessionImagePath.isEmpty) {
+          if (currentSessionImagePath == null || currentSessionImagePath.isEmpty) {
             _addReasoningStep('❌ OCR 失败: 没有待处理的图片');
             sessionRefs.add(ReferenceItem(
               title: '⚠️ OCR 失败',
@@ -5296,8 +5378,19 @@ $intentHint
           setState(() => _loadingStatus = '正在 OCR 提取文字...');
           try {
             final customPrompt = decision.content ?? '<|grounding|>OCR this image. Extract all text.';
-            final imageFile = File(currentSessionImagePath);
-            final ocrText = await _runImageOcr(imageFile, prompt: customPrompt);
+            final filePath = currentSessionImagePath;
+            final ext = filePath.toLowerCase().split('.').last;
+            
+            String? ocrText;
+            if (ext == 'pdf') {
+              // PDF: Use PDF OCR with page splitting
+              _addReasoningStep('📄 检测到 PDF，正在逐页 OCR...');
+              ocrText = await _runPdfOcr(File(filePath), prompt: customPrompt);
+            } else {
+              // Image: Use direct image OCR
+              final imageFile = File(filePath);
+              ocrText = await _runImageOcr(imageFile, prompt: customPrompt);
+            }
             
             if (ocrText != null && ocrText.trim().isNotEmpty) {
               _addReasoningStep('✅ OCR 成功: 提取到 ${ocrText.length} 字符');
@@ -5569,6 +5662,7 @@ $intentHint
             d.type == AgentActionType.search ||
             d.type == AgentActionType.draw ||
             d.type == AgentActionType.vision ||
+            d.type == AgentActionType.ocr ||
             d.type == AgentActionType.read_url ||
             d.type == AgentActionType.search_knowledge ||
             d.type == AgentActionType.read_knowledge ||
