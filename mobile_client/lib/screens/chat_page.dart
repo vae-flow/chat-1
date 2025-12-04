@@ -2885,7 +2885,27 @@ ONLY output JSON. No explanation.''';
 
     // Check if knowledge base has content
     final hasKnowledge = _knowledgeService.hasKnowledge;
-    final knowledgeOverview = hasKnowledge ? _knowledgeService.getKnowledgeOverview() : '';
+    
+    // 智能知识库索引策略：
+    // - 默认使用轻量概览 (getKnowledgeOverview)
+    // - 如果 Agent 之前使用过知识库工具，升级为详细索引 (getKnowledgeIndex)
+    // 这让 Agent 自己决定何时需要深度索引，而非硬编码关键词
+    final bool agentUsedKnowledgeTools = previousDecisions.any((d) => 
+      d.type == AgentActionType.search_knowledge || 
+      d.type == AgentActionType.read_knowledge ||
+      d.type == AgentActionType.delete_knowledge
+    );
+    final String knowledgeContext;
+    if (!hasKnowledge) {
+      knowledgeContext = '';
+    } else if (agentUsedKnowledgeTools) {
+      // Agent 已经在用知识库了，给它详细索引以便精确定位
+      knowledgeContext = _knowledgeService.getKnowledgeIndex();
+    } else {
+      // 首次决策，给轻量概览让 Agent 判断是否需要深入
+      knowledgeContext = _knowledgeService.getKnowledgeOverview();
+    }
+    
     AgentDecision finalizeDecision(AgentDecision d) => _finalizeDecision(userText, d, hasKnowledge: hasKnowledge);
 
     // Auto-trigger hints to push tool usage proactively
@@ -3545,7 +3565,7 @@ $historicalSummary
 </historical_activity>
 ''' : ''}
 <knowledge_overview>
-$knowledgeOverview
+$knowledgeContext
 </knowledge_overview>
 
 <chat_history>
@@ -3641,7 +3661,7 @@ $historicalSummary
 </historical_activity>
 ''' : ''}
 <knowledge_overview>
-$knowledgeOverview
+$knowledgeContext
 </knowledge_overview>
 $planStatusSection
 <chat_history>
@@ -6420,6 +6440,325 @@ $intentHint
     );
   }
 
+  /// 显示知识库管理面板
+  void _showKnowledgeManager() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _buildKnowledgeManagerSheet(),
+    );
+  }
+
+  Widget _buildKnowledgeManagerSheet() {
+    return StatefulBuilder(
+      builder: (context, setSheetState) {
+        final files = _knowledgeService.files;
+        final stats = _knowledgeService.getStats();
+        
+        return Container(
+          height: MediaQuery.of(context).size.height * 0.75,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            children: [
+              // 拖动指示条
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // 标题栏
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        gradient: AppColors.primaryGradient,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.folder_open, color: Colors.white, size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '知识库管理',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            '${stats['fileCount']} 个文件 · ${stats['chunkCount']} 个知识块 · ${_formatBytes(stats['totalChars'])}',
+                            style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                          ),
+                        ],
+                      ),
+                    ),
+                    // 清空全部按钮
+                    if (files.isNotEmpty)
+                      TextButton.icon(
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('确认清空'),
+                              content: const Text('确定要清空当前角色的所有知识库内容吗？此操作不可恢复。'),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(ctx, false),
+                                  child: const Text('取消'),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.pop(ctx, true),
+                                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                                  child: const Text('清空'),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (confirm == true) {
+                            await _knowledgeService.clearAll();
+                            setSheetState(() {});
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('知识库已清空')),
+                              );
+                            }
+                          }
+                        },
+                        icon: const Icon(Icons.delete_sweep, size: 18),
+                        label: const Text('清空'),
+                        style: TextButton.styleFrom(foregroundColor: Colors.red),
+                      ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // 文件列表
+              Expanded(
+                child: files.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.folder_off_outlined, size: 64, color: Colors.grey[300]),
+                            const SizedBox(height: 16),
+                            Text(
+                              '知识库为空',
+                              style: TextStyle(fontSize: 16, color: Colors.grey[500]),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              '上传文件后会自动索引到这里',
+                              style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        itemCount: files.length,
+                        itemBuilder: (context, index) {
+                          final file = files[index];
+                          return _buildKnowledgeFileCard(file, setSheetState);
+                        },
+                      ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildKnowledgeFileCard(dynamic file, StateSetter setSheetState) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: 2,
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        leading: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: AppColors.primaryStart.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(
+            _getFileIcon(file.filename),
+            color: AppColors.primaryStart,
+            size: 24,
+          ),
+        ),
+        title: Text(
+          file.filename,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(
+              '${file.chunks.length} 个知识块 · ${_formatDateTime(file.uploadTime)}',
+              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+            ),
+            if (file.globalSummary != null && file.globalSummary!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  file.globalSummary!,
+                  style: TextStyle(fontSize: 11, color: Colors.grey[600], fontStyle: FontStyle.italic),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.delete_outline, color: Colors.red, size: 20),
+          onPressed: () async {
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('删除文件'),
+                content: Text('确定要删除 "${file.filename}" 吗？'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('取消'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    child: const Text('删除'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true) {
+              await _knowledgeService.deleteFile(file.id);
+              setSheetState(() {});
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('已删除 "${file.filename}"')),
+                );
+              }
+            }
+          },
+        ),
+        children: [
+          // 知识块列表
+          ...file.chunks.asMap().entries.map<Widget>((entry) {
+            final idx = entry.key;
+            final chunk = entry.value;
+            return Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey[50],
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey[200]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryStart.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '块 ${idx + 1}',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.primaryStart,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'ID: ${chunk.id}',
+                          style: TextStyle(fontSize: 9, color: Colors.grey[400]),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.delete_outline, size: 16, color: Colors.grey[400]),
+                        onPressed: () async {
+                          await _knowledgeService.deleteChunk(chunk.id);
+                          setSheetState(() {});
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    chunk.summary,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${chunk.content.length} 字符',
+                    style: TextStyle(fontSize: 10, color: Colors.grey[400]),
+                  ),
+                ],
+              ),
+            );
+          }),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
+  IconData _getFileIcon(String filename) {
+    final ext = filename.toLowerCase().split('.').last;
+    switch (ext) {
+      case 'pdf': return Icons.picture_as_pdf;
+      case 'docx': case 'doc': return Icons.description;
+      case 'txt': return Icons.text_snippet;
+      case 'md': return Icons.code;
+      case 'json': return Icons.data_object;
+      default: return Icons.insert_drive_file;
+    }
+  }
+
+  String _formatBytes(int chars) {
+    if (chars < 1000) return '$chars 字符';
+    if (chars < 10000) return '${(chars / 1000).toStringAsFixed(1)}K 字符';
+    return '${(chars / 1000).toStringAsFixed(0)}K 字符';
+  }
+
+  String _formatDateTime(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inHours < 1) return '${diff.inMinutes} 分钟前';
+    if (diff.inDays < 1) return '${diff.inHours} 小时前';
+    if (diff.inDays < 7) return '${diff.inDays} 天前';
+    return '${dt.month}/${dt.day}';
+  }
+
   void _openSettings() async {
     await Navigator.push(
       context,
@@ -7499,6 +7838,12 @@ $intentHint
                     setState(() => _showReasoningPanel = !_showReasoningPanel);
                   },
                   tooltip: '显示/隐藏推理过程',
+                ),
+                // 知识库管理按钮
+                _buildAppBarButton(
+                  icon: Icons.folder_outlined,
+                  onPressed: _showKnowledgeManager,
+                  tooltip: '知识库管理',
                 ),
                 _buildPersonaSwitcher(context),
                 _buildAppBarButton(
