@@ -2517,7 +2517,7 @@ ONLY output JSON. No explanation.''';
     return null;
   }
 
-  Future<AgentDecision> _planAgentStep(String userText, List<ReferenceItem> sessionRefs, List<AgentDecision> previousDecisions) async {
+  Future<AgentDecision> _planAgentStep(String userText, List<ReferenceItem> sessionRefs, List<AgentDecision> previousDecisions, {String? currentSessionImagePath}) async {
     // Use Router config for planning
     final effectiveBase = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerBase : _chatBase;
     final effectiveKey = (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) ? _routerKey : _chatKey;
@@ -2919,7 +2919,7 @@ ONLY output JSON. No explanation.''';
     // Check if we have an active image in this session (either vision or ocr analyzed)
     final hasSessionImage = sessionRefs.any((r) => r.sourceType == 'vision' || r.sourceType == 'ocr');
     // Check if user just uploaded an image that hasn't been analyzed yet
-    final hasUnanalyzedImage = currentSessionImagePath.isNotEmpty && 
+    final hasUnanalyzedImage = currentSessionImagePath != null && currentSessionImagePath.isNotEmpty && 
         !sessionRefs.any((r) => r.imageId == currentSessionImagePath);
 
     // Check if knowledge base has content
@@ -4497,7 +4497,7 @@ $intentHint
               
               // Fall through to normal planning mode
               setState(() => _loadingStatus = '正在重新规划 (Step ${steps + 1})...');
-              decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+              decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions, currentSessionImagePath: currentSessionImagePath);
               isFromPlan = false;
             }
           } else {
@@ -4513,7 +4513,7 @@ $intentHint
           // ===== NORMAL MODE: Get next decision from API =====
           // This also handles replanning after plan completion or failure
           setState(() => _loadingStatus = '正在规划 (Step ${steps + 1})...');
-          decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions);
+          decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions, currentSessionImagePath: currentSessionImagePath);
           
           // If a new plan was created, reset the step counter
           if (_currentPlan != null && _currentPlanStep == 0) {
@@ -6429,6 +6429,8 @@ $intentHint
         return '{"type":"draw","content":"a beautiful sunset","continue":false}';
       case AgentActionType.vision:
         return '{"type":"vision","content":"请分析这张图片","continue":true}';
+      case AgentActionType.ocr:
+        return '{"type":"ocr","content":"请提取图片中的文字","continue":true}';
       case AgentActionType.save_file:
         return '{"type":"save_file","filename":"report.md","content":"文件内容...","continue":false}';
       case AgentActionType.system_control:
@@ -7538,7 +7540,7 @@ $intentHint
     return ClipRRect(
       borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
         child: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -7817,7 +7819,7 @@ $intentHint
   Widget _buildGlassAppBar(BuildContext context, int totalChars, bool isMemoryFull) {
     return ClipRRect(
       child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
         child: Container(
           padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
           decoration: BoxDecoration(
