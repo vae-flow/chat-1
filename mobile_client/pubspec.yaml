@@ -23,7 +23,7 @@ dependencies:
   syncfusion_flutter_pdf: ^24.2.8
   archive: ^3.6.1
   xml: ^6.5.0
-  pdf_render: ^1.4.12
+  pdfx: ^2.6.0
   image: ^4.1.7
 
 dev_dependencies:

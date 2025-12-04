@@ -10,7 +10,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:pdf_render/pdf_render.dart' as pdf_render;
+import 'package:pdfx/pdfx.dart' as pdfx;
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -1646,9 +1646,9 @@ $text
       _addReasoningStep('直接 PDF OCR 失败，尝试逐页转图片...');
       
       try {
-        // Open PDF document
-        final pdfDoc = await pdf_render.PdfDocument.openData(bytes);
-        final pageCount = pdfDoc.pageCount;
+        // Open PDF document using pdfx
+        final pdfDoc = await pdfx.PdfDocument.openData(bytes);
+        final pageCount = pdfDoc.pagesCount;
         _addReasoningStep('PDF 共 $pageCount 页，开始逐页 OCR...');
         
         final allText = StringBuffer();
@@ -1662,26 +1662,22 @@ $text
             _addReasoningStep('处理第 $i/$pageCount 页...');
             
             final page = await pdfDoc.getPage(i);
-            // Render at 150 DPI for good quality/size balance
-            const scale = 150.0 / 72.0;
-            final width = (page.width * scale).toInt();
-            final height = (page.height * scale).toInt();
-            
+            // Render at 2x scale for good quality
             final pageImage = await page.render(
-              width: width,
-              height: height,
-              fullWidth: width.toDouble(),
-              fullHeight: height.toDouble(),
+              width: page.width * 2,
+              height: page.height * 2,
+              format: pdfx.PdfPageImageFormat.png,
+              backgroundColor: '#ffffff',
             );
+            await page.close();
             
-            // Convert RGBA pixels to PNG
-            final image = img.Image.fromBytes(
-              width: pageImage.width,
-              height: pageImage.height,
-              bytes: pageImage.pixels.buffer,
-              numChannels: 4,
-            );
-            final pngBytes = img.encodePng(image);
+            if (pageImage == null) {
+              _addReasoningStep('第 $i 页渲染失败');
+              continue;
+            }
+            
+            // pdfx returns PNG bytes directly
+            final pngBytes = pageImage.bytes;
             final pageB64 = base64Encode(pngBytes);
             
             // OCR this page
@@ -1701,7 +1697,7 @@ $text
           }
         }
         
-        pdfDoc.dispose();
+        await pdfDoc.close();
         
         if (maxPages < pageCount) {
           allText.writeln('\n--- (仅处理了前 $maxPages 页，共 $pageCount 页) ---');
