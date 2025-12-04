@@ -4465,6 +4465,7 @@ $intentHint
                             type: AgentActionType.search,
                             query: decision.query,
                             reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results. Synthesis confidence: ${((confidence ?? 0.7) * 100).round()}%. Blind spots: ${blindSpots.join("; ")}]',
+                            continueAfter: decision.continueAfter,
                           );
                         }
                       }
@@ -4487,6 +4488,7 @@ $intentHint
                     type: AgentActionType.search,
                     query: decision.query,
                     reason: '${decision.reason} [RESULT: Found ${uniqueNewRefs.length} results (avg reliability: ${(avgReliability * 100).round()}%) - $topTitles]',
+                    continueAfter: decision.continueAfter,
                   );
                 }
               }
@@ -4520,6 +4522,7 @@ $intentHint
                 type: AgentActionType.search,
                 query: decision.query,
                 reason: '${decision.reason} [RESULT: FAILED - Search #$searchAttempt returned 0 results. Suggestions: 1) Use different keywords 2) Broaden query 3) Try English terms]',
+                continueAfter: decision.continueAfter,
               );
               
               // 🔴 PLAN SELF-ADJUSTMENT: If this was from a plan, trigger replanning
@@ -4579,6 +4582,7 @@ $intentHint
               type: AgentActionType.search,
               query: decision.query,
               reason: '${decision.reason} [RESULT: FAILED - Search error - $searchError. Agent should try alternatives.]',
+              continueAfter: decision.continueAfter,
             );
             
             // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
@@ -4637,6 +4641,7 @@ $intentHint
               type: AgentActionType.read_url,
               content: url,
               reason: '${decision.reason} [RESULT: FAILED - No network API configured. Cannot access web.]',
+              continueAfter: decision.continueAfter,
             );
             steps++;
             continue;
@@ -4690,6 +4695,7 @@ $intentHint
                 type: AgentActionType.read_url,
                 content: url,
                 reason: '${decision.reason} [RESULT: FAILED to read URL. Error: ${urlRef.snippet}]',
+                continueAfter: decision.continueAfter,
               );
               
               // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
@@ -4727,6 +4733,7 @@ $intentHint
               type: AgentActionType.read_url,
               content: url,
               reason: '${decision.reason} [RESULT: FAILED - Exception - $e]',
+              continueAfter: decision.continueAfter,
             );
             
             // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
@@ -4773,6 +4780,7 @@ $intentHint
               type: AgentActionType.draw,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - Draw API not configured. Cannot generate images.]',
+              continueAfter: decision.continueAfter,
             );
             steps++;
             continue;
@@ -4864,6 +4872,7 @@ $intentHint
               type: AgentActionType.draw,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - Draw FAILED. Possible causes: 1) Invalid prompt 2) Content policy violation 3) API error. Prompt was: "${failedPrompt.length > 50 ? failedPrompt.substring(0, 50) + "..." : failedPrompt}"]',
+              continueAfter: decision.continueAfter,
             );
             
             // 🔴 PLAN SELF-ADJUSTMENT: If from plan, trigger replanning
@@ -5280,6 +5289,7 @@ $intentHint
                 type: AgentActionType.system_control,
                 content: decision.content,
                 reason: '${decision.reason} [RESULT: FAILED - Accessibility Service not enabled]',
+                continueAfter: decision.continueAfter,
              );
              
              // Add system note
@@ -5405,6 +5415,7 @@ $intentHint
               type: AgentActionType.vision,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - No Vision/Chat API configured. Cannot analyze images.]',
+              continueAfter: decision.continueAfter,
             );
             steps++;
             continue;
@@ -5484,6 +5495,7 @@ $intentHint
               type: AgentActionType.vision,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - Vision failed - $visionError. Consider: 1) Different prompt 2) Fallback to describe without analysis]',
+              continueAfter: decision.continueAfter,
             );
             
             // 🔴 PLAN SELF-ADJUSTMENT
@@ -5527,6 +5539,7 @@ $intentHint
               type: AgentActionType.ocr,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - No image to OCR]',
+              continueAfter: decision.continueAfter,
             );
             steps++;
             continue;
@@ -5545,6 +5558,7 @@ $intentHint
               type: AgentActionType.ocr,
               content: decision.content,
               reason: '${decision.reason} [RESULT: FAILED - No OCR API configured]',
+              continueAfter: decision.continueAfter,
             );
             steps++;
             continue;
@@ -5817,6 +5831,7 @@ $intentHint
             type: AgentActionType.vision,
             content: decision.content,
             reason: '${decision.reason} [RESULT: FAILED - No image available. User must send an image first.]',
+            continueAfter: decision.continueAfter,
           );
           
           sessionRefs.add(ReferenceItem(
@@ -6024,6 +6039,7 @@ $intentHint
             type: decision.type,
             content: decision.content,
             reason: '${decision.reason ?? ""} [ERROR: Missing params: $missingParams]',
+            continueAfter: decision.continueAfter,
           );
           
           // Continue loop to let Agent retry with correct parameters
