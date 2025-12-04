@@ -582,6 +582,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
   }
 
+  /// 添加推理步骤并更新 UI
+  void _addReasoningStep(String step) {
+    if (!mounted) return;
+    debugPrint('[推理] $step');
+    setState(() {
+      if (!_reasoningSteps.contains(step)) {
+        _reasoningSteps.add(step);
+      }
+    });
+  }
+
   Future<void> _pickImage() async {
     try {
       final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
@@ -645,15 +656,24 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
         setState(() {
           _sending = true;
+          _showReasoningPanel = true;  // 显示推理面板
+          _reasoningSteps = [];
           _loadingStatus = '正在读取并索引文件...';
         });
+        
+        _addReasoningStep('📂 开始处理文件: $filename (${(size / 1024).toStringAsFixed(1)} KB)');
 
         try {
           final ext = filename.split('.').last.toLowerCase();
           String content;
+          _addReasoningStep('🔍 尝试解析 $ext 格式...');
           try {
             content = await DocumentParser.readText(file, extension: ext);
+            if (content.trim().isNotEmpty) {
+              _addReasoningStep('✅ 文本解析成功: ${content.length} 字符');
+            }
           } catch (e) {
+            _addReasoningStep('❌ 解析失败: $e');
             _showError('无法解析${ext.toUpperCase()} 文件: $e');
             return;
           }
@@ -661,12 +681,14 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           if (content.trim().isEmpty) {
             // Fallback: OCR for scanned PDFs via OpenAI-compatible vision API
             if (ext == 'pdf') {
+              _addReasoningStep('⚠️ 文本解析为空，尝试 OCR...');
               setState(() => _loadingStatus = '文本提取为空，正在尝试 OCR...');
               try {
                 final ocrText = await _runPdfOcr(file);
                 if (ocrText != null && ocrText.trim().isNotEmpty) {
                   content = ocrText;
                 } else {
+                  _addReasoningStep('❌ OCR 未提取到文本');
                   _showError('文件内容为空，OCR 也未能提取文本');
                   return;
                 }
@@ -674,12 +696,18 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 _showError('文件内容为空，OCR 失败: $e');
                 return;
               }
+            } else if (ext == 'docx') {
+              _addReasoningStep('❌ Word 文档解析为空');
+              _showError('Word 文档解析为空。可能是扫描版文档，请转为图片后上传使用 OCR。');
+              return;
             } else {
+              _addReasoningStep('❌ 文件内容为空');
               _showError('文件内容为空，或未能提取文本');
               return;
             }
           }
           
+          _addReasoningStep('📝 正在索引到知识库...');
           await _knowledgeService.ingestFile(
             filename: filename,
             content: content,
@@ -690,6 +718,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           final stats = _knowledgeService.getStats();
           final fileInfo = _knowledgeService.files.where((f) => f.filename == filename).lastOrNull;
           final chunkCount = fileInfo?.chunks.length ?? 0;
+          
+          _addReasoningStep('✅ 索引完成: $chunkCount 个知识块');
           
           setState(() {
             _messages.add(ChatMessage('system', 
@@ -703,11 +733,20 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           
           _showSuccessSnackBar('文件索引完成 ($chunkCount 块)');
         } catch (e) {
+          _addReasoningStep('❌ 处理失败: $e');
           _showError('处理文件失败: $e');
         } finally {
           setState(() {
             _sending = false;
             _loadingStatus = '';
+            // 保持推理面板显示几秒后自动隐藏
+            Future.delayed(const Duration(seconds: 3), () {
+              if (mounted && !_sending) {
+                setState(() {
+                  _showReasoningPanel = false;
+                });
+              }
+            });
           });
         }
       }
@@ -1454,64 +1493,153 @@ $text
     return text; // Fallback
   }
 
-  /// OCR a PDF using an OpenAI-compatible vision/chat endpoint (e.g., DeepSeek-OCR proxy)
-  /// Uses Vision config first, falls back to Chat config if Vision is not set.
+  /// OCR a file (PDF or image) using an OpenAI-compatible vision/chat endpoint
+  /// For PDF: Attempts direct PDF OCR first, falls back to image conversion if 400 error
+  /// For images: Sends directly with appropriate mime type
   Future<String?> _runPdfOcr(File file, {String? prompt}) async {
     // Use dedicated OCR config only
     if (_ocrBase.isEmpty || _ocrKey.isEmpty || _ocrBase.contains('your-oneapi-host')) {
       debugPrint('OCR skipped: no OCR API configured');
+      _addReasoningStep('OCR 跳过: 未配置 OCR API');
       return null;
     }
     final base = _ocrBase;
     final key = _ocrKey;
     final model = _ocrModel;
+    
+    final ext = file.path.toLowerCase().split('.').last;
+    _addReasoningStep('开始 OCR 处理: ${file.path.split('/').last} (类型: $ext, 模型: $model)');
 
     final cleanBase = base.replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$cleanBase/chat/completions');
     final bytes = await file.readAsBytes();
+    
+    // Determine MIME type based on file extension
+    String mimeType;
+    switch (ext) {
+      case 'png':
+        mimeType = 'image/png';
+        break;
+      case 'jpg':
+      case 'jpeg':
+        mimeType = 'image/jpeg';
+        break;
+      case 'gif':
+        mimeType = 'image/gif';
+        break;
+      case 'webp':
+        mimeType = 'image/webp';
+        break;
+      case 'pdf':
+        mimeType = 'application/pdf';
+        break;
+      default:
+        // Treat unknown as image
+        mimeType = 'image/png';
+    }
+    
     final b64 = base64Encode(bytes);
+    _addReasoningStep('文件大小: ${(bytes.length / 1024).toStringAsFixed(1)} KB, MIME: $mimeType');
 
     final userPrompt = prompt ??
-        '<image>\n<|grounding|>Convert the document to markdown.';
+        '<image>\n<|grounding|>Convert the document to markdown. Output in Chinese if the content is Chinese.';
 
-    final body = json.encode({
-      'model': model,
-      'messages': [
-        {
-          'role': 'user',
-          'content': [
-            {
-              'type': 'image_url',
-              'image_url': {
-                'url': 'data:application/pdf;base64,$b64',
-              }
+    Future<http.Response> sendOcrRequest(String dataUrl) async {
+      final body = json.encode({
+        'model': model,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': dataUrl,
+                }
+              },
+              {'type': 'text', 'text': userPrompt}
+            ]
+          }
+        ],
+        'stream': false,
+      });
+
+      return await http
+          .post(
+            uri,
+            headers: {
+              'Authorization': 'Bearer $key',
+              'Content-Type': 'application/json',
             },
-            {'type': 'text', 'text': userPrompt}
-          ]
-        }
-      ],
-      'stream': false,
-    });
+            body: body,
+          )
+          .timeout(const Duration(minutes: 3));
+    }
 
-    final resp = await http
-        .post(
-          uri,
-          headers: {
-            'Authorization': 'Bearer $key',
-            'Content-Type': 'application/json',
-          },
-          body: body,
-        )
-        .timeout(const Duration(minutes: 3));
+    // First attempt with detected mime type
+    _addReasoningStep('发送 OCR 请求到 $uri ...');
+    var resp = await sendOcrRequest('data:$mimeType;base64,$b64');
+    
+    // If PDF fails with 400, it might mean the API doesn't support PDF directly
+    // Try common workarounds
+    if (resp.statusCode == 400 && mimeType == 'application/pdf') {
+      _addReasoningStep('PDF OCR 返回 400，尝试备选方案...');
+      
+      // Try 1: Send as generic image URL (some APIs parse this)
+      _addReasoningStep('尝试方案1: 作为通用图片发送');
+      resp = await sendOcrRequest('data:image/png;base64,$b64');
+      
+      if (resp.statusCode == 400) {
+        // Try 2: Some APIs want just the base64 without data URL prefix
+        // But most OpenAI-compatible APIs need the data URL format
+        _addReasoningStep('方案1失败，尝试方案2: image/jpeg 格式');
+        resp = await sendOcrRequest('data:image/jpeg;base64,$b64');
+      }
+      
+      if (resp.statusCode == 400) {
+        // Provide helpful error message
+        final errorBody = resp.body;
+        String errorMsg = 'OCR API 不支持 PDF 直接识别。';
+        
+        try {
+          final errorJson = json.decode(errorBody);
+          if (errorJson['error'] != null) {
+            final errDetail = errorJson['error']['message'] ?? errorJson['error'].toString();
+            errorMsg += '\nAPI错误: $errDetail';
+          }
+        } catch (_) {
+          errorMsg += '\n原始响应: ${errorBody.length > 200 ? errorBody.substring(0, 200) : errorBody}';
+        }
+        
+        errorMsg += '\n\n建议: 您可以先将 PDF 转为图片(截图)再上传，或使用支持 PDF 的 OCR 服务。';
+        _addReasoningStep('OCR 失败: $errorMsg');
+        throw Exception(errorMsg);
+      }
+    }
 
     if (resp.statusCode == 200) {
       final data = json.decode(utf8.decode(resp.bodyBytes));
       final content =
           data['choices']?[0]?['message']?['content']?.toString() ?? '';
-      return content.isNotEmpty ? content : null;
+      if (content.isNotEmpty) {
+        _addReasoningStep('OCR 成功，提取到 ${content.length} 字符');
+        return content;
+      }
+      _addReasoningStep('OCR 返回空内容');
+      return null;
     }
 
-    throw Exception('OCR API ${resp.statusCode}: ${resp.body}');
+    // Parse error response for better feedback
+    String errorDetail = resp.body;
+    try {
+      final errorJson = json.decode(resp.body);
+      if (errorJson['error'] != null) {
+        errorDetail = errorJson['error']['message'] ?? errorJson['error'].toString();
+      }
+    } catch (_) {}
+    
+    _addReasoningStep('OCR 失败: HTTP ${resp.statusCode} - $errorDetail');
+    throw Exception('OCR API 错误 ${resp.statusCode}: $errorDetail');
   }
 
   /// Generate file-type aware summary for knowledge base indexing
