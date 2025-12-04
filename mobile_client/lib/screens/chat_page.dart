@@ -2553,6 +2553,209 @@ $refsContext
     };
   }
 
+  /// 评估工具执行结果是否满足当前步骤目标
+  /// 返回: { 'satisfied': bool, 'quality': double 0-1, 'suggestion': String }
+  Map<String, dynamic> _evaluateStepResult({
+    required String userIntent,
+    required AgentActionType actionType,
+    required List<ReferenceItem> resultRefs,
+    required String? stepResult,
+    required bool stepSucceeded,
+  }) {
+    // 基础检查：步骤是否成功
+    if (!stepSucceeded) {
+      return {
+        'satisfied': false,
+        'quality': 0.0,
+        'suggestion': '步骤执行失败，需要重试或调整策略',
+        'needsRetry': true,
+      };
+    }
+    
+    // 根据不同工具类型评估结果质量
+    switch (actionType) {
+      case AgentActionType.search:
+        // 搜索结果评估
+        final searchResults = resultRefs.where((r) => r.sourceType == 'search').toList();
+        if (searchResults.isEmpty) {
+          return {
+            'satisfied': false,
+            'quality': 0.0,
+            'suggestion': '搜索无结果，建议更换关键词或扩大搜索范围',
+            'needsRetry': true,
+          };
+        }
+        // 评估搜索结果相关性（简单：看结果数量和标题相关度）
+        final quality = (searchResults.length / 5.0).clamp(0.0, 1.0);
+        return {
+          'satisfied': quality > 0.3,
+          'quality': quality,
+          'suggestion': quality > 0.6 
+              ? '搜索结果充足，可以综合回答' 
+              : '搜索结果较少，可能需要补充搜索或使用其他工具',
+          'needsRetry': false,
+        };
+        
+      case AgentActionType.search_knowledge:
+        // 知识库搜索评估
+        final knowledgeResults = resultRefs.where((r) => 
+            r.sourceType == 'knowledge_search').toList();
+        if (knowledgeResults.isEmpty) {
+          return {
+            'satisfied': false,
+            'quality': 0.0,
+            'suggestion': '知识库无匹配，建议更换关键词或使用外部搜索',
+            'needsRetry': true,
+          };
+        }
+        return {
+          'satisfied': true,
+          'quality': 0.8,
+          'suggestion': '知识库找到相关内容',
+          'needsRetry': false,
+        };
+        
+      case AgentActionType.read_knowledge:
+      case AgentActionType.read_url:
+        // 读取结果评估
+        final readResults = resultRefs.where((r) => 
+            r.sourceType == 'knowledge_read' || r.sourceType == 'web_content').toList();
+        if (readResults.isEmpty || (stepResult?.isEmpty ?? true)) {
+          return {
+            'satisfied': false,
+            'quality': 0.0,
+            'suggestion': '读取内容为空，可能需要换一个来源',
+            'needsRetry': true,
+          };
+        }
+        return {
+          'satisfied': true,
+          'quality': 0.9,
+          'suggestion': '成功获取内容',
+          'needsRetry': false,
+        };
+        
+      case AgentActionType.vision:
+      case AgentActionType.ocr:
+        // 图像分析评估
+        final visionResults = resultRefs.where((r) => 
+            r.sourceType == 'vision' || r.sourceType == 'ocr').toList();
+        return {
+          'satisfied': visionResults.isNotEmpty,
+          'quality': visionResults.isNotEmpty ? 0.85 : 0.0,
+          'suggestion': visionResults.isNotEmpty 
+              ? '图像分析完成' 
+              : '图像分析失败',
+          'needsRetry': visionResults.isEmpty,
+        };
+        
+      case AgentActionType.draw:
+      case AgentActionType.save_file:
+      case AgentActionType.system_control:
+        // 执行类操作：成功即满足
+        return {
+          'satisfied': stepSucceeded,
+          'quality': stepSucceeded ? 1.0 : 0.0,
+          'suggestion': stepSucceeded ? '操作成功' : '操作失败',
+          'needsRetry': !stepSucceeded,
+        };
+        
+      default:
+        // 其他类型（reflect, hypothesize, take_note 等）
+        return {
+          'satisfied': true,
+          'quality': 0.7,
+          'suggestion': '步骤已执行',
+          'needsRetry': false,
+        };
+    }
+  }
+
+  /// 评估是否达成用户最终目标
+  /// 在准备回答前调用，判断当前信息是否足够回答用户问题
+  Map<String, dynamic> _evaluateGoalAchievement({
+    required String userIntent,
+    required String intentType,
+    required List<ReferenceItem> allRefs,
+    required List<AgentDecision> decisions,
+  }) {
+    // 获取有效的信息来源（排除系统提示）
+    final infoRefs = allRefs.where((r) => 
+        r.sourceType != 'system_note' && 
+        r.sourceType != 'intent_hint' &&
+        r.sourceType != 'deep_phase_force').toList();
+    
+    // 根据意图类型判断需要什么样的信息
+    switch (intentType) {
+      case '评价/反馈':
+      case '引用对话历史':
+      case '请求展开/继续':
+        // 这些类型不需要外部信息，只需回应即可
+        return {
+          'achieved': true,
+          'confidence': 0.95,
+          'reason': '基于对话上下文即可回应',
+          'missingInfo': <String>[],
+        };
+        
+      case '明确搜索请求':
+      case '实时信息需求':
+        // 需要搜索结果
+        final searchRefs = infoRefs.where((r) => r.sourceType == 'search').toList();
+        if (searchRefs.isEmpty) {
+          return {
+            'achieved': false,
+            'confidence': 0.3,
+            'reason': '用户请求搜索但未获取到搜索结果',
+            'missingInfo': ['搜索结果'],
+          };
+        }
+        return {
+          'achieved': true,
+          'confidence': 0.8,
+          'reason': '已获取搜索结果',
+          'missingInfo': <String>[],
+        };
+        
+      case '知识库查询':
+        // 需要知识库内容
+        final knowledgeRefs = infoRefs.where((r) => 
+            r.sourceType == 'knowledge_search' || r.sourceType == 'knowledge_read').toList();
+        if (knowledgeRefs.isEmpty) {
+          return {
+            'achieved': false,
+            'confidence': 0.4,
+            'reason': '用户询问知识库内容但未检索到',
+            'missingInfo': ['知识库内容'],
+          };
+        }
+        return {
+          'achieved': true,
+          'confidence': 0.85,
+          'reason': '已获取知识库内容',
+          'missingInfo': <String>[],
+        };
+        
+      default:
+        // 一般查询：看是否有足够的信息来源
+        if (infoRefs.isEmpty && decisions.length <= 1) {
+          // 第一步就回答，可能需要更多信息
+          return {
+            'achieved': false,
+            'confidence': 0.5,
+            'reason': '尚未获取任何外部信息，建议先收集信息再回答',
+            'missingInfo': ['外部信息来源'],
+          };
+        }
+        return {
+          'achieved': true,
+          'confidence': 0.7,
+          'reason': '有信息可供回答',
+          'missingInfo': <String>[],
+        };
+    }
+  }
+
   /// Use Worker API to semantically parse natural language into a structured AgentDecision
   /// This is smarter than regex because it understands meaning, not just keywords
   Future<AgentDecision?> _parseIntentWithWorker(String rawResponse) async {
@@ -6757,6 +6960,40 @@ $reviewContent
               steps++;
               continue;
             }
+          }
+          
+          // ========== 目标达成评估 ==========
+          // 在回答前检查是否真的收集了足够的信息
+          final goalEval = _evaluateGoalAchievement(
+            userIntent: content,
+            intentType: intentAnalysis['intentType'] as String? ?? '一般查询',
+            allRefs: sessionRefs,
+            decisions: sessionDecisions,
+          );
+          
+          // 如果目标未达成且还有步数余量，提示 Agent 继续收集信息
+          if (goalEval['achieved'] != true && steps < maxSteps - 2) {
+            final missingInfo = (goalEval['missingInfo'] as List?)?.join(', ') ?? '';
+            debugPrint('⚠️ Goal not achieved: ${goalEval['reason']}. Missing: $missingInfo');
+            
+            // 添加提示让 Agent 知道需要更多信息
+            sessionRefs.add(ReferenceItem(
+              title: '⚠️ 目标达成评估',
+              url: 'internal://goal-eval/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '''[GOAL NOT ACHIEVED - 建议继续收集信息]
+评估结果: ${goalEval['reason']}
+置信度: ${((goalEval['confidence'] as double?) ?? 0.5) * 100}%
+缺少信息: $missingInfo
+
+建议: 在回答前先使用工具获取更多信息，以提高回答质量。
+如果你确信当前信息已足够，可以继续回答。''',
+              sourceName: 'GoalEvaluator',
+              sourceType: 'goal_evaluation',
+            ));
+            
+            _addReasoningStep('⚠️ 信息可能不足: ${goalEval['reason']}');
+          } else {
+            _addReasoningStep('✅ 目标评估通过');
           }
           
           // Agent decided to answer - execute it
