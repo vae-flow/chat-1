@@ -395,16 +395,24 @@ class KnowledgeService {
     final buffer = StringBuffer();
     buffer.writeln('📚 Knowledge Base Overview:');
     buffer.writeln('Total: ${_files.length} file(s)');
+    buffer.writeln('');
+    buffer.writeln('⚠️ IMPORTANT: User has uploaded files to knowledge base!');
+    buffer.writeln('   If user\'s question relates to ANY of these topics, you MUST use search_knowledge first.');
+    buffer.writeln('');
     
     for (var file in _files) {
-      buffer.writeln('  • ${file.filename} (${file.chunks.length} chunks)');
+      buffer.writeln('  📄 ${file.filename} (${file.chunks.length} chunks)');
       // Add global summary if available (helps Agent decide when to search)
       if (file.globalSummary != null && file.globalSummary!.isNotEmpty) {
-        buffer.writeln('    └─ ${file.globalSummary!.replaceAll('\n', ' ')}');
+        buffer.writeln('     └─ 内容: ${file.globalSummary!.replaceAll('\n', ' ')}');
       }
     }
     
-    buffer.writeln('\n💡 Use search_knowledge with relevant keywords to find specific content.');
+    buffer.writeln('');
+    buffer.writeln('🔑 DECISION RULE:');
+    buffer.writeln('   - User asks about file content → search_knowledge → read_knowledge → answer');
+    buffer.writeln('   - User asks to modify/expand/summarize file → search_knowledge → read_knowledge → answer/save_file');
+    buffer.writeln('   - Unrelated question → use other tools or answer directly');
     return buffer.toString();
   }
 }
