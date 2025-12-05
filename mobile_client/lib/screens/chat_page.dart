@@ -2756,6 +2756,370 @@ $refsContext
     }
   }
 
+  /// 检测搜索词质量是否过低
+  /// 低质量搜索词特征：太长、是完整问句、包含无意义词、不是关键词形式
+  bool _isLowQualityQuery(String query) {
+    final trimmed = query.trim();
+    
+    // 1. 太长（超过 50 字符通常不是好的搜索词）
+    if (trimmed.length > 50) return true;
+    
+    // 2. 是完整的问句形式（包含疑问词+问号）
+    final questionPatterns = [
+      RegExp(r'^(你|我|他|她|它|这|那|什么|怎么|如何|为什么|哪|谁|几|多少).*[？?]$'),
+      RegExp(r'^(can|could|would|should|will|what|how|why|where|when|who|which|is|are|do|does).*\??$', caseSensitive: false),
+      RegExp(r'(please|help me|can you|could you|would you)', caseSensitive: false),
+    ];
+    for (var pattern in questionPatterns) {
+      if (pattern.hasMatch(trimmed)) return true;
+    }
+    
+    // 3. 包含明显的系统指令（不是真正的搜索词）
+    final systemPhrases = [
+      '用户发送', '图片', 'analyze', 'image', 'sent', '请用', 'vision', 'ocr',
+      '帮我', '能不能', '可以吗', '好吗', '请问',
+    ];
+    int systemPhraseCount = 0;
+    for (var phrase in systemPhrases) {
+      if (trimmed.toLowerCase().contains(phrase.toLowerCase())) {
+        systemPhraseCount++;
+      }
+    }
+    if (systemPhraseCount >= 2) return true;
+    
+    // 4. 纯口语化表达（没有实际搜索价值的词）
+    final fluffWords = ['一下', '看看', '找找', '查查', '帮我', '给我', '想要', '需要', '应该'];
+    int fluffCount = 0;
+    for (var word in fluffWords) {
+      if (trimmed.contains(word)) fluffCount++;
+    }
+    // 如果超过一半是口语词，质量低
+    if (fluffCount >= 2 && trimmed.length < 20) return true;
+    
+    return false;
+  }
+
+  /// 使用 LLM 两步分析用户需求
+  /// 第一步：自由分析需要什么工具和提示词
+  /// 第二步：用标准模板填写，程序提取字段
+  Future<AgentDecision> _validateAndCorrectDecisionWithLLM({
+    required AgentDecision decision,
+    required String userText,
+    required bool hasUnanalyzedImage,
+    required List<ReferenceItem> sessionRefs,
+  }) async {
+    try {
+      final config = _getApiConfig();
+      if (config.base.isEmpty || config.key.isEmpty) return decision;
+      
+      // 构建完整上下文，每部分都要标识清楚
+      final contextBuffer = StringBuffer();
+      
+      // 1. 用户当前请求
+      contextBuffer.writeln('【用户当前请求】');
+      contextBuffer.writeln(userText);
+      contextBuffer.writeln('');
+      
+      // 2. 图片状态
+      contextBuffer.writeln('【图片状态】');
+      if (hasUnanalyzedImage) {
+        contextBuffer.writeln('用户发送了一张图片，尚未分析');
+      } else if (currentSessionImagePath != null) {
+        contextBuffer.writeln('用户发送了图片，已有分析结果');
+      } else {
+        contextBuffer.writeln('本次对话无图片');
+      }
+      contextBuffer.writeln('');
+      
+      // 3. 对话历史
+      contextBuffer.writeln('【对话历史】');
+      if (_messages.isNotEmpty) {
+        final recentMessages = _messages.length > 6 ? _messages.sublist(_messages.length - 6) : _messages;
+        for (var msg in recentMessages) {
+          final role = msg.role == 'user' ? '用户' : '助手';
+          final content = msg.content.length > 200 ? '${msg.content.substring(0, 200)}...' : msg.content;
+          contextBuffer.writeln('$role: $content');
+        }
+      } else {
+        contextBuffer.writeln('无历史对话');
+      }
+      contextBuffer.writeln('');
+      
+      // 4. 知识库摘要
+      contextBuffer.writeln('【知识库】');
+      final knowledgeStats = _knowledgeService.getStats();
+      if (knowledgeStats['fileCount'] > 0) {
+        contextBuffer.writeln('已上传 ${knowledgeStats['fileCount']} 个文件:');
+        final filenames = knowledgeStats['filenames'] as List<dynamic>;
+        for (var name in filenames.take(5)) {
+          contextBuffer.writeln('  - $name');
+        }
+        if (filenames.length > 5) {
+          contextBuffer.writeln('  ... 等共 ${filenames.length} 个文件');
+        }
+      } else {
+        contextBuffer.writeln('知识库为空');
+      }
+      contextBuffer.writeln('');
+      
+      // 5. 已收集的信息（本轮对话中工具执行的结果）
+      contextBuffer.writeln('【已收集信息】');
+      if (sessionRefs.isNotEmpty) {
+        final grouped = <String, List<ReferenceItem>>{};
+        for (var ref in sessionRefs) {
+          final type = ref.sourceType ?? 'unknown';
+          grouped.putIfAbsent(type, () => []);
+          grouped[type]!.add(ref);
+        }
+        for (var entry in grouped.entries) {
+          contextBuffer.writeln('[${entry.key}] ${entry.value.length}条:');
+          for (var ref in entry.value.take(3)) {
+            final snippet = ref.snippet.length > 150 ? '${ref.snippet.substring(0, 150)}...' : ref.snippet;
+            contextBuffer.writeln('  • ${ref.title}: $snippet');
+          }
+          if (entry.value.length > 3) {
+            contextBuffer.writeln('  ... 等共 ${entry.value.length} 条');
+          }
+        }
+      } else {
+        contextBuffer.writeln('本轮对话尚未收集任何信息');
+      }
+      contextBuffer.writeln('');
+      
+      // 6. 当前角色信息
+      contextBuffer.writeln('【当前角色】');
+      contextBuffer.writeln('名称: ${_activePersona.name}');
+      if (_activePersona.systemPrompt.isNotEmpty) {
+        final promptPreview = _activePersona.systemPrompt.length > 200 
+            ? '${_activePersona.systemPrompt.substring(0, 200)}...' 
+            : _activePersona.systemPrompt;
+        contextBuffer.writeln('角色设定: $promptPreview');
+      }
+      
+      final context = contextBuffer.toString();
+      final uri = Uri.parse('${config.base}/v1/chat/completions');
+      
+      // ========== 第一步：自由分析（多维度） ==========
+      final step1Body = json.encode({
+        'model': config.model,
+        'messages': [
+          {
+            'role': 'user',
+            'content': '''$context
+
+【可用工具】
+- vision: 用AI分析图片内容（理解、描述、解读图片）
+- ocr: 从图片中精确提取文字
+- search: 联网搜索实时信息
+- draw: 根据描述生成图片
+- answer: 基于已有信息直接回答用户
+- reflect: 深度思考复杂问题
+- search_knowledge: 在用户上传的知识库中搜索
+- read_knowledge: 读取知识库中特定文件的内容
+- read_url: 读取指定网页的详细内容
+
+【请从以下维度分析】
+
+1. **用户意图理解**
+   - 用户真正想要什么？
+   - 用户说的"这个"、"这样"、"那个"指的是什么？
+   - 有没有隐含的需求？
+
+2. **信息缺口分析**
+   - 回答这个问题需要什么信息？
+   - 当前已有的信息够不够？
+   - 如果有图片，是否需要先分析图片才能理解用户意图？
+   - 如果有知识库，是否应该先搜索知识库？
+
+3. **工具选择**
+   - 应该用哪个工具来获取缺失的信息？
+   - 为什么选这个工具而不是其他？
+
+4. **工具调用参数**
+   - 如果用 vision：应该让AI重点分析图片的哪些方面？
+   - 如果用 search：应该搜索什么关键词？（不要用用户原话，要提炼）
+   - 如果用 draw：应该用什么描述来生成图片？
+   - 如果用 answer：基于什么信息来回答？
+
+请详细分析。'''
+          }
+        ],
+        'temperature': 0.3,
+        'max_tokens': 800,
+        'stream': false,
+      });
+      
+      final step1Resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer ${config.key}',
+          'Content-Type': 'application/json',
+        },
+        body: step1Body,
+      ).timeout(const Duration(seconds: 20));
+      
+      if (step1Resp.statusCode != 200) return decision;
+      
+      final step1Data = json.decode(utf8.decode(step1Resp.bodyBytes));
+      final analysis = (step1Data['choices'][0]['message']['content'] ?? '').toString().trim();
+      
+      debugPrint('📝 Step1 Analysis: $analysis');
+      
+      // ========== 第二步：结构化填写 ==========
+      final step2Body = json.encode({
+        'model': config.model,
+        'messages': [
+          {
+            'role': 'user',
+            'content': '''$context'''
+          },
+          {
+            'role': 'assistant',
+            'content': analysis
+          },
+          {
+            'role': 'user',
+            'content': '''根据你的分析，请用以下格式输出（用<<>>标记包裹每个字段的内容）：
+
+<<TOOL>>这里填工具名，只能是以下之一: vision, ocr, search, draw, answer, reflect, search_knowledge, read_url<</TOOL>>
+<<PROMPT>>这里填调用该工具的完整提示词/关键词/指令<</PROMPT>>
+<<REASON>>这里填为什么这样决定<</REASON>>
+
+请严格按照上述格式输出，不要有其他内容。'''
+          }
+        ],
+        'temperature': 0.1,
+        'max_tokens': 500,
+        'stream': false,
+      });
+      
+      final step2Resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer ${config.key}',
+          'Content-Type': 'application/json',
+        },
+        body: step2Body,
+      ).timeout(const Duration(seconds: 15));
+      
+      if (step2Resp.statusCode != 200) return decision;
+      
+      final step2Data = json.decode(utf8.decode(step2Resp.bodyBytes));
+      final structured = (step2Data['choices'][0]['message']['content'] ?? '').toString();
+      
+      debugPrint('📋 Step2 Structured: $structured');
+      
+      // ========== 提取字段 ==========
+      final toolMatch = RegExp(r'<<TOOL>>(.*?)<</TOOL>>', dotAll: true).firstMatch(structured);
+      final promptMatch = RegExp(r'<<PROMPT>>(.*?)<</PROMPT>>', dotAll: true).firstMatch(structured);
+      final reasonMatch = RegExp(r'<<REASON>>(.*?)<</REASON>>', dotAll: true).firstMatch(structured);
+      
+      if (toolMatch != null && promptMatch != null) {
+        final tool = toolMatch.group(1)?.trim() ?? '';
+        final prompt = promptMatch.group(1)?.trim() ?? '';
+        final reason = reasonMatch?.group(1)?.trim() ?? '';
+        
+        final newType = _parseActionType(tool);
+        
+        if (newType != null && prompt.isNotEmpty) {
+          debugPrint('🔧 LLM Decision: $newType');
+          debugPrint('   Prompt: $prompt');
+          debugPrint('   Reason: $reason');
+          _addReasoningStep('🧠 决策: $newType - $reason');
+          
+          return AgentDecision(
+            type: newType,
+            content: newType == AgentActionType.search ? null : prompt,
+            query: newType == AgentActionType.search ? prompt : null,
+            reason: reason,
+            continueAfter: newType != AgentActionType.answer,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('Decision optimization failed: $e');
+    }
+    
+    return decision;
+  }
+  
+  /// 解析工具类型字符串
+  AgentActionType? _parseActionType(String typeStr) {
+    final typeMap = {
+      'vision': AgentActionType.vision,
+      'ocr': AgentActionType.ocr,
+      'search': AgentActionType.search,
+      'draw': AgentActionType.draw,
+      'answer': AgentActionType.answer,
+      'reflect': AgentActionType.reflect,
+      'hypothesize': AgentActionType.hypothesize,
+      'search_knowledge': AgentActionType.search_knowledge,
+      'read_knowledge': AgentActionType.read_knowledge,
+      'read_url': AgentActionType.read_url,
+      'save_file': AgentActionType.save_file,
+      'system_control': AgentActionType.system_control,
+      'take_note': AgentActionType.take_note,
+      'clarify': AgentActionType.clarify,
+    };
+    return typeMap[typeStr.toLowerCase()];
+  }
+
+  /// 使用 LLM 提炼搜索关键词
+  Future<String?> _refineSearchQuery(String originalQuery, String userContext) async {
+    try {
+      final config = _getApiConfig();
+      if (config.base.isEmpty || config.key.isEmpty) return null;
+      
+      final uri = Uri.parse('${config.base}/v1/chat/completions');
+      final body = json.encode({
+        'model': config.model,
+        'messages': [
+          {
+            'role': 'system',
+            'content': '''你是搜索词优化专家。给定原始查询，提取最有效的搜索关键词。
+
+规则：
+1. 提炼核心概念，去除口语化表达
+2. 输出 2-6 个关键词，空格分隔
+3. 保留专业术语、人名、产品名
+4. 去除疑问词、助词、虚词
+5. 如果原始查询已经是好的关键词，直接返回
+
+只输出关键词，不要解释。'''
+          },
+          {
+            'role': 'user',
+            'content': '原始查询: "$originalQuery"\n用户上下文: "$userContext"\n\n提炼后的搜索关键词:'
+          }
+        ],
+        'temperature': 0.1,
+        'max_tokens': 50,
+        'stream': false,
+      });
+      
+      final resp = await http.post(
+        uri,
+        headers: {
+          'Authorization': 'Bearer ${config.key}',
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      ).timeout(const Duration(seconds: 10));
+      
+      if (resp.statusCode == 200) {
+        final data = json.decode(utf8.decode(resp.bodyBytes));
+        final refined = (data['choices'][0]['message']['content'] ?? '').toString().trim();
+        // 验证结果合理性
+        if (refined.isNotEmpty && refined.length < 100 && !refined.contains('\n')) {
+          return refined;
+        }
+      }
+    } catch (e) {
+      debugPrint('Search query refinement failed: $e');
+    }
+    return null;
+  }
+
   /// Use Worker API to semantically parse natural language into a structured AgentDecision
   /// This is smarter than regex because it understands meaning, not just keywords
   Future<AgentDecision?> _parseIntentWithWorker(String rawResponse) async {
@@ -3432,11 +3796,12 @@ $deepReasoningSection
 ### search ${searchAvailable ? "✅ 可用 ($resolvedSearchProvider)" : "❌ 不可用"}
 | 项目 | 说明 |
 |------|------|
-| **输入** | {"type":"search", "query":"搜索关键词", ...} |
+| **输入** | {"type":"search", "query":"提炼的关键词", ...} |
 | **能力** | 联网搜索实时信息（新闻、价格、事件、知识） |
 | **输出** | 多条搜索结果摘要，包含标题、URL、片段 |
 | **失败** | 返回0结果→换关键词；API错误→检查<action_history>后重试 |
 | **边界** | 只返回摘要，详细内容需配合 read_url |
+| **⚠️关键词** | 不要直接用用户原话！要**提炼核心概念**生成高质量搜索词 |
 
 ### recall_search ✅ 可用
 | 项目 | 说明 |
@@ -3760,6 +4125,11 @@ If you write anything other than JSON, the system cannot understand you!
 
 **User: "今天有什么新闻"**
 → {"type":"search","query":"今日新闻 2025年12月","reason":"P1:需实时数据 | P2:关键词含日期更精准 | P3:直接获取用户要的信息✓","confidence":0.9,"continue":true}
+❌ 错误: {"type":"search","query":"今天有什么新闻"} ← 直接用原话，搜索效果差
+
+**User: "你能帮我查一下怎么用Python处理Excel文件吗"**
+→ {"type":"search","query":"Python Excel 读写 pandas openpyxl","reason":"P1:技术问题需搜索 | P2:提炼关键词+技术栈 | P3:获取实用教程✓","confidence":0.85,"continue":true}
+❌ 错误: {"type":"search","query":"你能帮我查一下怎么用Python处理Excel文件吗"} ← 口语化问句无效
 
 **User: "画一只猫"**
 → {"type":"draw","content":"a cute cat, digital art style, warm colors","reason":"P1:用户要图 | P2:已添加风格细节提升质量 | P3:满足用户创作需求✓","confidence":0.95,"continue":false}
@@ -4819,8 +5189,9 @@ $intentHint
     }
 
     // If content is empty but we have an image, provide a default context for the Agent
+    // 注意：这是给 Agent 的指令，不是搜索关键词
     final effectiveUserText = content.isEmpty && currentSessionImagePath != null 
-        ? "Please analyze the image I just sent." 
+        ? "[用户发送了图片，未说明目的，请用 vision 或 ocr 分析图片内容后再决定如何回应]" 
         : content;
 
     // ========== 前置意图预分析：本地优先原则 ==========
@@ -4986,17 +5357,48 @@ $intentHint
           }
         }
 
+        // ========== 决策校验与纠正（LLM 判断） ==========
+        // 使用 LLM 判断 Agent 决策是否合理，必要时自动纠正
+        setState(() => _loadingStatus = '🔍 校验决策...');
+        decision = await _validateAndCorrectDecisionWithLLM(
+          decision: decision,
+          userText: content,
+          hasUnanalyzedImage: currentSessionImagePath != null && 
+              !sessionRefs.any((r) => r.sourceType == 'vision' && r.imageId == currentSessionImagePath),
+          sessionRefs: sessionRefs,
+        );
+
         // B. Act (Execute Decision) - with plan-aware result handling
         bool stepSucceeded = true;
         String stepResult = '';
         
         if (decision.type == AgentActionType.search && decision.query != null) {
           // Action: Search
-          setState(() => _loadingStatus = '正在搜索: ${decision.query}...');
-          debugPrint('Agent searching for: ${decision.query}');
+          String searchQuery = decision.query!;
+          
+          // ========== 智能关键词提炼 ==========
+          // 检测低质量搜索词并自动优化
+          final needsRefinement = _isLowQualityQuery(searchQuery);
+          if (needsRefinement) {
+            final originalQuery = searchQuery; // 保存原始值用于日志
+            debugPrint('⚠️ Low quality query detected: "$searchQuery", refining...');
+            setState(() => _loadingStatus = '正在优化搜索词...');
+            
+            final refinedQuery = await _refineSearchQuery(searchQuery, content);
+            if (refinedQuery != null && refinedQuery.isNotEmpty && refinedQuery != searchQuery) {
+              debugPrint('✅ Refined query: "$originalQuery" → "$refinedQuery"');
+              searchQuery = refinedQuery;
+              
+              // 记录优化过程
+              _addReasoningStep('🔧 搜索词优化: "$originalQuery" → "$refinedQuery"');
+            }
+          }
+          
+          setState(() => _loadingStatus = '正在搜索: $searchQuery...');
+          debugPrint('Agent searching for: $searchQuery');
           
           try {
-            final newRefs = await _refManager.search(decision.query!);
+            final newRefs = await _refManager.search(searchQuery);
             if (newRefs.isNotEmpty) {
               // Deduplicate by URL before adding
               final existingUrls = sessionRefs.map((r) => r.url).toSet();
