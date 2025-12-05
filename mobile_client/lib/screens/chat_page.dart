@@ -2809,21 +2809,25 @@ $refsContext
     required List<ReferenceItem> sessionRefs,
   }) async {
     try {
+      // 深度思考模式下，如果是 hypothesize/reflect 决策，不干预
+      if (_deepReasoningMode) {
+        if (decision.type == AgentActionType.hypothesize || 
+            decision.type == AgentActionType.reflect) {
+          debugPrint('🧠 Deep thinking mode: preserving ${decision.type}');
+          return decision;
+        }
+      }
+      
       final config = _getApiConfig();
       if (config.base.isEmpty || config.key.isEmpty) return decision;
       
-      // 构建完整上下文，每部分都要标识清楚
+      // ========== 构建完整上下文 ==========
       final contextBuffer = StringBuffer();
       
-      // 1. 用户当前请求
-      contextBuffer.writeln('【用户当前请求】');
-      contextBuffer.writeln(userText);
-      contextBuffer.writeln('');
-      
-      // 2. 图片状态
+      // 1. 图片状态（重要，放最前面）
       contextBuffer.writeln('【图片状态】');
       if (hasUnanalyzedImage) {
-        contextBuffer.writeln('用户发送了一张图片，尚未分析');
+        contextBuffer.writeln('⚠️ 用户发送了一张图片，尚未分析！');
       } else if (currentSessionImagePath != null) {
         contextBuffer.writeln('用户发送了图片，已有分析结果');
       } else {
@@ -2831,7 +2835,7 @@ $refsContext
       }
       contextBuffer.writeln('');
       
-      // 3. 对话历史
+      // 2. 对话历史
       contextBuffer.writeln('【对话历史】');
       if (_messages.isNotEmpty) {
         final recentMessages = _messages.length > 6 ? _messages.sublist(_messages.length - 6) : _messages;
@@ -2845,7 +2849,7 @@ $refsContext
       }
       contextBuffer.writeln('');
       
-      // 4. 知识库摘要
+      // 3. 知识库摘要
       contextBuffer.writeln('【知识库】');
       final knowledgeStats = _knowledgeService.getStats();
       if (knowledgeStats['fileCount'] > 0) {
@@ -2862,7 +2866,7 @@ $refsContext
       }
       contextBuffer.writeln('');
       
-      // 5. 已收集的信息（本轮对话中工具执行的结果）
+      // 4. 已收集的信息
       contextBuffer.writeln('【已收集信息】');
       if (sessionRefs.isNotEmpty) {
         final grouped = <String, List<ReferenceItem>>{};
@@ -2886,7 +2890,7 @@ $refsContext
       }
       contextBuffer.writeln('');
       
-      // 6. 当前角色信息
+      // 5. 当前角色信息
       contextBuffer.writeln('【当前角色】');
       contextBuffer.writeln('名称: ${_activePersona.name}');
       if (_activePersona.systemPrompt.isNotEmpty) {
@@ -2895,53 +2899,53 @@ $refsContext
             : _activePersona.systemPrompt;
         contextBuffer.writeln('角色设定: $promptPreview');
       }
+      contextBuffer.writeln('');
+      
+      // 6. 深度思考模式状态
+      if (_deepReasoningMode) {
+        contextBuffer.writeln('【深度思考模式】已启用');
+        contextBuffer.writeln('说明: 如需深度分析，优先使用 reflect 工具');
+        contextBuffer.writeln('');
+      }
       
       final context = contextBuffer.toString();
       final uri = Uri.parse('${config.base}/v1/chat/completions');
       
-      // ========== 第一步：自由分析（多维度） ==========
+      // ========== 第一步：自由分析 ==========
       final step1Body = json.encode({
         'model': config.model,
         'messages': [
           {
-            'role': 'user',
-            'content': '''$context
+            'role': 'system',
+            'content': '''你是智能决策分析器。根据上下文分析用户请求，决定下一步行动。
 
-【可用工具】
-- vision: 用AI分析图片内容（理解、描述、解读图片）
+<context>
+$context
+</context>
+
+<available_tools>
+- vision: 用AI分析图片内容（理解、描述、解读）
 - ocr: 从图片中精确提取文字
-- search: 联网搜索实时信息
-- draw: 根据描述生成图片
-- answer: 基于已有信息直接回答用户
-- reflect: 深度思考复杂问题
-- search_knowledge: 在用户上传的知识库中搜索
-- read_knowledge: 读取知识库中特定文件的内容
-- read_url: 读取指定网页的详细内容
+- search: 联网搜索实时/外部信息
+- draw: 根据描述生成新图片
+- answer: 基于已有信息直接回答
+- reflect: 深度思考/多角度分析
+- search_knowledge: 搜索用户知识库
+- read_knowledge: 读取知识库文件内容
+- read_url: 读取网页详细内容
+</available_tools>'''
+          },
+          {
+            'role': 'user',
+            'content': '''用户请求: "$userText"
 
-【请从以下维度分析】
+请分析：
+1. 用户意图是什么？（"这个""这样"等指代词指什么？）
+2. 需要什么信息才能回答？现有信息够吗？
+3. 应该用哪个工具？为什么选它？
+4. 给这个工具什么提示词/关键词/指令？
 
-1. **用户意图理解**
-   - 用户真正想要什么？
-   - 用户说的"这个"、"这样"、"那个"指的是什么？
-   - 有没有隐含的需求？
-
-2. **信息缺口分析**
-   - 回答这个问题需要什么信息？
-   - 当前已有的信息够不够？
-   - 如果有图片，是否需要先分析图片才能理解用户意图？
-   - 如果有知识库，是否应该先搜索知识库？
-
-3. **工具选择**
-   - 应该用哪个工具来获取缺失的信息？
-   - 为什么选这个工具而不是其他？
-
-4. **工具调用参数**
-   - 如果用 vision：应该让AI重点分析图片的哪些方面？
-   - 如果用 search：应该搜索什么关键词？（不要用用户原话，要提炼）
-   - 如果用 draw：应该用什么描述来生成图片？
-   - 如果用 answer：基于什么信息来回答？
-
-请详细分析。'''
+详细分析：'''
           }
         ],
         'temperature': 0.3,
@@ -2964,32 +2968,47 @@ $refsContext
       final analysis = (step1Data['choices'][0]['message']['content'] ?? '').toString().trim();
       
       debugPrint('📝 Step1 Analysis: $analysis');
+      _addReasoningStep('📝 分析: ${analysis.length > 100 ? analysis.substring(0, 100) + "..." : analysis}');
       
-      // ========== 第二步：结构化填写 ==========
+      // ========== 第二步：结构化输出 ==========
       final step2Body = json.encode({
         'model': config.model,
         'messages': [
           {
-            'role': 'user',
-            'content': '''$context'''
+            'role': 'system',
+            'content': '''你刚才分析了用户请求。现在请将分析结果转换为结构化格式。
+
+你的分析结果:
+$analysis
+
+可用工具: vision, ocr, search, draw, answer, reflect, search_knowledge, read_knowledge, read_url'''
           },
           {
-            'role': 'assistant',
-            'content': analysis
-          },
-          {
             'role': 'user',
-            'content': '''根据你的分析，请用以下格式输出（用<<>>标记包裹每个字段的内容）：
+            'content': '''请用以下标记格式输出（每个字段用<<>>和<</>>包裹）：
 
-<<TOOL>>这里填工具名，只能是以下之一: vision, ocr, search, draw, answer, reflect, search_knowledge, read_url<</TOOL>>
-<<PROMPT>>这里填调用该工具的完整提示词/关键词/指令<</PROMPT>>
-<<REASON>>这里填为什么这样决定<</REASON>>
+<<TOOL>>
+填写工具名（只能是上面列表中的一个）
+<</TOOL>>
 
-请严格按照上述格式输出，不要有其他内容。'''
+<<PROMPT>>
+填写调用该工具的完整提示词/关键词/指令
+- 如果是 vision: 写明要分析图片的哪些方面
+- 如果是 search: 写2-6个精炼的搜索关键词
+- 如果是 draw: 写详细的图片描述
+- 如果是 answer: 可以留空或写回答要点
+- 如果是 reflect: 写要思考的问题/方向
+<</PROMPT>>
+
+<<REASON>>
+填写为什么这样决定（简短说明）
+<</REASON>>
+
+只输出上述格式，不要其他内容。'''
           }
         ],
         'temperature': 0.1,
-        'max_tokens': 500,
+        'max_tokens': 600,
         'stream': false,
       });
       
@@ -3027,12 +3046,15 @@ $refsContext
           debugPrint('   Reason: $reason');
           _addReasoningStep('🧠 决策: $newType - $reason');
           
+          // 深度思考模式下，如果决定 answer，保持原有流程让深度思考检查
+          final shouldContinue = newType != AgentActionType.answer || _deepReasoningMode;
+          
           return AgentDecision(
             type: newType,
             content: newType == AgentActionType.search ? null : prompt,
             query: newType == AgentActionType.search ? prompt : null,
-            reason: reason,
-            continueAfter: newType != AgentActionType.answer,
+            reason: '[LLM-DECISION] $reason',
+            continueAfter: shouldContinue,
           );
         }
       }
