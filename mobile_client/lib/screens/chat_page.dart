@@ -1486,6 +1486,16 @@ $refString
     return (base: effectiveBase, key: _chatKey, model: _summaryModel.isNotEmpty ? _summaryModel : (userChatModel.isNotEmpty ? userChatModel : 'gpt-4o-mini'));
   }
 
+  /// 获取 API 配置（优先 Router，回退到 Chat API）
+  ({String base, String key, String model}) _getApiConfig() {
+    // 优先使用 Router 配置
+    if (_routerKey.isNotEmpty && !_routerBase.contains('your-oneapi-host')) {
+      return (base: _routerBase, key: _routerKey, model: _routerModel.isNotEmpty ? _routerModel : _chatModel);
+    }
+    // 回退到 Chat API
+    return (base: _chatBase, key: _chatKey, model: _chatModel);
+  }
+
   Future<String> _generateSummary(String text, double ratio) async {
     // Use Worker config with fallback chain
     final config = await _getWorkerConfig();
@@ -2864,7 +2874,7 @@ $refsContext
       contextBuffer.writeln('【图片状态】');
       if (hasUnanalyzedImage) {
         contextBuffer.writeln('⚠️ 用户发送了一张图片，尚未分析！');
-      } else if (currentSessionImagePath != null) {
+      } else if (sessionRefs.any((r) => r.sourceType == 'vision' || r.sourceType == 'ocr')) {
         contextBuffer.writeln('用户发送了图片，已有分析结果');
       } else {
         contextBuffer.writeln('本次对话无图片');
@@ -2929,10 +2939,10 @@ $refsContext
       // 5. 当前角色信息
       contextBuffer.writeln('【当前角色】');
       contextBuffer.writeln('名称: ${_activePersona.name}');
-      if (_activePersona.systemPrompt.isNotEmpty) {
-        final promptPreview = _activePersona.systemPrompt.length > 200 
-            ? '${_activePersona.systemPrompt.substring(0, 200)}...' 
-            : _activePersona.systemPrompt;
+      if (_activePersona.prompt.isNotEmpty) {
+        final promptPreview = _activePersona.prompt.length > 200 
+            ? '${_activePersona.prompt.substring(0, 200)}...' 
+            : _activePersona.prompt;
         contextBuffer.writeln('角色设定: $promptPreview');
       }
       contextBuffer.writeln('');
