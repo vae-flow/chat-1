@@ -6731,7 +6731,8 @@ $intentHint
                   url: ref.url,
                   snippet: enhancedSnippet,
                   sourceName: ref.sourceName,
-                  imageId: ref.imageId,
+                  // ✅ 关键修复：使用 currentSessionImagePath 作为 imageId，确保后续检查能匹配
+                  imageId: currentSessionImagePath ?? ref.imageId,
                   sourceType: 'vision',
                 ));
               }
