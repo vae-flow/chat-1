@@ -2799,27 +2799,63 @@ $refsContext
     return false;
   }
 
-  /// 使用 LLM 两步分析用户需求
-  /// 第一步：自由分析需要什么工具和提示词
-  /// 第二步：用标准模板填写，程序提取字段
+  /// 决策校验与修正（规则优先 + LLM 辅助）
+  /// 
+  /// 核心原则：**尊重原始 Agent 决策**，只在明显错误时修正
+  /// 1. 规则检查：用户发图但没用 vision → 强制 vision
+  /// 2. 规则检查：原始决策缺少必要参数 → 尝试补充
+  /// 3. LLM 辅助：只有规则无法判断时才调用 LLM
   Future<AgentDecision> _validateAndCorrectDecisionWithLLM({
     required AgentDecision decision,
     required String userText,
     required bool hasUnanalyzedImage,
     required List<ReferenceItem> sessionRefs,
   }) async {
+    final startTime = DateTime.now();
+    _addReasoningStep('🔍 校验决策: ${decision.type}');
+    
+    // ========== 规则 1：用户发图但没用 vision → 强制 vision ==========
+    if (hasUnanalyzedImage && decision.type != AgentActionType.vision && decision.type != AgentActionType.ocr) {
+      _addReasoningStep('📸 规则修正: 有未分析图片，强制 vision');
+      return AgentDecision(
+        type: AgentActionType.vision,
+        content: '请分析这张图片，结合用户问题: $userText',
+        reason: '[RULE] 用户发送了图片但原始决策 ${decision.type} 未使用 vision',
+        continueAfter: true,
+      );
+    }
+    
+    // ========== 规则 2：原始决策已经是有效工具调用 → 直接使用 ==========
+    // 如果原始决策有明确的工具和参数，尊重原始决策，不再用 LLM 重新分析
+    final hasValidParams = switch (decision.type) {
+      AgentActionType.search => decision.query != null && decision.query!.isNotEmpty,
+      AgentActionType.vision => true, // vision 不需要额外参数
+      AgentActionType.ocr => true,
+      AgentActionType.draw => decision.content != null && decision.content!.isNotEmpty,
+      AgentActionType.read_url => decision.content != null && decision.content!.isNotEmpty,
+      AgentActionType.search_knowledge => decision.content != null && decision.content!.isNotEmpty,
+      AgentActionType.read_knowledge => decision.content != null && decision.content!.isNotEmpty,
+      AgentActionType.hypothesize => true,
+      AgentActionType.reflect => true,
+      AgentActionType.answer => true,
+      _ => decision.content != null,
+    };
+    
+    if (decision.type != AgentActionType.answer && hasValidParams) {
+      final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      _addReasoningStep('✅ 原始决策有效 (${elapsed}ms): ${decision.type}');
+      return decision; // 直接使用原始决策，不调用 LLM
+    }
+    
+    // ========== 规则 3：原始决策是 answer 或缺少参数 → 用 LLM 辅助 ==========
+    _addReasoningStep('🤔 需要 LLM 辅助分析...');
+    
     try {
-      // 深度思考模式下，如果是 hypothesize/reflect 决策，不干预
-      if (_deepReasoningMode) {
-        if (decision.type == AgentActionType.hypothesize || 
-            decision.type == AgentActionType.reflect) {
-          debugPrint('🧠 Deep thinking mode: preserving ${decision.type}');
-          return decision;
-        }
-      }
-      
       final config = _getApiConfig();
-      if (config.base.isEmpty || config.key.isEmpty) return decision;
+      if (config.base.isEmpty || config.key.isEmpty) {
+        _addReasoningStep('⚠️ API 未配置，使用原始决策');
+        return decision;
+      }
       
       // ========== 构建完整上下文 ==========
       final contextBuffer = StringBuffer();
@@ -2901,12 +2937,18 @@ $refsContext
       }
       contextBuffer.writeln('');
       
-      // 6. 深度思考模式状态
+      // 6. 思考模式状态
+      contextBuffer.writeln('【思考模式】');
       if (_deepReasoningMode) {
-        contextBuffer.writeln('【深度思考模式】已启用');
-        contextBuffer.writeln('说明: 如需深度分析，优先使用 reflect 工具');
-        contextBuffer.writeln('');
+        contextBuffer.writeln('🧠 深度思考模式 - 要求：');
+        contextBuffer.writeln('1. 复杂问题需要多角度分析，使用 reflect 工具');
+        contextBuffer.writeln('2. 先发散思考（列出多个维度），再收敛（综合结论）');
+        contextBuffer.writeln('3. 回答前需要自我评估质量');
+        contextBuffer.writeln('4. 标注事实 vs 推测，考虑反面观点');
+      } else {
+        contextBuffer.writeln('普通模式 - 快速决策，选对工具即可');
       }
+      contextBuffer.writeln('');
       
       final context = contextBuffer.toString();
       final uri = Uri.parse('${config.base}/v1/chat/completions');
@@ -2929,7 +2971,8 @@ $context
 - search: 联网搜索实时/外部信息
 - draw: 根据描述生成新图片
 - answer: 基于已有信息直接回答
-- reflect: 深度思考/多角度分析
+- hypothesize: 发散思考，列出多个分析维度/假设
+- reflect: 收敛思考，综合分析，质量自评
 - search_knowledge: 搜索用户知识库
 - read_knowledge: 读取知识库文件内容
 - read_url: 读取网页详细内容
@@ -2940,10 +2983,10 @@ $context
             'content': '''用户请求: "$userText"
 
 请分析：
-1. 用户意图是什么？（"这个""这样"等指代词指什么？）
-2. 需要什么信息才能回答？现有信息够吗？
-3. 应该用哪个工具？为什么选它？
-4. 给这个工具什么提示词/关键词/指令？
+1. **用户意图**：用户真正想要什么？（"这个""这样"等指代词指什么？）
+2. **信息缺口**：需要什么信息？现有的够吗？有图片要先分析吗？有知识库要先搜吗？
+3. **工具选择**：应该用哪个工具？为什么？
+4. **提示词设计**：给这个工具什么具体的提示词/关键词/指令？
 
 详细分析：'''
           }
@@ -2952,6 +2995,9 @@ $context
         'max_tokens': 800,
         'stream': false,
       });
+      
+      setState(() => _loadingStatus = '🔍 决策分析 Step 1/2...');
+      _addReasoningStep('📡 Step 1: 调用 API 分析意图...');
       
       final step1Resp = await http.post(
         uri,
@@ -2962,13 +3008,19 @@ $context
         body: step1Body,
       ).timeout(const Duration(seconds: 20));
       
-      if (step1Resp.statusCode != 200) return decision;
+      if (step1Resp.statusCode != 200) {
+        final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+        _addReasoningStep('❌ Step 1 失败: HTTP ${step1Resp.statusCode} (${elapsed}ms)');
+        debugPrint('Step1 failed: ${step1Resp.statusCode} - ${step1Resp.body}');
+        return decision;
+      }
       
       final step1Data = json.decode(utf8.decode(step1Resp.bodyBytes));
       final analysis = (step1Data['choices'][0]['message']['content'] ?? '').toString().trim();
       
-      debugPrint('📝 Step1 Analysis: $analysis');
-      _addReasoningStep('📝 分析: ${analysis.length > 100 ? analysis.substring(0, 100) + "..." : analysis}');
+      final step1Elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      debugPrint('📝 Step1 Analysis (${step1Elapsed}ms): $analysis');
+      _addReasoningStep('✅ Step 1 完成 (${step1Elapsed}ms): ${analysis.length > 80 ? analysis.substring(0, 80) + "..." : analysis}');
       
       // ========== 第二步：结构化输出 ==========
       final step2Body = json.encode({
@@ -2981,7 +3033,7 @@ $context
 你的分析结果:
 $analysis
 
-可用工具: vision, ocr, search, draw, answer, reflect, search_knowledge, read_knowledge, read_url'''
+可用工具: vision, ocr, search, draw, answer, hypothesize, reflect, search_knowledge, read_knowledge, read_url'''
           },
           {
             'role': 'user',
@@ -2993,11 +3045,16 @@ $analysis
 
 <<PROMPT>>
 填写调用该工具的完整提示词/关键词/指令
-- 如果是 vision: 写明要分析图片的哪些方面
-- 如果是 search: 写2-6个精炼的搜索关键词
-- 如果是 draw: 写详细的图片描述
-- 如果是 answer: 可以留空或写回答要点
-- 如果是 reflect: 写要思考的问题/方向
+- vision: 写明要分析图片的哪些方面
+- ocr: 写要提取文字的重点（如表格、代码等），或留空
+- search: 写2-6个精炼的搜索关键词
+- draw: 写详细的图片描述
+- answer: 可以留空或写回答要点
+- hypothesize: 写要发散思考的问题，列出多个维度/假设
+- reflect: 写要收敛分析的内容，或写质量自评要点
+- search_knowledge: 写要搜索的关键词
+- read_knowledge: 写要读取的文件ID
+- read_url: 写要读取的完整URL
 <</PROMPT>>
 
 <<REASON>>
@@ -3012,6 +3069,10 @@ $analysis
         'stream': false,
       });
       
+      setState(() => _loadingStatus = '🔍 决策分析 Step 2/2...');
+      _addReasoningStep('📡 Step 2: 生成结构化决策...');
+      
+      final step2Start = DateTime.now();
       final step2Resp = await http.post(
         uri,
         headers: {
@@ -3021,12 +3082,18 @@ $analysis
         body: step2Body,
       ).timeout(const Duration(seconds: 15));
       
-      if (step2Resp.statusCode != 200) return decision;
+      if (step2Resp.statusCode != 200) {
+        final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+        _addReasoningStep('❌ Step 2 失败: HTTP ${step2Resp.statusCode} (${elapsed}ms)');
+        debugPrint('Step2 failed: ${step2Resp.statusCode} - ${step2Resp.body}');
+        return decision;
+      }
       
       final step2Data = json.decode(utf8.decode(step2Resp.bodyBytes));
       final structured = (step2Data['choices'][0]['message']['content'] ?? '').toString();
       
-      debugPrint('📋 Step2 Structured: $structured');
+      final step2Elapsed = DateTime.now().difference(step2Start).inMilliseconds;
+      debugPrint('📋 Step2 Structured (${step2Elapsed}ms): $structured');
       
       // ========== 提取字段 ==========
       final toolMatch = RegExp(r'<<TOOL>>(.*?)<</TOOL>>', dotAll: true).firstMatch(structured);
@@ -3041,10 +3108,12 @@ $analysis
         final newType = _parseActionType(tool);
         
         if (newType != null && prompt.isNotEmpty) {
+          final totalElapsed = DateTime.now().difference(startTime).inMilliseconds;
           debugPrint('🔧 LLM Decision: $newType');
           debugPrint('   Prompt: $prompt');
           debugPrint('   Reason: $reason');
-          _addReasoningStep('🧠 决策: $newType - $reason');
+          _addReasoningStep('✅ 决策完成 (${totalElapsed}ms): $newType');
+          _addReasoningStep('📋 提示词: ${prompt.length > 60 ? prompt.substring(0, 60) + "..." : prompt}');
           
           // 深度思考模式下，如果决定 answer，保持原有流程让深度思考检查
           final shouldContinue = newType != AgentActionType.answer || _deepReasoningMode;
@@ -3056,12 +3125,24 @@ $analysis
             reason: '[LLM-DECISION] $reason',
             continueAfter: shouldContinue,
           );
+        } else {
+          _addReasoningStep('⚠️ 解析失败: tool=$tool, prompt长度=${prompt.length}');
+          if (newType == null) {
+            _addReasoningStep('❌ 未知工具类型: $tool');
+          }
         }
+      } else {
+        _addReasoningStep('⚠️ 格式解析失败，未找到 TOOL/PROMPT 标记');
+        debugPrint('Parse failed. Structured output: $structured');
       }
-    } catch (e) {
-      debugPrint('Decision optimization failed: $e');
+    } catch (e, stackTrace) {
+      final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      _addReasoningStep('❌ 决策分析异常 (${elapsed}ms): $e');
+      debugPrint('Decision optimization failed: $e\n$stackTrace');
     }
     
+    // 回退到原始决策
+    _addReasoningStep('⚠️ 使用原始决策: ${decision.type}');
     return decision;
   }
   
@@ -4153,6 +4234,12 @@ If you write anything other than JSON, the system cannot understand you!
 → {"type":"search","query":"Python Excel 读写 pandas openpyxl","reason":"P1:技术问题需搜索 | P2:提炼关键词+技术栈 | P3:获取实用教程✓","confidence":0.85,"continue":true}
 ❌ 错误: {"type":"search","query":"你能帮我查一下怎么用Python处理Excel文件吗"} ← 口语化问句无效
 
+**User: "这张图里有什么"** (用户发了图片)
+→ {"type":"vision","content":"请详细描述图片内容，包括场景、物体、颜色、布局","reason":"P1:用户发图要分析 | P2:vision提供综合理解 | P3:全面描述满足需求✓","confidence":0.95,"continue":true}
+
+**User: "这张截图里的代码有什么问题"** (用户发了代码截图)
+→ {"type":"vision","content":"请分析图片中的代码，指出语法错误、逻辑问题和改进建议","reason":"P1:代码审查需求 | P2:vision分析+针对性提示词 | P3:专业审查帮助用户✓","confidence":0.9,"continue":true}
+
 **User: "画一只猫"**
 → {"type":"draw","content":"a cute cat, digital art style, warm colors","reason":"P1:用户要图 | P2:已添加风格细节提升质量 | P3:满足用户创作需求✓","confidence":0.95,"continue":false}
 
@@ -4169,7 +4256,10 @@ If you write anything other than JSON, the system cannot understand you!
 → {"type":"system_control","content":"screenshot","reason":"P1:截图需求 | P2:system_control.screenshot专为此设计 | P3:立即完成✓","confidence":1.0,"continue":false}
 
 **User: "分析一下这个问题"**
-→ {"type":"reflect","content":"让我从多角度分析这个问题...","reason":"P1:用户需要深度分析 | P2:reflect适合复杂推理,后续可能需要search验证 | P3:为决策奠定思考基础✓","confidence":0.7,"continue":true}
+→ {"type":"hypothesize","content":"请从技术可行性、成本效益、用户体验、长期维护四个维度分析","reason":"P1:复杂分析需多角度 | P2:hypothesize生成多维度 | P3:为深入分析奠定基础✓","confidence":0.8,"continue":true}
+
+**User: "总结一下刚才的讨论"**
+→ {"type":"reflect","content":"综合之前的分析结果，识别核心结论和待解决问题","reason":"P1:需要收敛总结 | P2:reflect整合观点 | P3:给用户清晰结论✓","confidence":0.85,"continue":true}
 
 **User: "你好"**
 → {"type":"answer","content":"你好呀！有什么可以帮你的？","reason":"P1:简单社交问候 | P2:无需工具,纯对话即可 | P3:友好回应建立连接✓","confidence":1.0,"continue":false}
@@ -5244,6 +5334,11 @@ $intentHint
 
     try {
       while (steps < maxSteps) {
+        // 🔍 显示当前步骤
+        final stepStartTime = DateTime.now();
+        _addReasoningStep('━━━ Step ${steps + 1}/$maxSteps ━━━');
+        debugPrint('\n========== AGENT STEP ${steps + 1}/$maxSteps ==========');
+        
         AgentDecision decision;
         bool isFromPlan = false;
         int planStepIndex = -1;
@@ -5330,7 +5425,9 @@ $intentHint
           // ===== NORMAL MODE: Get next decision from API =====
           // This also handles replanning after plan completion or failure
           setState(() => _loadingStatus = '正在规划 (Step ${steps + 1})...');
+          _addReasoningStep('📡 调用 Agent 规划 API...');
           decision = await _planAgentStep(effectiveUserText, sessionRefs, sessionDecisions, currentSessionImagePath: currentSessionImagePath);
+          _addReasoningStep('📋 原始决策: ${decision.type}');
           
           // If a new plan was created, reset the step counter
           if (_currentPlan != null && _currentPlanStep == 0) {
@@ -5341,7 +5438,7 @@ $intentHint
           }
         }
         
-        sessionDecisions.add(decision); // Record decision
+        // 注意：决策记录移到深度思考检查和校验之后，确保记录的是实际执行的决策
         
         // 使用 AgentDecision 的诊断 getter 进行日志记录
         if (decision.needsMoreWork) {
@@ -5379,20 +5476,66 @@ $intentHint
           }
         }
 
+        // ========== 深度思考模式：检查是否需要强制阶段 ==========
+        // 条件：深度思考开启 + 已有信息收集(steps>0) + Agent 想直接回答
+        // 如果满足，强制执行 hypothesize/reflect，跳过决策分析，节省 API 调用
+        bool skipDecisionAnalysis = false;
+        if (_deepReasoningMode && steps > 0 && decision.type == AgentActionType.answer) {
+          // 统计当前轮次的思考阶段完成情况
+          final hypothesizeCount = sessionDecisions.where((d) => d.type == AgentActionType.hypothesize).length;
+          final reflectCount = sessionDecisions.where((d) => d.type == AgentActionType.reflect).length;
+          
+          if (hypothesizeCount == 0) {
+            // Phase 1 未完成，强制 hypothesize
+            _addReasoningStep('🧠 深度思考 Phase 1: Agent 想直接回答，强制发散思考');
+            decision = AgentDecision(
+              type: AgentActionType.hypothesize,
+              content: '基于用户问题"$content"和已收集的信息，从多个角度分析，生成 3-6 个不同的分析维度',
+              reason: '[DEEP_P1_FORCE] 深度思考强制发散',
+              continueAfter: true,
+            );
+            skipDecisionAnalysis = true;
+          } else if (reflectCount == 0) {
+            // Phase 2 未完成，强制 reflect
+            _addReasoningStep('🧠 深度思考 Phase 2: Agent 想直接回答，强制收敛思考');
+            decision = AgentDecision(
+              type: AgentActionType.reflect,
+              content: '审视之前的发散思考结果，进行正交化收敛，识别核心视角',
+              reason: '[DEEP_P2_FORCE] 深度思考强制收敛',
+              continueAfter: true,
+            );
+            skipDecisionAnalysis = true;
+          }
+          // 如果 Phase 1 和 2 都完成了，不跳过决策分析，让 Agent 正常回答
+        }
+        
         // ========== 决策校验与纠正（LLM 判断） ==========
-        // 使用 LLM 判断 Agent 决策是否合理，必要时自动纠正
-        setState(() => _loadingStatus = '🔍 校验决策...');
-        decision = await _validateAndCorrectDecisionWithLLM(
-          decision: decision,
-          userText: content,
-          hasUnanalyzedImage: currentSessionImagePath != null && 
-              !sessionRefs.any((r) => r.sourceType == 'vision' && r.imageId == currentSessionImagePath),
-          sessionRefs: sessionRefs,
-        );
+        // 如果不是强制阶段，使用 LLM 判断 Agent 决策是否合理
+        if (!skipDecisionAnalysis) {
+          setState(() => _loadingStatus = '🔍 校验决策...');
+          decision = await _validateAndCorrectDecisionWithLLM(
+            decision: decision,
+            userText: content,
+            hasUnanalyzedImage: currentSessionImagePath != null && 
+                !sessionRefs.any((r) => r.sourceType == 'vision' && r.imageId == currentSessionImagePath),
+            sessionRefs: sessionRefs,
+          );
+        }
+        
+        // ✅ 在所有决策修改完成后，记录最终决策
+        sessionDecisions.add(decision);
+        _addReasoningStep('📝 记录决策: ${decision.type}');
 
         // B. Act (Execute Decision) - with plan-aware result handling
         bool stepSucceeded = true;
         String stepResult = '';
+        
+        // 🔍 显示即将执行的工具
+        final toolName = decision.type.toString().split('.').last;
+        final toolParam = decision.query ?? decision.content ?? '';
+        final paramPreview = toolParam.length > 50 ? '${toolParam.substring(0, 50)}...' : toolParam;
+        _addReasoningStep('🔧 执行: $toolName${paramPreview.isNotEmpty ? " ($paramPreview)" : ""}');
+        debugPrint('🔧 Executing: $toolName with param: $paramPreview');
         
         if (decision.type == AgentActionType.search && decision.query != null) {
           // Action: Search
@@ -6778,19 +6921,62 @@ $intentHint
         }
         else if (decision.type == AgentActionType.reflect) {
           // Action: Self-Reflection (Deep Think)
-          final reflectionSummary = decision.content ?? '自我审视当前方法';
+          final prompt = decision.content ?? '自我审视当前方法';
           final isQualityReview = decision.reason?.contains('[QUALITY_REVIEW]') == true ||
-                                   reflectionSummary.contains('verdict:') ||
-                                   reflectionSummary.contains('质量自评');
+                                   prompt.contains('verdict:') ||
+                                   prompt.contains('质量自评') ||
+                                   prompt.contains('质量评估');
           
           // Show the actual thought process in UI
           setState(() => _loadingStatus = isQualityReview 
               ? '📊 质量评估中...' 
-              : '🤔 反思: ${reflectionSummary.length > 15 ? reflectionSummary.substring(0, 15) + "..." : reflectionSummary}');
-          debugPrint('Agent reflecting${isQualityReview ? " (QUALITY REVIEW)" : ""}: ${decision.content}');
+              : '🤔 反思中...');
+          debugPrint('Agent reflecting${isQualityReview ? " (QUALITY REVIEW)" : ""}: $prompt');
           
-          // Artificial delay to let user see the thinking state
-          await Future.delayed(Duration(milliseconds: isQualityReview ? 800 : 500));
+          // 用 prompt 让 LLM 生成反思内容
+          String reflectionSummary = prompt;
+          try {
+            final config = _getApiConfig();
+            final uri = Uri.parse('${config.base}/v1/chat/completions');
+            
+            // 构建完整反思上下文：包括假设分析、已收集信息等
+            final hypothesisRefs = sessionRefs.where((r) => r.sourceType == 'hypothesis').map((r) => '【假设分析】\n${r.snippet}').join('\n');
+            final otherRefs = sessionRefs.where((r) => r.sourceType != 'hypothesis').map((r) => '【${r.title}】${r.snippet.length > 150 ? r.snippet.substring(0, 150) + "..." : r.snippet}').join('\n\n');
+            final fullContext = hypothesisRefs.isNotEmpty ? '$hypothesisRefs\n\n【其他收集信息】\n$otherRefs' : otherRefs;
+            
+            final resp = await http.post(
+              uri,
+              headers: {
+                'Authorization': 'Bearer ${config.key}',
+                'Content-Type': 'application/json',
+              },
+              body: json.encode({
+                'model': config.model,
+                'messages': [
+                  {'role': 'system', 'content': '''你是一个深度思考助手。请进行反思分析。
+
+【已收集的全部信息】
+$fullContext
+
+${isQualityReview ? "这是质量评估。请综合评估信息完整性、分析深度、结论可靠性。在结尾给出 verdict: pass 或 verdict: retry" : "请进行正交化收敛，识别核心视角，综合分析。"}'''},
+                  {'role': 'user', 'content': prompt},
+                ],
+                'temperature': 0.4,
+                'max_tokens': 800,
+              }),
+            ).timeout(const Duration(seconds: 15));
+            
+            if (resp.statusCode == 200) {
+              final data = json.decode(utf8.decode(resp.bodyBytes));
+              reflectionSummary = data['choices'][0]['message']['content'] ?? prompt;
+            }
+          } catch (e) {
+            debugPrint('Reflect generation failed: $e');
+            _addReasoningStep('❌ 收敛思考 API 失败: $e');
+          }
+          
+          // Artificial delay
+          await Future.delayed(const Duration(milliseconds: 300));
           
           // Record reflection in action history with insights
           sessionDecisions.last = AgentDecision(
@@ -6916,17 +7102,74 @@ ${!hasProblemIdentified && !hasActionSuggestion ? '1. 将反思的洞察应用�
         }
         else if (decision.type == AgentActionType.hypothesize) {
           // Action: Multi-Hypothesis Generation (Deep Think)
-          final hypothesesList = decision.hypotheses ?? ['默认方案'];
-          final selected = decision.selectedHypothesis ?? hypothesesList.first;
+          // 如果有预设的 hypotheses 列表就用，否则用 LLM 生成
+          List<String> hypothesesList;
+          String selected;
+          
+          if (decision.hypotheses != null && decision.hypotheses!.isNotEmpty) {
+            hypothesesList = decision.hypotheses!;
+            selected = decision.selectedHypothesis ?? hypothesesList.first;
+          } else {
+            // 用 content 作为 prompt，让 LLM 生成 hypotheses
+            final prompt = decision.content ?? '请从多个角度分析这个问题';
+            setState(() => _loadingStatus = '💡 正在发散思考...');
+            
+            try {
+              final config = _getApiConfig();
+              final uri = Uri.parse('${config.base}/v1/chat/completions');
+              
+              // 构建已收集信息的摘要
+              final collectedInfo = sessionRefs.map((r) => '【${r.title}】${r.snippet.length > 200 ? r.snippet.substring(0, 200) + "..." : r.snippet}').join('\n\n');
+              
+              final resp = await http.post(
+                uri,
+                headers: {
+                  'Authorization': 'Bearer ${config.key}',
+                  'Content-Type': 'application/json',
+                },
+                body: json.encode({
+                  'model': config.model,
+                  'messages': [
+                    {'role': 'system', 'content': '''你是一个多角度思考助手。请基于已收集的信息，针对问题生成3-6个不同的分析维度或假设。
+
+【已收集的信息】
+$collectedInfo
+
+要求：
+1. 每个维度用一行，不要编号
+2. 维度要尽量正交/独立
+3. 至少包含一个反面/质疑视角'''},
+                    {'role': 'user', 'content': prompt},
+                  ],
+                  'temperature': 0.7,
+                  'max_tokens': 500,
+                }),
+              ).timeout(const Duration(seconds: 15));
+              
+              if (resp.statusCode == 200) {
+                final data = json.decode(utf8.decode(resp.bodyBytes));
+                final text = data['choices'][0]['message']['content'] ?? '';
+                hypothesesList = text.split('\n').where((l) => l.trim().isNotEmpty).map((l) => l.replaceAll(RegExp(r'^[\d\.\-\*]+\s*'), '').trim()).toList();
+                if (hypothesesList.isEmpty) hypothesesList = [prompt];
+              } else {
+                hypothesesList = [prompt];
+              }
+            } catch (e) {
+              debugPrint('Hypothesize generation failed: $e');
+              _addReasoningStep('❌ 发散思考 API 失败: $e');
+              hypothesesList = [decision.content ?? '默认分析维度'];
+            }
+            selected = hypothesesList.first;
+          }
           
           setState(() {
             _loadingStatus = '💡 假设: ${selected.length > 15 ? selected.substring(0, 15) + "..." : selected}';
             _currentReasoning = '生成假设方案...';
           });
-          debugPrint('Agent hypothesizing: ${decision.hypotheses}');
+          debugPrint('Agent hypothesizing: $hypothesesList');
           
           // Artificial delay
-          await Future.delayed(const Duration(milliseconds: 1200));
+          await Future.delayed(const Duration(milliseconds: 500));
           
           // 更新推理链
           if (mounted) {
@@ -7358,13 +7601,14 @@ $reviewContent
               // （实际上不删除，让Agent能看到之前的失败）
             }
             
-            // 执行强制提示
+            // 执行强制提示 - 直接修改当前决策，不要 continue 回循环头
             if (forcePrompt != null) {
               debugPrint('🧠 DEEP THINK FORCE: $phaseTag');
-              setState(() => _loadingStatus = '🧠 深度思考：${phaseTag.replaceAll(RegExp(r'[\[\]_]'), ' ').trim()}');
+              final phaseDesc = phaseTag.contains('P1') ? '发散思考' : (phaseTag.contains('P2') ? '正交化收敛' : '质量评估');
+              _addReasoningStep('🧠 深度思考强制: $phaseDesc');
+              setState(() => _loadingStatus = '🧠 深度思考：$phaseDesc');
               
-              // ⚠️ 重要：移除之前添加的未执行决策，因为我们要拦截它
-              // 当前 decision 已在循环开始时被 add 到 sessionDecisions，需要移除
+              // ⚠️ 重要：移除之前添加的未执行决策，因为我们要替换它
               if (sessionDecisions.isNotEmpty) {
                 sessionDecisions.removeLast();
               }
@@ -7377,14 +7621,146 @@ $reviewContent
                 sourceType: phaseTag.contains('P4') ? 'quality_review_prompt' : 'deep_phase_force',
               ));
               
-              sessionDecisions.add(AgentDecision(
-                type: AgentActionType.reflect,
-                content: '深度思考模式强制：$phaseTag',
-                reason: '$phaseTag 强制执行',
-              ));
+              // 🔧 关键修复：直接修改当前决策为强制的思考类型
+              // Phase 1 需要 hypothesize，Phase 2/4 需要 reflect
+              final forceType = phaseTag.contains('P1') 
+                  ? AgentActionType.hypothesize 
+                  : AgentActionType.reflect;
               
+              decision = AgentDecision(
+                type: forceType,
+                content: forcePrompt,
+                reason: '$phaseTag 强制执行',
+                continueAfter: true,
+              );
+              
+              // 添加到决策历史
+              sessionDecisions.add(decision);
+              
+              // 不要 continue！让执行流程继续，会自动匹配到 hypothesize/reflect 分支
+              // 但需要跳出当前的 answer 分支，使用 goto 模拟
               steps++;
-              continue;
+              
+              // 直接执行对应的思考工具
+              if (forceType == AgentActionType.hypothesize) {
+                // 执行 hypothesize
+                final prompt = forcePrompt;
+                setState(() => _loadingStatus = '💡 正在发散思考...');
+                
+                // 构建已收集信息的摘要
+                final collectedInfo = sessionRefs.map((r) => '【${r.title}】${r.snippet.length > 200 ? r.snippet.substring(0, 200) + "..." : r.snippet}').join('\n\n');
+                
+                List<String> hypothesesList;
+                try {
+                  final config = _getApiConfig();
+                  final uri = Uri.parse('${config.base}/v1/chat/completions');
+                  final resp = await http.post(
+                    uri,
+                    headers: {
+                      'Authorization': 'Bearer ${config.key}',
+                      'Content-Type': 'application/json',
+                    },
+                    body: json.encode({
+                      'model': config.model,
+                      'messages': [
+                        {'role': 'system', 'content': '''你是一个多角度思考助手。请基于已收集的信息生成3-6个不同的分析维度或假设。
+
+【已收集的信息】
+$collectedInfo
+
+要求：每个维度用一行，不要编号。维度要尽量正交/独立。'''},
+                        {'role': 'user', 'content': prompt},
+                      ],
+                      'temperature': 0.7,
+                      'max_tokens': 500,
+                    }),
+                  ).timeout(const Duration(seconds: 15));
+                  
+                  if (resp.statusCode == 200) {
+                    final data = json.decode(utf8.decode(resp.bodyBytes));
+                    final text = data['choices'][0]['message']['content'] ?? '';
+                    hypothesesList = text.split('\n').where((l) => l.trim().isNotEmpty).map((l) => l.replaceAll(RegExp(r'^[\d\.\-\*]+\s*'), '').trim()).toList();
+                    if (hypothesesList.isEmpty) hypothesesList = ['默认分析维度'];
+                  } else {
+                    hypothesesList = ['默认分析维度'];
+                  }
+                } catch (e) {
+                  debugPrint('Forced hypothesize failed: $e');
+                  _addReasoningStep('❌ 强制发散思考失败: $e');
+                  hypothesesList = ['默认分析维度'];
+                }
+                
+                // 记录结果
+                sessionRefs.add(ReferenceItem(
+                  title: '💡 假设分析',
+                  url: 'internal://hypothesis/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: '【候选方案】\n${hypothesesList.asMap().entries.map((e) => '${e.key + 1}. ${e.value}').join('\n')}',
+                  sourceName: 'DeepThink',
+                  sourceType: 'hypothesis',
+                ));
+                
+                _addReasoningStep('💡 发散思考: 生成 ${hypothesesList.length} 个维度');
+                continue;
+              } else {
+                // 执行 reflect
+                setState(() => _loadingStatus = '🤔 正在收敛思考...');
+                
+                // 构建完整反思上下文
+                final hypothesisRefs = sessionRefs.where((r) => r.sourceType == 'hypothesis').map((r) => '【假设分析】\n${r.snippet}').join('\n');
+                final otherRefs = sessionRefs.where((r) => r.sourceType != 'hypothesis').map((r) => '【${r.title}】${r.snippet.length > 150 ? r.snippet.substring(0, 150) + "..." : r.snippet}').join('\n\n');
+                final fullContext = hypothesisRefs.isNotEmpty ? '$hypothesisRefs\n\n【其他收集信息】\n$otherRefs' : otherRefs;
+                
+                String reflectionResult;
+                try {
+                  final config = _getApiConfig();
+                  final uri = Uri.parse('${config.base}/v1/chat/completions');
+                  
+                  final resp = await http.post(
+                    uri,
+                    headers: {
+                      'Authorization': 'Bearer ${config.key}',
+                      'Content-Type': 'application/json',
+                    },
+                    body: json.encode({
+                      'model': config.model,
+                      'messages': [
+                        {'role': 'system', 'content': '''你是一个深度思考助手。请进行正交化收敛分析。
+
+【已收集的全部信息】
+$fullContext
+
+请识别核心视角，综合分析，给出收敛后的结论。'''},
+                        {'role': 'user', 'content': forcePrompt},
+                      ],
+                      'temperature': 0.4,
+                      'max_tokens': 800,
+                    }),
+                  ).timeout(const Duration(seconds: 15));
+                  
+                  if (resp.statusCode == 200) {
+                    final data = json.decode(utf8.decode(resp.bodyBytes));
+                    reflectionResult = data['choices'][0]['message']['content'] ?? '反思完成';
+                  } else {
+                    reflectionResult = '反思完成';
+                  }
+                } catch (e) {
+                  debugPrint('Forced reflect failed: $e');
+                  _addReasoningStep('❌ 强制收敛思考失败: $e');
+                  reflectionResult = '反思完成';
+                }
+                
+                // 记录结果
+                sessionRefs.add(ReferenceItem(
+                  title: '💭 反思结论',
+                  url: 'internal://reflect/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: reflectionResult,
+                  sourceName: 'DeepThink',
+                  sourceType: phaseTag.contains('P4') ? 'quality_review' : 'reflection_insight',
+                ));
+                
+                _addReasoningStep('💭 收敛思考完成');
+                continue;
+              }
             }
             
             // 检查反思评估结果，如果通过则标记
@@ -7614,8 +7990,6 @@ $reviewContent
           await _performChatRequest(content, localImage: currentSessionImagePath, references: sessionRefs, manageSendingState: false);
           break;
         }
-        
-        steps++;
       }
       
       if (steps >= maxSteps) {
