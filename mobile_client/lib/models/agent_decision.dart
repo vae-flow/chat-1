@@ -81,6 +81,7 @@ class AgentDecision {
   final AgentActionType type;
   final String? content; // For answer text or draw prompt or vision analysis prompt or file content
   final String? query;   // For search query
+  final String? purpose; // For search: why searching (e.g., "获取用户询问的价格数据")
   final String? filename; // For save_file action
   final String? reason;  // The "Thought" - why this decision was made
   final List<Map<String, dynamic>>? reminders; // Preserved feature
@@ -103,6 +104,7 @@ class AgentDecision {
     required this.type,
     this.content,
     this.query,
+    this.purpose,
     this.filename,
     this.reason,
     this.reminders,
@@ -141,6 +143,7 @@ class AgentDecision {
       type: type,
       content: json['content'],
       query: json['query'],
+      purpose: json['purpose'],
       filename: json['filename'],
       reason: json['reason'],
       reminders: json['reminders'] != null 

@@ -106,7 +106,7 @@ class ReferenceManager {
         'Content-Type': 'application/json',
       },
       body: json.encode({
-        'query': query,
+        'query': query,  // 直接用 Agent 给的 query，不修改
         'numResults': 8,
         'useAutoprompt': true,
         'contents': {'text': true} 
@@ -138,9 +138,6 @@ class ReferenceManager {
   Future<List<ReferenceItem>> _searchYou(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('You.com Key not configured');
     
-    // Fix: Use 'count' parameter as per documentation
-    // Ensure URL handles /v1 if not present in baseUrl, or assume user configures it.
-    // We will use the baseUrl as provided, assuming it includes /v1 if needed (updated in Settings).
     final uri = Uri.parse('$baseUrl/search?query=${Uri.encodeComponent(query)}&count=8');
     
     final resp = await _httpWithRetry(() => http.get(
@@ -196,6 +193,7 @@ class ReferenceManager {
 
   Future<List<ReferenceItem>> _searchBrave(String query, String key, String baseUrl) async {
     if (key.isEmpty) throw Exception('Brave Key not configured');
+    
     final uri = Uri.parse('$baseUrl/res/v1/web/search?q=${Uri.encodeComponent(query)}&count=8');
     
     final resp = await _httpWithRetry(() => http.get(

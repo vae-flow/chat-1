@@ -2766,45 +2766,47 @@ $refsContext
     }
   }
 
-  /// 检测搜索词质量是否过低
-  /// 低质量搜索词特征：太长、是完整问句、包含无意义词、不是关键词形式
+  /// 检测搜索词质量是否过低（适配 Exa 语义搜索）
+  /// 
+  /// 注意：Exa 是语义搜索，理解自然语言！
+  /// ✅ 好的查询：完整问句、自然语言描述、带上下文
+  /// ❌ 低质量：太短、明显不是搜索意图（如"分析图片"）、纯系统指令
   bool _isLowQualityQuery(String query) {
-    final trimmed = query.trim();
+    final trimmed = query.trim().toLowerCase();
     
-    // 1. 太长（超过 50 字符通常不是好的搜索词）
-    if (trimmed.length > 50) return true;
+    // 1. 太短（少于 5 字符，没有实际意义）
+    if (trimmed.length < 5) return true;
     
-    // 2. 是完整的问句形式（包含疑问词+问号）
-    final questionPatterns = [
-      RegExp(r'^(你|我|他|她|它|这|那|什么|怎么|如何|为什么|哪|谁|几|多少).*[？?]$'),
-      RegExp(r'^(can|could|would|should|will|what|how|why|where|when|who|which|is|are|do|does).*\??$', caseSensitive: false),
-      RegExp(r'(please|help me|can you|could you|would you)', caseSensitive: false),
+    // 2. 明显不是搜索意图 - 应该用其他工具
+    final nonSearchPhrases = [
+      'analyze image', 'analyze the image', '分析图片', '看图', '图片内容',
+      'vision', 'ocr', '识别', '图里', '图中', '截图',
+      'draw', 'generate image', '画', '生成图',
     ];
-    for (var pattern in questionPatterns) {
+    for (var phrase in nonSearchPhrases) {
+      if (trimmed.contains(phrase)) {
+        debugPrint('⚠️ Query "$query" contains non-search phrase "$phrase"');
+        return true;
+      }
+    }
+    
+    // 3. 纯系统指令（不是用户真正想搜的）
+    final pureSystemPatterns = [
+      RegExp(r'^(please |help |can you |could you )', caseSensitive: false),
+      RegExp(r'^(请|帮我|能不能|可以)$'), // 纯指令词，没有实际内容
+    ];
+    for (var pattern in pureSystemPatterns) {
       if (pattern.hasMatch(trimmed)) return true;
     }
     
-    // 3. 包含明显的系统指令（不是真正的搜索词）
-    final systemPhrases = [
-      '用户发送', '图片', 'analyze', 'image', 'sent', '请用', 'vision', 'ocr',
-      '帮我', '能不能', '可以吗', '好吗', '请问',
-    ];
-    int systemPhraseCount = 0;
-    for (var phrase in systemPhrases) {
-      if (trimmed.toLowerCase().contains(phrase.toLowerCase())) {
-        systemPhraseCount++;
-      }
-    }
-    if (systemPhraseCount >= 2) return true;
+    // 4. 空洞的泛泛查询（没有具体主题）
+    final vaguePhrases = ['something', 'anything', 'stuff', '东西', '什么的', '之类的'];
+    if (vaguePhrases.any((p) => trimmed == p)) return true;
     
-    // 4. 纯口语化表达（没有实际搜索价值的词）
-    final fluffWords = ['一下', '看看', '找找', '查查', '帮我', '给我', '想要', '需要', '应该'];
-    int fluffCount = 0;
-    for (var word in fluffWords) {
-      if (trimmed.contains(word)) fluffCount++;
-    }
-    // 如果超过一半是口语词，质量低
-    if (fluffCount >= 2 && trimmed.length < 20) return true;
+    // Exa 语义搜索可以处理：
+    // ✅ 完整问句 - 不再判断为低质量
+    // ✅ 超过 50 字符 - 不再判断为低质量
+    // ✅ 包含"请问"等词 - 不再判断为低质量
     
     return false;
   }
@@ -3178,31 +3180,40 @@ $analysis
   }
 
   /// 使用 LLM 提炼搜索关键词
-  Future<String?> _refineSearchQuery(String originalQuery, String userContext) async {
+  /// [originalQuery] 原始搜索词
+  /// [userContext] 用户原始输入
+  /// [searchPurpose] Agent 说明的搜索目的（可选）
+  Future<String?> _refineSearchQuery(String originalQuery, String userContext, {String? searchPurpose}) async {
     try {
       final config = _getApiConfig();
       if (config.base.isEmpty || config.key.isEmpty) return null;
       
       final uri = Uri.parse('${config.base}/v1/chat/completions');
+      
+      // 构建提示词，包含 purpose 以提高优化质量
+      final purposeHint = searchPurpose != null && searchPurpose.isNotEmpty 
+          ? '\n搜索目的: $searchPurpose' 
+          : '';
+      
       final body = json.encode({
         'model': config.model,
         'messages': [
           {
             'role': 'system',
-            'content': '''你是搜索词优化专家。给定原始查询，提取最有效的搜索关键词。
+            'content': '''你是搜索词优化专家。搜索引擎是Exa（语义搜索），理解自然语言。
 
 规则：
-1. 提炼核心概念，去除口语化表达
-2. 输出 2-6 个关键词，空格分隔
-3. 保留专业术语、人名、产品名
-4. 去除疑问词、助词、虚词
-5. 如果原始查询已经是好的关键词，直接返回
+1. 基于搜索目的，生成清晰的**自然语言查询句**
+2. 保留关键实体（人名、产品名、书名等）
+3. 添加必要的上下文（如日期、领域）
+4. 如果原始查询已经很好，直接返回
+5. 如果搜索目的是"分析图片"之类的，返回 [INVALID] 表示不应搜索
 
-只输出关键词，不要解释。'''
+只输出优化后的查询句，不要解释。'''
           },
           {
             'role': 'user',
-            'content': '原始查询: "$originalQuery"\n用户上下文: "$userContext"\n\n提炼后的搜索关键词:'
+            'content': '原始查询: "$originalQuery"\n用户上下文: "$userContext"$purposeHint\n\n优化后的自然语言查询:'
           }
         ],
         'temperature': 0.1,
@@ -3909,13 +3920,28 @@ $deepReasoningSection
 ### search ${searchAvailable ? "✅ 可用 ($resolvedSearchProvider)" : "❌ 不可用"}
 | 项目 | 说明 |
 |------|------|
-| **输入** | {"type":"search", "query":"提炼的关键词", ...} |
+| **输入** | {"type":"search", "query":"搜索关键词", "purpose":"缺少的具体信息", ...} |
 | **能力** | 联网搜索实时信息（新闻、价格、事件、知识） |
 | **输出** | 多条搜索结果摘要，包含标题、URL、片段 |
 | **失败** | 返回0结果→换关键词；API错误→检查<action_history>后重试 |
 | **边界** | 只返回摘要，详细内容需配合 read_url |
-| **⚠️关键词** | 不要直接用用户原话！要**提炼核心概念**生成高质量搜索词 |
-| **🚫禁止** | 不要用"分析图片"、"请看图"等词搜索！图片分析用vision/ocr |
+
+**⚠️ search 决策流程（必须遵循）：**
+1. **意图识别**: 用户想知道什么？
+2. **信息缺失分析**: 我缺少什么**具体信息**才能回答？（如：xxx的价格、xxx的位置、xxx的发布日期）
+3. **purpose**: 填写缺少的信息，如"比特币当前价格"、"润玉是哪部剧的角色"
+4. **query**: **自然语言描述你要找的内容**（Exa是语义搜索，理解自然语言！）
+
+**✅ 正确的 query 示例：**
+- "今天比特币的实时价格" ← 自然语言，Exa能理解
+- "润玉是哪部电视剧里的角色" ← 完整问句更好
+- "小说《三体》最近有没有更新新章节" ← 带上下文的完整描述
+- "凌寒这个角色在小说里的结局是什么" ← 结合上下文
+
+**❌ 错误示例：**
+- purpose="分析图片" → 图片用vision，不是search！
+- purpose="回答用户问题" → 太笼统！要具体说缺什么信息
+- query="比特币 价格 今天" → 碎片关键词不如自然语言！
 
 ### recall_search ✅ 可用
 | 项目 | 说明 |
@@ -4238,12 +4264,10 @@ If you write anything other than JSON, the system cannot understand you!
 ## ✅ EXAMPLE OUTPUTS (copy these patterns!)
 
 **User: "今天有什么新闻"**
-→ {"type":"search","query":"今日新闻 2025年12月","reason":"P1:需实时数据 | P2:关键词含日期更精准 | P3:直接获取用户要的信息✓","confidence":0.9,"continue":true}
-❌ 错误: {"type":"search","query":"今天有什么新闻"} ← 直接用原话，搜索效果差
+→ {"type":"search","query":"今天2025年12月的重要新闻有哪些","purpose":"今日重要新闻","reason":"P1:需实时数据 | P2:自然语言+日期更精准 | P3:直接获取用户要的信息✓","confidence":0.9,"continue":true}
 
 **User: "你能帮我查一下怎么用Python处理Excel文件吗"**
-→ {"type":"search","query":"Python Excel 读写 pandas openpyxl","reason":"P1:技术问题需搜索 | P2:提炼关键词+技术栈 | P3:获取实用教程✓","confidence":0.85,"continue":true}
-❌ 错误: {"type":"search","query":"你能帮我查一下怎么用Python处理Excel文件吗"} ← 口语化问句无效
+→ {"type":"search","query":"如何用Python读写和处理Excel文件，推荐的库有哪些","purpose":"Python处理Excel的方法和库","reason":"P1:技术问题需搜索 | P2:自然语言描述需求 | P3:获取实用教程✓","confidence":0.85,"continue":true}
 
 **User: "这张图里有什么"** (用户发了图片)
 → {"type":"vision","content":"请详细描述图片内容，包括场景、物体、颜色、布局","reason":"P1:用户发图要分析 | P2:vision提供综合理解 | P3:全面描述满足需求✓","confidence":0.95,"continue":true}
@@ -4283,14 +4307,14 @@ If you write anything other than JSON, the system cannot understand you!
 → {"type":"answer","content":"好的，关于第二点...（基于刚才分析的内容展开）","reason":"P1:用户想深入了解之前分析的某个点 | P2:对话历史中有完整分析,直接展开 | P3:延续上下文✓","confidence":1.0,"continue":false}
 
 **User: "润玉是谁？"** ← 这才是真正需要搜索的情况
-→ {"type":"search","query":"润玉 角色 人物","reason":"P1:用户询问不了解的人物 | P2:对话历史无相关信息,需要搜索 | P3:获取信息后可回答✓","confidence":0.8,"continue":true}
+→ {"type":"search","query":"润玉是哪部电视剧里的什么角色","purpose":"润玉这个人物的背景信息","reason":"P1:用户询问不了解的人物 | P2:对话历史无相关信息,需要搜索 | P3:获取信息后可回答✓","confidence":0.8,"continue":true}
 
 ## ✅ MULTI-STEP DECISION EXAMPLES (CRITICAL!)
 
 **Scenario: User asks "今天比特币价格多少"**
 
 *Step 1 - Observations empty:*
-→ {"type":"search","query":"比特币价格 今天 2024年12月","reason":"P1:用户需要实时价格数据 | P2:search是获取实时信息的最佳工具,已加日期限定 | P3:高质量搜索将直接提供所需数据✓","confidence":0.9,"continue":true}
+→ {"type":"search","query":"今天2024年12月比特币的实时价格是多少","purpose":"比特币当前价格","reason":"P1:用户需要实时价格数据 | P2:search获取实时信息 | P3:自然语言query更精准✓","confidence":0.9,"continue":true}
 
 *Step 2 - Observations now contain search results with price info:*
 → {"type":"answer","content":"根据最新搜索结果，比特币今天的价格是...","reason":"P1:用户要价格信息 | P2:已有充分数据,所有可用工具已发挥作用 | P3:可综合回答满足用户✓","confidence":0.95,"continue":false}
@@ -4620,6 +4644,7 @@ Each step adds to your knowledge - USE IT to make SMARTER decisions.
           final decisionJson = json.encode({
             'type': d.type.name,
             'query': d.query,
+            'purpose': d.purpose, // 搜索目的
             'content': d.content,
             'filename': d.filename,
             'reason': d.reason?.replaceAll(RegExp(r'\[RESULT:[^\]]+\]'), '').trim(),
@@ -5551,27 +5576,91 @@ $intentHint
         if (decision.type == AgentActionType.search && decision.query != null) {
           // Action: Search
           String searchQuery = decision.query!;
+          final searchPurpose = decision.purpose ?? '未说明';
+          
+          // 日志：显示搜索目的
+          debugPrint('🔍 Search purpose: $searchPurpose');
+          debugPrint('🔍 Search query: $searchQuery');
+          
+          // ========== 图片相关搜索拦截 ==========
+          // 如果 purpose 或 query 明显是图片分析任务，直接跳过搜索
+          final imageRelatedPatterns = ['图片', '分析图', '看图', '图中', '图里', '截图', 'analyze image', 'image analysis'];
+          final isImageRelated = imageRelatedPatterns.any((p) => 
+              searchPurpose.toLowerCase().contains(p) || searchQuery.toLowerCase().contains(p));
+          
+          if (isImageRelated) {
+            debugPrint('🚫 Search blocked: image-related task detected. purpose="$searchPurpose", query="$searchQuery"');
+            _addReasoningStep('🚫 搜索被拦截: 图片相关任务应使用 vision，不是 search');
+            
+            sessionRefs.add(ReferenceItem(
+              title: '🚫 搜索请求被拦截',
+              url: 'internal://feedback/search-blocked/${DateTime.now().millisecondsSinceEpoch}',
+              snippet: '检测到图片相关的搜索请求（purpose="$searchPurpose"）。图片分析请使用 vision 工具，不是 search。',
+              sourceName: 'System',
+              sourceType: 'feedback',
+            ));
+            
+            sessionDecisions.last = AgentDecision(
+              type: AgentActionType.search,
+              query: searchQuery,
+              purpose: searchPurpose,
+              reason: '${decision.reason} [BLOCKED: Image-related task should use vision]',
+              continueAfter: true, // 让 Agent 重新决策
+            );
+            
+            steps++;
+            continue;
+          }
           
           // ========== 智能关键词提炼 ==========
           // 检测低质量搜索词并自动优化
           final needsRefinement = _isLowQualityQuery(searchQuery);
           if (needsRefinement) {
             final originalQuery = searchQuery; // 保存原始值用于日志
-            debugPrint('⚠️ Low quality query detected: "$searchQuery", refining...');
+            debugPrint('⚠️ Low quality query detected: "$searchQuery", refining with purpose: $searchPurpose');
             setState(() => _loadingStatus = '正在优化搜索词...');
             
-            final refinedQuery = await _refineSearchQuery(searchQuery, content);
-            if (refinedQuery != null && refinedQuery.isNotEmpty && refinedQuery != searchQuery) {
-              debugPrint('✅ Refined query: "$originalQuery" → "$refinedQuery"');
-              searchQuery = refinedQuery;
+            try {
+              // 传入 purpose 帮助优化搜索词
+              final refinedQuery = await _refineSearchQuery(searchQuery, content, searchPurpose: searchPurpose);
               
-              // 记录优化过程
-              _addReasoningStep('🔧 搜索词优化: "$originalQuery" → "$refinedQuery"');
+              // 检查是否返回 [INVALID]，表示不应该搜索
+              if (refinedQuery != null && refinedQuery.contains('[INVALID]')) {
+                debugPrint('🚫 Search rejected by optimizer: purpose "$searchPurpose" is not suitable for search');
+                _addReasoningStep('🚫 搜索被拒绝: "$searchPurpose" 不应使用搜索（应使用 vision）');
+                
+                sessionRefs.add(ReferenceItem(
+                  title: '🚫 搜索请求被拒绝',
+                  url: 'internal://feedback/search-rejected/${DateTime.now().millisecondsSinceEpoch}',
+                  snippet: '搜索目的 "$searchPurpose" 不适合使用搜索工具。如果需要分析图片，请使用 vision 工具。',
+                  sourceName: 'System',
+                  sourceType: 'feedback',
+                ));
+                
+                steps++;
+                continue; // 跳过搜索，让 Agent 重新决策
+              }
+              
+              // 优化成功：使用新 query
+              if (refinedQuery != null && refinedQuery.isNotEmpty && refinedQuery != searchQuery) {
+                debugPrint('✅ Refined query: "$originalQuery" → "$refinedQuery"');
+                searchQuery = refinedQuery;
+                _addReasoningStep('🔧 搜索词优化: "$originalQuery" → "$refinedQuery"');
+              } 
+              // 优化失败或返回相同：记录警告，但继续用原 query 尝试
+              else {
+                debugPrint('⚠️ Refinement returned null/empty/same, using original low-quality query: "$searchQuery"');
+                _addReasoningStep('⚠️ 搜索词优化失败，使用原始查询');
+              }
+            } catch (refineError) {
+              // 优化过程出错：记录错误，继续用原 query
+              debugPrint('❌ Query refinement failed: $refineError, using original query');
+              _addReasoningStep('⚠️ 搜索词优化出错，使用原始查询');
             }
           }
           
           setState(() => _loadingStatus = '正在搜索: $searchQuery...');
-          debugPrint('Agent searching for: $searchQuery');
+          debugPrint('Agent searching for: $searchQuery (purpose: $searchPurpose)');
           
           try {
             final newRefs = await _refManager.search(searchQuery);
@@ -7384,17 +7473,20 @@ $collectedInfo
           
           // ========== 深度思考模式：强制4阶段流程 ==========
           if (_deepReasoningMode && steps < maxSteps - 2 && !isSimpleGreeting) {
-            // 辅助函数：判断是否是Agent真正的决策（排除系统生成的）
-            bool isAgentDecision(AgentDecision d) {
+            // 辅助函数：判断决策是否应该被计入阶段完成度
+            // 注意：[DEEP_P*_FORCE] 强制执行的结果也要计入，因为它们确实执行了对应的思考工具！
+            bool isCountableDecision(AgentDecision d) {
               final reason = d.reason ?? '';
+              // 这些是纯系统反馈/占位符，不应计入
               if (reason.startsWith('[FEEDBACK]')) return false;
-              if (reason.startsWith('[DEEP_')) return false;
               if (reason.startsWith('[AUTO-INFERRED]')) return false;
               if (reason.startsWith('[PLAN')) return false;
               if (reason.startsWith('[REGEX-FALLBACK]')) return false;
               if (reason.startsWith('[GREETING]')) return false;
               if (reason.startsWith('[DEFAULT FALLBACK]')) return false;
               if (reason.startsWith('[API FALLBACK]')) return false;
+              // [DEEP_P*_FORCE] 强制执行的结果应该被计入！它们真的执行了 hypothesize/reflect
+              // [RETRY_ROUND] 也应该计入
               return true;
             }
             
@@ -7419,7 +7511,7 @@ $collectedInfo
             int agentAnswerCount = 0;
             for (int i = 0; i < sessionDecisions.length; i++) {
               final d = sessionDecisions[i];
-              if (!isCurrentRound(i) || !isAgentDecision(d)) continue;
+              if (!isCurrentRound(i) || !isCountableDecision(d)) continue;
               if (d.type == AgentActionType.hypothesize) agentHypothesizeCount++;
               if (d.type == AgentActionType.reflect) agentReflectCount++;
               if (d.type == AgentActionType.answer) agentAnswerCount++;
@@ -7433,14 +7525,27 @@ $collectedInfo
             final retryCount = currentRound;
             
             // 检查**当前轮次**是否有反思评估结果
-            // 简化逻辑：只看最新的 quality_review，如果是 pass 就通过
-            final qualityReviews = sessionRefs.where((r) => 
-              r.sourceType == 'quality_review' && r.url.contains('deep-review')).toList();
-            final hasQualityReview = qualityReviews.isNotEmpty;
+            // 简化方法：检查当前轮次是否有 Phase 4 的 reflect 决策（reason 包含 [DEEP_P4_FORCE]）
+            // 因为 Phase 4 执行后会添加 quality_review 到 sessionRefs
+            final hasPhase4InCurrentRound = sessionDecisions
+                .asMap()
+                .entries
+                .where((e) => isCurrentRound(e.key) && 
+                              e.value.type == AgentActionType.reflect &&
+                              (e.value.reason?.contains('[DEEP_P4_FORCE]') == true ||
+                               e.value.reason?.contains('[QUALITY_REVIEW]') == true))
+                .isNotEmpty;
+            
+            // 获取最新的 quality_review（如果有）
+            final qualityReviews = sessionRefs.where((r) => r.sourceType == 'quality_review').toList();
+            final hasQualityReview = hasPhase4InCurrentRound && qualityReviews.isNotEmpty;
             final lastReviewRef = qualityReviews.isNotEmpty 
                 ? qualityReviews.last 
                 : ReferenceItem(title: '', url: '', snippet: '', sourceName: '', sourceType: '');
-            final reviewPassed = lastReviewRef.snippet.contains('verdict: pass');
+            // 宽松匹配：忽略大小写和空格
+            final reviewPassed = lastReviewRef.snippet.toLowerCase().contains('verdict') && 
+                (lastReviewRef.snippet.toLowerCase().contains('pass') || 
+                 lastReviewRef.snippet.contains('通过'));
             
             // 统计**当前轮次**各阶段强制提示次数（防死循环）
             int phase1PromptCount = 0;
@@ -7479,7 +7584,7 @@ $collectedInfo
             else if (agentHypothesizeCount > 0 && agentReflectCount == 0 && phase2PromptCount < 2) {
               // 获取之前的 hypothesize 结果
               final hypothesizeResults = sessionDecisions
-                  .where((d) => d.type == AgentActionType.hypothesize && isAgentDecision(d))
+                  .where((d) => d.type == AgentActionType.hypothesize && isCountableDecision(d))
                   .map((d) => d.hypotheses?.join(', ') ?? d.content ?? '')
                   .join('\n');
               
@@ -7503,9 +7608,13 @@ $hypothesizeResults
 ❌ 直接 answer 将被拒绝，必须先完成此阶段。''';
             }
             // ====== Phase 3: 综合回答 ======
-            // 如果已完成P1+P2，且还没添加过 Phase 3 指导，则注入指导
-            final hasPhase3Guide = sessionRefs.any((r) => r.sourceType == 'deep_phase3_guide');
-            final shouldShowPhase3Guide = agentHypothesizeCount > 0 && agentReflectCount > 0 && !hasPhase3Guide && !reviewPassed;
+            // 如果已完成P1+P2，且**当前轮次**还没添加过 Phase 3 指导，则注入指导
+            // 检查方法：URL 中的轮次标记或时间戳在当前轮次内
+            final phase3GuidesInCurrentRound = sessionRefs.where((r) => 
+                r.sourceType == 'deep_phase3_guide' && 
+                r.url.contains('round$currentRound')).toList();
+            final hasPhase3GuideInCurrentRound = phase3GuidesInCurrentRound.isNotEmpty;
+            final shouldShowPhase3Guide = agentHypothesizeCount > 0 && agentReflectCount > 0 && !hasPhase3GuideInCurrentRound && !reviewPassed;
             
             if (shouldShowPhase3Guide) {
               // 获取之前的分析结论
@@ -7514,8 +7623,8 @@ $hypothesizeResults
               
               // 注入 Phase 3 指导：必须综合利用之前分析
               sessionRefs.add(ReferenceItem(
-                title: '📝 Phase 3: 综合回答指导',
-                url: 'internal://deep-think/phase3/${DateTime.now().millisecondsSinceEpoch}',
+                title: '📝 Phase 3: 综合回答指导 (轮次$currentRound)',
+                url: 'internal://deep-think/phase3/round$currentRound/${DateTime.now().millisecondsSinceEpoch}',
                 snippet: '''[DEEP THINK Phase 3/4: 综合回答]
 
 你已完成发散和收敛分析。现在必须基于之前的分析给出高质量回答。
@@ -7553,7 +7662,7 @@ $reflectResults
             if (agentHypothesizeCount > 0 && agentReflectCount > 0 && agentAnswerCount > 0 && !hasQualityReview && phase4PromptCount < 2 && forcePrompt == null) {
               // 获取之前的answer内容
               final lastAnswer = sessionDecisions.lastWhere(
-                (d) => d.type == AgentActionType.answer && isAgentDecision(d),
+                (d) => d.type == AgentActionType.answer && isCountableDecision(d),
                 orElse: () => AgentDecision(type: AgentActionType.answer, content: ''),
               );
               
