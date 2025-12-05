@@ -9872,12 +9872,17 @@ $fullContext
                                   return Container(
                                     width: 200, height: 100,
                                     color: Colors.grey[300],
-                                    child: const Column(
+                                    child: Column(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        Icon(Icons.broken_image, color: Colors.grey),
-                                        SizedBox(height: 4),
-                                        Text('图片已失效', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                        const Icon(Icons.broken_image, color: Colors.grey),
+                                        const SizedBox(height: 4),
+                                        const Text('图片已失效', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          '(已发送给AI分析)',
+                                          style: TextStyle(fontSize: 9, color: Colors.grey[500]),
+                                        ),
                                       ],
                                     ),
                                   );
